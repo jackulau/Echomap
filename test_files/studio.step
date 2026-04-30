@@ -1,0 +1,211 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('Recording Studio 6m x 5m x 3m with booth partition'),'2;1');
+FILE_NAME('studio.step','2025-01-01',('EchoMap'),('EchoMap'),'','EchoMap','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+/* Main room: 6x5x3 box */
+/* Partition wall at x=4, z=0..2.5, height 2.8m, thickness 0.15m */
+/* ===== MAIN ROOM POINTS ===== */
+#10=CARTESIAN_POINT('',(0.,0.,0.));
+#11=CARTESIAN_POINT('',(6.,0.,0.));
+#12=CARTESIAN_POINT('',(6.,0.,5.));
+#13=CARTESIAN_POINT('',(0.,0.,5.));
+#14=CARTESIAN_POINT('',(0.,3.,0.));
+#15=CARTESIAN_POINT('',(6.,3.,0.));
+#16=CARTESIAN_POINT('',(6.,3.,5.));
+#17=CARTESIAN_POINT('',(0.,3.,5.));
+/* Vertex points - main room */
+#20=VERTEX_POINT('',#10);
+#21=VERTEX_POINT('',#11);
+#22=VERTEX_POINT('',#12);
+#23=VERTEX_POINT('',#13);
+#24=VERTEX_POINT('',#14);
+#25=VERTEX_POINT('',#15);
+#26=VERTEX_POINT('',#16);
+#27=VERTEX_POINT('',#17);
+/* Main room edges */
+#30=EDGE_CURVE('',#20,#21,$,.T.);
+#31=EDGE_CURVE('',#21,#22,$,.T.);
+#32=EDGE_CURVE('',#22,#23,$,.T.);
+#33=EDGE_CURVE('',#23,#20,$,.T.);
+#34=EDGE_CURVE('',#24,#25,$,.T.);
+#35=EDGE_CURVE('',#25,#26,$,.T.);
+#36=EDGE_CURVE('',#26,#27,$,.T.);
+#37=EDGE_CURVE('',#27,#24,$,.T.);
+#38=EDGE_CURVE('',#20,#24,$,.T.);
+#39=EDGE_CURVE('',#21,#25,$,.T.);
+#40=EDGE_CURVE('',#22,#26,$,.T.);
+#41=EDGE_CURVE('',#23,#27,$,.T.);
+/* Oriented edges - floor */
+#50=ORIENTED_EDGE('',*,*,#30,.T.);
+#51=ORIENTED_EDGE('',*,*,#31,.T.);
+#52=ORIENTED_EDGE('',*,*,#32,.T.);
+#53=ORIENTED_EDGE('',*,*,#33,.T.);
+/* Oriented edges - ceiling */
+#54=ORIENTED_EDGE('',*,*,#37,.F.);
+#55=ORIENTED_EDGE('',*,*,#36,.F.);
+#56=ORIENTED_EDGE('',*,*,#35,.F.);
+#57=ORIENTED_EDGE('',*,*,#34,.F.);
+/* Oriented edges - walls */
+#58=ORIENTED_EDGE('',*,*,#30,.T.);
+#59=ORIENTED_EDGE('',*,*,#39,.T.);
+#60=ORIENTED_EDGE('',*,*,#34,.F.);
+#61=ORIENTED_EDGE('',*,*,#38,.F.);
+#62=ORIENTED_EDGE('',*,*,#31,.T.);
+#63=ORIENTED_EDGE('',*,*,#40,.T.);
+#64=ORIENTED_EDGE('',*,*,#35,.F.);
+#65=ORIENTED_EDGE('',*,*,#39,.F.);
+#66=ORIENTED_EDGE('',*,*,#32,.T.);
+#67=ORIENTED_EDGE('',*,*,#41,.T.);
+#68=ORIENTED_EDGE('',*,*,#36,.F.);
+#69=ORIENTED_EDGE('',*,*,#40,.F.);
+#70=ORIENTED_EDGE('',*,*,#33,.T.);
+#71=ORIENTED_EDGE('',*,*,#38,.T.);
+#72=ORIENTED_EDGE('',*,*,#37,.F.);
+#73=ORIENTED_EDGE('',*,*,#41,.F.);
+/* Edge loops */
+#80=EDGE_LOOP('',(#50,#51,#52,#53));
+#81=EDGE_LOOP('',(#54,#55,#56,#57));
+#82=EDGE_LOOP('',(#58,#59,#60,#61));
+#83=EDGE_LOOP('',(#62,#63,#64,#65));
+#84=EDGE_LOOP('',(#66,#67,#68,#69));
+#85=EDGE_LOOP('',(#70,#71,#72,#73));
+/* Face bounds */
+#90=FACE_OUTER_BOUND('',#80,.T.);
+#91=FACE_OUTER_BOUND('',#81,.T.);
+#92=FACE_OUTER_BOUND('',#82,.T.);
+#93=FACE_OUTER_BOUND('',#83,.T.);
+#94=FACE_OUTER_BOUND('',#84,.T.);
+#95=FACE_OUTER_BOUND('',#85,.T.);
+/* Directions */
+#200=DIRECTION('',(0.,1.,0.));
+#201=DIRECTION('',(0.,-1.,0.));
+#202=DIRECTION('',(0.,0.,-1.));
+#203=DIRECTION('',(1.,0.,0.));
+#204=DIRECTION('',(0.,0.,1.));
+#205=DIRECTION('',(-1.,0.,0.));
+/* Axis placements */
+#210=AXIS2_PLACEMENT_3D('',#10,#200,#203);
+#211=AXIS2_PLACEMENT_3D('',#14,#201,#203);
+#212=AXIS2_PLACEMENT_3D('',#10,#202,#203);
+#213=AXIS2_PLACEMENT_3D('',#11,#203,#200);
+#214=AXIS2_PLACEMENT_3D('',#12,#204,#203);
+#215=AXIS2_PLACEMENT_3D('',#13,#205,#200);
+/* Planes */
+#220=PLANE('',#210);
+#221=PLANE('',#211);
+#222=PLANE('',#212);
+#223=PLANE('',#213);
+#224=PLANE('',#214);
+#225=PLANE('',#215);
+/* Main room faces */
+#230=ADVANCED_FACE('Floor',(#90),#220,.T.);
+#231=ADVANCED_FACE('Ceiling',(#91),#221,.T.);
+#232=ADVANCED_FACE('South Wall',(#92),#222,.T.);
+#233=ADVANCED_FACE('East Wall',(#93),#223,.T.);
+#234=ADVANCED_FACE('North Wall',(#94),#224,.T.);
+#235=ADVANCED_FACE('West Wall',(#95),#225,.T.);
+/* ===== PARTITION WALL ===== */
+/* Partition: x=4..4.15, y=0..2.8, z=0..2.5 */
+#300=CARTESIAN_POINT('',(4.,0.,0.));
+#301=CARTESIAN_POINT('',(4.15,0.,0.));
+#302=CARTESIAN_POINT('',(4.15,0.,2.5));
+#303=CARTESIAN_POINT('',(4.,0.,2.5));
+#304=CARTESIAN_POINT('',(4.,2.8,0.));
+#305=CARTESIAN_POINT('',(4.15,2.8,0.));
+#306=CARTESIAN_POINT('',(4.15,2.8,2.5));
+#307=CARTESIAN_POINT('',(4.,2.8,2.5));
+#310=VERTEX_POINT('',#300);
+#311=VERTEX_POINT('',#301);
+#312=VERTEX_POINT('',#302);
+#313=VERTEX_POINT('',#303);
+#314=VERTEX_POINT('',#304);
+#315=VERTEX_POINT('',#305);
+#316=VERTEX_POINT('',#306);
+#317=VERTEX_POINT('',#307);
+/* Partition edges */
+#320=EDGE_CURVE('',#310,#311,$,.T.);
+#321=EDGE_CURVE('',#311,#312,$,.T.);
+#322=EDGE_CURVE('',#312,#313,$,.T.);
+#323=EDGE_CURVE('',#313,#310,$,.T.);
+#324=EDGE_CURVE('',#314,#315,$,.T.);
+#325=EDGE_CURVE('',#315,#316,$,.T.);
+#326=EDGE_CURVE('',#316,#317,$,.T.);
+#327=EDGE_CURVE('',#317,#314,$,.T.);
+#328=EDGE_CURVE('',#310,#314,$,.T.);
+#329=EDGE_CURVE('',#311,#315,$,.T.);
+#330=EDGE_CURVE('',#312,#316,$,.T.);
+#331=EDGE_CURVE('',#313,#317,$,.T.);
+/* Partition oriented edges - front face (z faces) */
+#340=ORIENTED_EDGE('',*,*,#320,.T.);
+#341=ORIENTED_EDGE('',*,*,#329,.T.);
+#342=ORIENTED_EDGE('',*,*,#324,.F.);
+#343=ORIENTED_EDGE('',*,*,#328,.F.);
+/* back face */
+#344=ORIENTED_EDGE('',*,*,#322,.T.);
+#345=ORIENTED_EDGE('',*,*,#331,.T.);
+#346=ORIENTED_EDGE('',*,*,#326,.F.);
+#347=ORIENTED_EDGE('',*,*,#330,.F.);
+/* left face (x=4) */
+#348=ORIENTED_EDGE('',*,*,#323,.T.);
+#349=ORIENTED_EDGE('',*,*,#328,.T.);
+#350=ORIENTED_EDGE('',*,*,#327,.F.);
+#351=ORIENTED_EDGE('',*,*,#331,.F.);
+/* right face (x=4.15) */
+#352=ORIENTED_EDGE('',*,*,#321,.T.);
+#353=ORIENTED_EDGE('',*,*,#330,.T.);
+#354=ORIENTED_EDGE('',*,*,#325,.F.);
+#355=ORIENTED_EDGE('',*,*,#329,.F.);
+/* top face */
+#356=ORIENTED_EDGE('',*,*,#324,.T.);
+#357=ORIENTED_EDGE('',*,*,#325,.T.);
+#358=ORIENTED_EDGE('',*,*,#326,.T.);
+#359=ORIENTED_EDGE('',*,*,#327,.T.);
+/* bottom face */
+#360=ORIENTED_EDGE('',*,*,#320,.T.);
+#361=ORIENTED_EDGE('',*,*,#321,.T.);
+#362=ORIENTED_EDGE('',*,*,#322,.T.);
+#363=ORIENTED_EDGE('',*,*,#323,.T.);
+/* Partition edge loops */
+#370=EDGE_LOOP('',(#340,#341,#342,#343));
+#371=EDGE_LOOP('',(#344,#345,#346,#347));
+#372=EDGE_LOOP('',(#348,#349,#350,#351));
+#373=EDGE_LOOP('',(#352,#353,#354,#355));
+#374=EDGE_LOOP('',(#356,#357,#358,#359));
+#375=EDGE_LOOP('',(#360,#361,#362,#363));
+/* Partition face bounds */
+#380=FACE_OUTER_BOUND('',#370,.T.);
+#381=FACE_OUTER_BOUND('',#371,.T.);
+#382=FACE_OUTER_BOUND('',#372,.T.);
+#383=FACE_OUTER_BOUND('',#373,.T.);
+#384=FACE_OUTER_BOUND('',#374,.T.);
+#385=FACE_OUTER_BOUND('',#375,.T.);
+/* Partition planes - reuse existing directions */
+#390=AXIS2_PLACEMENT_3D('',#300,#202,#203);
+#391=AXIS2_PLACEMENT_3D('',#302,#204,#203);
+#392=AXIS2_PLACEMENT_3D('',#300,#205,#200);
+#393=AXIS2_PLACEMENT_3D('',#301,#203,#200);
+#394=AXIS2_PLACEMENT_3D('',#304,#200,#203);
+#395=AXIS2_PLACEMENT_3D('',#300,#201,#203);
+#396=PLANE('',#390);
+#397=PLANE('',#391);
+#398=PLANE('',#392);
+#399=PLANE('',#393);
+#400=PLANE('',#394);
+#401=PLANE('',#395);
+/* Partition faces */
+#410=ADVANCED_FACE('Partition Front',(#380),#396,.T.);
+#411=ADVANCED_FACE('Partition Back',(#381),#397,.T.);
+#412=ADVANCED_FACE('Partition Left',(#382),#398,.T.);
+#413=ADVANCED_FACE('Partition Right',(#383),#399,.T.);
+#414=ADVANCED_FACE('Partition Top',(#384),#400,.T.);
+#415=ADVANCED_FACE('Partition Bottom',(#385),#401,.T.);
+/* Shells */
+#420=CLOSED_SHELL('Main Room',(#230,#231,#232,#233,#234,#235));
+#421=CLOSED_SHELL('Partition',(#410,#411,#412,#413,#414,#415));
+#430=MANIFOLD_SOLID_BREP('Studio Room',#420);
+#431=MANIFOLD_SOLID_BREP('Booth Partition',#421);
+ENDSEC;
+END-ISO-10303-21;

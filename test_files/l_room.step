@@ -1,0 +1,164 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('L-Shaped Room 8m x 6m x 3m with 3x3 cutout'),'2;1');
+FILE_NAME('l_room.step','2025-01-01',('EchoMap'),('EchoMap'),'','EchoMap','');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+/* L-shaped room: 8x6x3 with a 3x3 cutout in bottom-right
+   Top-down (XZ plane):
+   (0,6)-----(8,6)
+     |         |
+     |    (5,3)+(8,3)
+     |    |
+   (0,0)-(5,0)
+*/
+/* Cartesian points - 12 corners (6 floor + 6 ceiling) */
+#10=CARTESIAN_POINT('',(0.,0.,0.));
+#11=CARTESIAN_POINT('',(5.,0.,0.));
+#12=CARTESIAN_POINT('',(5.,0.,3.));
+#13=CARTESIAN_POINT('',(8.,0.,3.));
+#14=CARTESIAN_POINT('',(8.,0.,6.));
+#15=CARTESIAN_POINT('',(0.,0.,6.));
+#16=CARTESIAN_POINT('',(0.,3.,0.));
+#17=CARTESIAN_POINT('',(5.,3.,0.));
+#18=CARTESIAN_POINT('',(5.,3.,3.));
+#19=CARTESIAN_POINT('',(8.,3.,3.));
+#20=CARTESIAN_POINT('',(8.,3.,6.));
+#21=CARTESIAN_POINT('',(0.,3.,6.));
+/* Vertex points */
+#30=VERTEX_POINT('',#10);
+#31=VERTEX_POINT('',#11);
+#32=VERTEX_POINT('',#12);
+#33=VERTEX_POINT('',#13);
+#34=VERTEX_POINT('',#14);
+#35=VERTEX_POINT('',#15);
+#36=VERTEX_POINT('',#16);
+#37=VERTEX_POINT('',#17);
+#38=VERTEX_POINT('',#18);
+#39=VERTEX_POINT('',#19);
+#40=VERTEX_POINT('',#20);
+#41=VERTEX_POINT('',#21);
+/* Edge curves - floor perimeter */
+#50=EDGE_CURVE('',#30,#31,$,.T.);
+#51=EDGE_CURVE('',#31,#32,$,.T.);
+#52=EDGE_CURVE('',#32,#33,$,.T.);
+#53=EDGE_CURVE('',#33,#34,$,.T.);
+#54=EDGE_CURVE('',#34,#35,$,.T.);
+#55=EDGE_CURVE('',#35,#30,$,.T.);
+/* Edge curves - ceiling perimeter */
+#56=EDGE_CURVE('',#36,#37,$,.T.);
+#57=EDGE_CURVE('',#37,#38,$,.T.);
+#58=EDGE_CURVE('',#38,#39,$,.T.);
+#59=EDGE_CURVE('',#39,#40,$,.T.);
+#60=EDGE_CURVE('',#40,#41,$,.T.);
+#61=EDGE_CURVE('',#41,#36,$,.T.);
+/* Edge curves - verticals */
+#62=EDGE_CURVE('',#30,#36,$,.T.);
+#63=EDGE_CURVE('',#31,#37,$,.T.);
+#64=EDGE_CURVE('',#32,#38,$,.T.);
+#65=EDGE_CURVE('',#33,#39,$,.T.);
+#66=EDGE_CURVE('',#34,#40,$,.T.);
+#67=EDGE_CURVE('',#35,#41,$,.T.);
+/* Floor face oriented edges */
+#70=ORIENTED_EDGE('',*,*,#50,.T.);
+#71=ORIENTED_EDGE('',*,*,#51,.T.);
+#72=ORIENTED_EDGE('',*,*,#52,.T.);
+#73=ORIENTED_EDGE('',*,*,#53,.T.);
+#74=ORIENTED_EDGE('',*,*,#54,.T.);
+#75=ORIENTED_EDGE('',*,*,#55,.T.);
+/* Ceiling face oriented edges */
+#76=ORIENTED_EDGE('',*,*,#61,.F.);
+#77=ORIENTED_EDGE('',*,*,#60,.F.);
+#78=ORIENTED_EDGE('',*,*,#59,.F.);
+#79=ORIENTED_EDGE('',*,*,#58,.F.);
+#80=ORIENTED_EDGE('',*,*,#57,.F.);
+#81=ORIENTED_EDGE('',*,*,#56,.F.);
+/* Wall face oriented edges */
+/* Wall 1: #30-#31 (z=0, x=0..5) */
+#82=ORIENTED_EDGE('',*,*,#50,.T.);
+#83=ORIENTED_EDGE('',*,*,#63,.T.);
+#84=ORIENTED_EDGE('',*,*,#56,.F.);
+#85=ORIENTED_EDGE('',*,*,#62,.F.);
+/* Wall 2: #31-#32 (x=5, z=0..3) */
+#86=ORIENTED_EDGE('',*,*,#51,.T.);
+#87=ORIENTED_EDGE('',*,*,#64,.T.);
+#88=ORIENTED_EDGE('',*,*,#57,.F.);
+#89=ORIENTED_EDGE('',*,*,#63,.F.);
+/* Wall 3: #32-#33 (z=3, x=5..8) */
+#90=ORIENTED_EDGE('',*,*,#52,.T.);
+#91=ORIENTED_EDGE('',*,*,#65,.T.);
+#92=ORIENTED_EDGE('',*,*,#58,.F.);
+#93=ORIENTED_EDGE('',*,*,#64,.F.);
+/* Wall 4: #33-#34 (x=8, z=3..6) */
+#94=ORIENTED_EDGE('',*,*,#53,.T.);
+#95=ORIENTED_EDGE('',*,*,#66,.T.);
+#96=ORIENTED_EDGE('',*,*,#59,.F.);
+#97=ORIENTED_EDGE('',*,*,#65,.F.);
+/* Wall 5: #34-#35 (z=6, x=0..8) */
+#98=ORIENTED_EDGE('',*,*,#54,.T.);
+#99=ORIENTED_EDGE('',*,*,#67,.T.);
+#100=ORIENTED_EDGE('',*,*,#60,.F.);
+#101=ORIENTED_EDGE('',*,*,#66,.F.);
+/* Wall 6: #35-#30 (x=0, z=0..6) */
+#102=ORIENTED_EDGE('',*,*,#55,.T.);
+#103=ORIENTED_EDGE('',*,*,#62,.T.);
+#104=ORIENTED_EDGE('',*,*,#61,.F.);
+#105=ORIENTED_EDGE('',*,*,#67,.F.);
+/* Edge loops */
+#110=EDGE_LOOP('',(#70,#71,#72,#73,#74,#75));
+#111=EDGE_LOOP('',(#76,#77,#78,#79,#80,#81));
+#112=EDGE_LOOP('',(#82,#83,#84,#85));
+#113=EDGE_LOOP('',(#86,#87,#88,#89));
+#114=EDGE_LOOP('',(#90,#91,#92,#93));
+#115=EDGE_LOOP('',(#94,#95,#96,#97));
+#116=EDGE_LOOP('',(#98,#99,#100,#101));
+#117=EDGE_LOOP('',(#102,#103,#104,#105));
+/* Face bounds */
+#120=FACE_OUTER_BOUND('',#110,.T.);
+#121=FACE_OUTER_BOUND('',#111,.T.);
+#122=FACE_OUTER_BOUND('',#112,.T.);
+#123=FACE_OUTER_BOUND('',#113,.T.);
+#124=FACE_OUTER_BOUND('',#114,.T.);
+#125=FACE_OUTER_BOUND('',#115,.T.);
+#126=FACE_OUTER_BOUND('',#116,.T.);
+#127=FACE_OUTER_BOUND('',#117,.T.);
+/* Directions */
+#200=DIRECTION('',(0.,1.,0.));
+#201=DIRECTION('',(0.,-1.,0.));
+#202=DIRECTION('',(0.,0.,-1.));
+#203=DIRECTION('',(1.,0.,0.));
+#204=DIRECTION('',(0.,0.,1.));
+#205=DIRECTION('',(-1.,0.,0.));
+/* Axis placements */
+#210=AXIS2_PLACEMENT_3D('',#10,#200,#203);
+#211=AXIS2_PLACEMENT_3D('',#16,#201,#203);
+#212=AXIS2_PLACEMENT_3D('',#10,#202,#203);
+#213=AXIS2_PLACEMENT_3D('',#11,#203,#200);
+#214=AXIS2_PLACEMENT_3D('',#12,#204,#203);
+#215=AXIS2_PLACEMENT_3D('',#13,#203,#200);
+#216=AXIS2_PLACEMENT_3D('',#14,#204,#205);
+#217=AXIS2_PLACEMENT_3D('',#15,#205,#200);
+/* Planes */
+#220=PLANE('',#210);
+#221=PLANE('',#211);
+#222=PLANE('',#212);
+#223=PLANE('',#213);
+#224=PLANE('',#214);
+#225=PLANE('',#215);
+#226=PLANE('',#216);
+#227=PLANE('',#217);
+/* Advanced faces */
+#230=ADVANCED_FACE('Floor',(#120),#220,.T.);
+#231=ADVANCED_FACE('Ceiling',(#121),#221,.T.);
+#232=ADVANCED_FACE('South Wall',(#122),#222,.T.);
+#233=ADVANCED_FACE('Inner Wall 1',(#123),#223,.T.);
+#234=ADVANCED_FACE('Inner Wall 2',(#124),#224,.T.);
+#235=ADVANCED_FACE('East Wall',(#125),#225,.T.);
+#236=ADVANCED_FACE('North Wall',(#126),#226,.T.);
+#237=ADVANCED_FACE('West Wall',(#127),#227,.T.);
+/* Shell and solid */
+#240=CLOSED_SHELL('',(#230,#231,#232,#233,#234,#235,#236,#237));
+#250=MANIFOLD_SOLID_BREP('L-Room',#240);
+ENDSEC;
+END-ISO-10303-21;

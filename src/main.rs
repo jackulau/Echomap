@@ -4,6 +4,7 @@ mod gas;
 mod io;
 mod renderer;
 mod scene;
+mod surface;
 mod ui;
 
 use eframe::egui;

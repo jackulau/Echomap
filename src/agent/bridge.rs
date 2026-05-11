@@ -1,7 +1,9 @@
 use tokio::sync::{mpsc, oneshot};
 
 use crate::robot::definition::RobotDefinition;
-use crate::robot::state::{apply_action, GymRobotState, RobotAction, RobotState};
+use crate::robot::state::{
+    apply_action, ActionSpace, GymRobotState, ObservationSpace, RobotAction, RobotState,
+};
 use crate::robot::RobotManager;
 use crate::scene::SceneObject;
 use glam::Mat4;
@@ -26,6 +28,9 @@ pub enum SimCommand {
     RemoveRobot {
         robot_id: usize,
     },
+    GetSpaces {
+        robot_id: usize,
+    },
 }
 
 /// A response sent from the simulation main loop back to the agent server.
@@ -36,6 +41,10 @@ pub enum SimResponse {
     Observation { state: GymRobotState },
     Reset { state: GymRobotState },
     Removed,
+    Spaces {
+        observation_space: ObservationSpace,
+        action_space: ActionSpace,
+    },
     Error { message: String },
 }
 
@@ -47,6 +56,7 @@ type CommandEnvelope = (SimCommand, oneshot::Sender<SimResponse>);
 ///
 /// Provides an async `send_command` that enqueues a command and awaits the
 /// response produced by the main-loop side (`SimBridgeClient`).
+#[derive(Clone)]
 pub struct SimBridgeServer {
     tx: mpsc::UnboundedSender<CommandEnvelope>,
 }
@@ -187,6 +197,22 @@ impl SimBridgeClient {
                         self.step_counts.remove(robot_id);
                     }
                     SimResponse::Removed
+                } else {
+                    SimResponse::Error {
+                        message: format!("invalid robot_id: {}", robot_id),
+                    }
+                }
+            }
+
+            SimCommand::GetSpaces { robot_id } => {
+                if let Some(robot) = manager.get_robot(robot_id) {
+                    let observation_space =
+                        ObservationSpace::from_definition(&robot.definition);
+                    let action_space = ActionSpace::from_definition(&robot.definition);
+                    SimResponse::Spaces {
+                        observation_space,
+                        action_space,
+                    }
                 } else {
                     SimResponse::Error {
                         message: format!("invalid robot_id: {}", robot_id),

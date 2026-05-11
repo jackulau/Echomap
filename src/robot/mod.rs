@@ -7,6 +7,8 @@ pub mod definition;
 #[allow(dead_code)]
 pub mod kinematics;
 #[allow(dead_code)]
+pub mod sensors;
+#[allow(dead_code)]
 pub mod state;
 
 #[allow(unused_imports)]
@@ -17,5 +19,7 @@ pub use collision::*;
 pub use definition::*;
 #[allow(unused_imports)]
 pub use kinematics::*;
+#[allow(unused_imports)]
+pub use sensors::*;
 #[allow(unused_imports)]
 pub use state::*;

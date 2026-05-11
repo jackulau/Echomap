@@ -1,9 +1,11 @@
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use super::body::{Joint, Link};
 use super::body::{JointType, Robot};
+use super::definition::{JointDefinition, JointType as DefJointType, RobotDefinition};
+use super::state::RobotState;
 
 /// World-space transform for a single link.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +68,48 @@ pub fn compute_forward_kinematics(robot: &Robot) -> Vec<LinkTransform> {
     }
 
     transforms
+}
+
+// ---------------------------------------------------------------------------
+// Definition-based forward kinematics (RobotDefinition + RobotState)
+// ---------------------------------------------------------------------------
+
+/// Compute the local 4x4 transform for a single joint given its current position.
+///
+/// - Revolute: rotation about `joint.axis` by `position` radians.
+/// - Prismatic: translation along `joint.axis` by `position` meters.
+/// - Fixed: identity transform.
+pub fn compute_joint_transform(joint: &JointDefinition, position: f32) -> Mat4 {
+    match joint.joint_type {
+        DefJointType::Revolute => Mat4::from_axis_angle(joint.axis, position),
+        DefJointType::Prismatic => Mat4::from_translation(joint.axis * position),
+        DefJointType::Fixed => Mat4::IDENTITY,
+    }
+}
+
+/// Compute forward kinematics for all links, updating `state.link_poses`.
+///
+/// Walks the kinematic chain defined by `definition`. For each joint, the
+/// child link pose is: `link_pose[parent] * joint_transform`. The base link
+/// (index 0, which has no parent joint) gets `base_pose` directly.
+pub fn forward_kinematics(definition: &RobotDefinition, state: &mut RobotState, base_pose: Mat4) {
+    if definition.links.is_empty() {
+        return;
+    }
+
+    // Base link gets the base_pose directly.
+    state.set_link_pose(0, base_pose);
+
+    // Process each joint: child_pose = parent_pose * joint_transform
+    for (joint_idx, joint) in definition.joints.iter().enumerate() {
+        let position = state.joint_positions.get(joint_idx).copied().unwrap_or(0.0);
+        let joint_transform = compute_joint_transform(joint, position);
+
+        let parent_pose = Mat4::from_cols_array(&state.link_poses[joint.parent_link]);
+        let child_pose = parent_pose * joint_transform;
+
+        state.set_link_pose(joint.child_link, child_pose);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -276,6 +320,223 @@ mod tests {
         );
         assert_vec3_near(transforms[0].position, Vec3::ZERO, "base link at origin");
     }
+
+    // ---- Definition-based FK tests ----
+
+    use crate::robot::definition::{
+        CollisionShape, JointDefinition, JointType as DefJointType, LinkDefinition, RobotDefinition,
+    };
+    use crate::robot::state::RobotState;
+
+    /// Helper: create a simple serial chain definition with the given joints.
+    fn make_serial_chain(
+        joint_specs: &[(DefJointType, Vec3, f32)], // (type, axis, initial_position)
+    ) -> (RobotDefinition, RobotState) {
+        let num_joints = joint_specs.len();
+        let mut links = Vec::with_capacity(num_joints + 1);
+        let mut joints = Vec::with_capacity(num_joints);
+
+        // Base link (index 0)
+        links.push(LinkDefinition {
+            name: "base".to_string(),
+            mass: 5.0,
+            inertia: 1.0,
+            collision_shape: CollisionShape::Cuboid {
+                half_extents: Vec3::splat(0.1),
+            },
+            parent_joint: None,
+        });
+
+        for (i, (jtype, axis, _pos)) in joint_specs.iter().enumerate() {
+            joints.push(JointDefinition {
+                name: format!("joint_{}", i),
+                joint_type: jtype.clone(),
+                axis: *axis,
+                parent_link: i,
+                child_link: i + 1,
+                limit_min: -10.0,
+                limit_max: 10.0,
+                max_torque: 10.0,
+                damping: 0.1,
+            });
+            links.push(LinkDefinition {
+                name: format!("link_{}", i + 1),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Cylinder {
+                    radius: 0.05,
+                    height: 0.5,
+                },
+                parent_joint: Some(i),
+            });
+        }
+
+        let def = RobotDefinition {
+            name: "test_robot".to_string(),
+            links,
+            joints,
+            sensors: Vec::new(),
+        };
+
+        let mut state = RobotState::new(&def);
+        // Set initial joint positions
+        for (i, (_, _, pos)) in joint_specs.iter().enumerate() {
+            state.joint_positions[i] = *pos;
+        }
+
+        (def, state)
+    }
+
+    fn mat4_translation(m: &Mat4) -> Vec3 {
+        let cols = m.to_cols_array_2d();
+        Vec3::new(cols[3][0], cols[3][1], cols[3][2])
+    }
+
+    #[test]
+    fn test_identity_at_zero() {
+        // All joints at 0, base=identity => link_poses are identity
+        let (def, mut state) = make_serial_chain(&[
+            (DefJointType::Revolute, Vec3::Y, 0.0),
+            (DefJointType::Revolute, Vec3::Y, 0.0),
+        ]);
+
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        // All link poses should be identity (no rotation or translation at zero)
+        let identity = Mat4::IDENTITY.to_cols_array();
+        for (i, pose) in state.link_poses.iter().enumerate() {
+            for (j, (&a, &b)) in pose.iter().zip(identity.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() < EPSILON,
+                    "link_poses[{}][{}]: expected {}, got {}",
+                    i,
+                    j,
+                    b,
+                    a,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_revolute_90_degrees() {
+        // Revolute joint at pi/2 around Z rotates child correctly
+        let (def, mut state) = make_serial_chain(&[(DefJointType::Revolute, Vec3::Z, FRAC_PI_2)]);
+
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        let child_pose = Mat4::from_cols_array(&state.link_poses[1]);
+        // After 90-deg rotation around Z: X-axis maps to Y, Y-axis maps to -X
+        let x_axis = child_pose.x_axis.truncate();
+        let y_axis = child_pose.y_axis.truncate();
+
+        // X-axis of child should point along world +Y
+        assert_vec3_near(
+            x_axis,
+            Vec3::new(0.0, 1.0, 0.0),
+            "child X axis after 90 deg Z rotation",
+        );
+        // Y-axis of child should point along world -X
+        assert_vec3_near(
+            y_axis,
+            Vec3::new(-1.0, 0.0, 0.0),
+            "child Y axis after 90 deg Z rotation",
+        );
+    }
+
+    #[test]
+    fn test_prismatic_translation() {
+        // Prismatic joint displaces child along axis
+        let (def, mut state) = make_serial_chain(&[(DefJointType::Prismatic, Vec3::X, 3.0)]);
+
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        let child_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[1]));
+        assert_vec3_near(child_pos, Vec3::new(3.0, 0.0, 0.0), "prismatic +3 along X");
+    }
+
+    #[test]
+    fn test_fixed_joint() {
+        // Fixed joint leaves child at parent pose
+        let (def, mut state) = make_serial_chain(&[(DefJointType::Fixed, Vec3::Y, 0.0)]);
+
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        // Child pose should equal parent (base) pose = identity
+        let child = Mat4::from_cols_array(&state.link_poses[1]);
+        let parent = Mat4::from_cols_array(&state.link_poses[0]);
+        let diff = (child - parent).to_cols_array();
+        for (j, &d) in diff.iter().enumerate() {
+            assert!(
+                d.abs() < EPSILON,
+                "fixed joint child should match parent, element {} diff = {}",
+                j,
+                d,
+            );
+        }
+    }
+
+    #[test]
+    fn test_chain_composition() {
+        // 3-joint chain composes transforms correctly
+        // Joint 0: prismatic X +2  =>  link1 at (2,0,0)
+        // Joint 1: revolute Z pi/2 =>  link2 inherits rotation, still at (2,0,0)
+        // Joint 2: prismatic X +1  =>  but X is now rotated to Y, so link3 at (2,1,0)
+        let (def, mut state) = make_serial_chain(&[
+            (DefJointType::Prismatic, Vec3::X, 2.0),
+            (DefJointType::Revolute, Vec3::Z, FRAC_PI_2),
+            (DefJointType::Prismatic, Vec3::X, 1.0),
+        ]);
+
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        let link1_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[1]));
+        assert_vec3_near(
+            link1_pos,
+            Vec3::new(2.0, 0.0, 0.0),
+            "link1 after prismatic X +2",
+        );
+
+        let link2_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[2]));
+        assert_vec3_near(
+            link2_pos,
+            Vec3::new(2.0, 0.0, 0.0),
+            "link2 after revolute (no translation)",
+        );
+
+        let link3_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[3]));
+        // After 90-deg rotation around Z, local X becomes world Y
+        assert_vec3_near(
+            link3_pos,
+            Vec3::new(2.0, 1.0, 0.0),
+            "link3 after prismatic in rotated frame",
+        );
+    }
+
+    #[test]
+    fn test_base_pose_propagates() {
+        // Non-identity base offsets all links
+        let base_pose = Mat4::from_translation(Vec3::new(10.0, 5.0, 0.0));
+        let (def, mut state) = make_serial_chain(&[(DefJointType::Prismatic, Vec3::X, 1.0)]);
+
+        forward_kinematics(&def, &mut state, base_pose);
+
+        let base_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[0]));
+        assert_vec3_near(
+            base_pos,
+            Vec3::new(10.0, 5.0, 0.0),
+            "base link at base_pose translation",
+        );
+
+        let child_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[1]));
+        assert_vec3_near(
+            child_pos,
+            Vec3::new(11.0, 5.0, 0.0),
+            "child at base + prismatic offset",
+        );
+    }
+
+    // ---- Original body-based FK tests ----
 
     #[test]
     fn test_fk_joint_at_limits() {

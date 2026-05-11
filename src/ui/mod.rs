@@ -1,7 +1,7 @@
 use glam::Vec3;
 
 use crate::acoustics::SimulationState;
-use crate::agent::bridge::{create_bridge, SimBridgeClient};
+use crate::agent::bridge::{create_bridge, AgentActivityLog, AgentEventKind, SimBridgeClient};
 use crate::agent::{AgentServerConfig, AgentServerHandle};
 use crate::fluids::FluidSimulation;
 use crate::gas::GasSimulation;
@@ -1464,6 +1464,159 @@ pub fn status_bar(ctx: &egui::Context, vp: &ViewportState, scene: &Scene) {
             ));
         });
     });
+}
+
+/// Agent activity panel: shows live connection status, command log, sensor
+/// readings, step count, and reward per robot.
+pub fn agent_activity_panel(
+    ctx: &egui::Context,
+    activity_log: &AgentActivityLog,
+    robot_manager: &RobotManager,
+    agent_handle: &Option<AgentServerHandle>,
+) {
+    egui::SidePanel::right("agent_activity_panel")
+        .default_width(260.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.heading("Agent Activity");
+            ui.separator();
+
+            // --- Connection Status ---
+            let server_running = agent_handle.as_ref().is_some_and(|h| h.status().running);
+            let status_text = if server_running { "Running" } else { "Stopped" };
+            let status_color = if server_running {
+                egui::Color32::from_rgb(80, 220, 80)
+            } else {
+                egui::Color32::from_rgb(180, 180, 180)
+            };
+            ui.horizontal(|ui| {
+                ui.label("Server:");
+                ui.colored_label(status_color, status_text);
+            });
+
+            if let Some(ref h) = agent_handle {
+                let status = h.status();
+                if status.running {
+                    ui.label(format!(
+                        "  TCP:{} ({} conn)  WS:{} ({} conn)",
+                        status.tcp_port,
+                        status.tcp_connections,
+                        status.ws_port,
+                        status.ws_connections
+                    ));
+                }
+            }
+
+            ui.separator();
+
+            // --- Per-robot status ---
+            egui::CollapsingHeader::new(format!("Robot Status ({})", robot_manager.robots.len()))
+                .id_salt("agent_robot_status")
+                .default_open(true)
+                .show(ui, |ui| {
+                    if robot_manager.robots.is_empty() {
+                        ui.label("No robots active.");
+                        return;
+                    }
+                    for (i, robot) in robot_manager.robots.iter().enumerate() {
+                        let color = robot_color(i);
+                        ui.horizontal(|ui| {
+                            ui.colored_label(color, format!("[{}] {}", i, robot.definition.name));
+                        });
+
+                        let steps = activity_log.step_counts.get(i).copied().unwrap_or(0);
+                        let reward = activity_log.latest_rewards.get(i).copied().unwrap_or(0.0);
+                        ui.label(format!("  Steps: {}  Reward: {:.3}", steps, reward));
+
+                        // Show first few sensor readings inline
+                        let max_show = 3.min(robot.state.sensor_readings.len());
+                        for s_idx in 0..max_show {
+                            let reading = &robot.state.sensor_readings[s_idx];
+                            let sensor_type = robot
+                                .definition
+                                .sensors
+                                .get(s_idx)
+                                .map(|m| match &m.sensor {
+                                    SensorDefinition::Distance { .. } => "Dist",
+                                    SensorDefinition::Lidar { .. } => "Lidar",
+                                    SensorDefinition::Contact => "Contact",
+                                    SensorDefinition::Imu => "IMU",
+                                })
+                                .unwrap_or("?");
+                            let val = match reading {
+                                crate::robot::state::SensorReading::Distance(d) => {
+                                    format!("{:.2}m", d)
+                                }
+                                crate::robot::state::SensorReading::Lidar(rays) => {
+                                    format!("{} rays", rays.len())
+                                }
+                                crate::robot::state::SensorReading::Contact(c) => {
+                                    format!("{}", c)
+                                }
+                                crate::robot::state::SensorReading::Imu {
+                                    linear_accel, ..
+                                } => {
+                                    format!(
+                                        "({:.1},{:.1},{:.1})",
+                                        linear_accel.x, linear_accel.y, linear_accel.z
+                                    )
+                                }
+                            };
+                            ui.label(format!("    {sensor_type}: {val}"));
+                        }
+                        if robot.state.sensor_readings.len() > max_show {
+                            ui.label(format!(
+                                "    +{} more sensors",
+                                robot.state.sensor_readings.len() - max_show
+                            ));
+                        }
+
+                        ui.add_space(4.0);
+                    }
+                });
+
+            ui.separator();
+
+            // --- Command Log ---
+            egui::CollapsingHeader::new(format!("Command Log ({})", activity_log.len()))
+                .id_salt("agent_command_log")
+                .default_open(true)
+                .show(ui, |ui| {
+                    if activity_log.is_empty() {
+                        ui.label("No commands received yet.");
+                        return;
+                    }
+
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            // Show newest events at the bottom (natural scroll)
+                            for event in activity_log.iter() {
+                                let event_color = match event.kind {
+                                    AgentEventKind::Connect => egui::Color32::from_rgb(80, 200, 80),
+                                    AgentEventKind::Step => egui::Color32::from_rgb(180, 180, 220),
+                                    AgentEventKind::Observe => {
+                                        egui::Color32::from_rgb(150, 200, 255)
+                                    }
+                                    AgentEventKind::Reset => egui::Color32::from_rgb(255, 200, 80),
+                                    AgentEventKind::Remove => egui::Color32::from_rgb(200, 150, 80),
+                                    AgentEventKind::Error => egui::Color32::from_rgb(255, 80, 80),
+                                };
+                                let robot_str = event
+                                    .robot_id
+                                    .map_or(String::new(), |id| format!("R{} ", id));
+                                ui.colored_label(
+                                    event_color,
+                                    format!(
+                                        "[{:.1}s] {}{}",
+                                        event.timestamp, robot_str, event.description
+                                    ),
+                                );
+                            }
+                        });
+                });
+        });
 }
 
 pub fn settings_window(

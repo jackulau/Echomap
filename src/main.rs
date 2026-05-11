@@ -20,7 +20,7 @@ fn main() -> eframe::Result<()> {
 
 mod app {
     use echomap::acoustics::SimulationState;
-    use echomap::agent::bridge::{create_bridge, SimBridgeClient};
+    use echomap::agent::bridge::{create_bridge, AgentActivityLog, SimBridgeClient};
     use echomap::agent::{AgentServerConfig, AgentServerHandle};
     use echomap::fluids::FluidSimulation;
     use echomap::gas::GasSimulation;
@@ -40,6 +40,7 @@ mod app {
         bridge_client: SimBridgeClient,
         agent_server_config: AgentServerConfig,
         agent_server_handle: Option<AgentServerHandle>,
+        activity_log: AgentActivityLog,
     }
 
     impl EchoMapApp {
@@ -73,15 +74,22 @@ mod app {
                 bridge_client,
                 agent_server_config,
                 agent_server_handle,
+                activity_log: AgentActivityLog::default(),
             }
         }
     }
 
     impl eframe::App for EchoMapApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-            // Process pending agent bridge commands each frame.
-            self.bridge_client
-                .process_pending(&mut self.robot_manager, &self.scene.meshes);
+            // Bump activity log elapsed time.
+            self.activity_log.elapsed += ctx.input(|i| i.predicted_dt);
+
+            // Process pending agent bridge commands each frame, logging events.
+            self.bridge_client.process_pending_with_log(
+                &mut self.robot_manager,
+                &self.scene.meshes,
+                &mut self.activity_log,
+            );
 
             echomap::ui::menu_bar(
                 ctx,
@@ -101,6 +109,12 @@ mod app {
                 &mut self.agent_server_config,
                 &mut self.agent_server_handle,
                 &mut self.bridge_client,
+            );
+            echomap::ui::agent_activity_panel(
+                ctx,
+                &self.activity_log,
+                &self.robot_manager,
+                &self.agent_server_handle,
             );
             echomap::ui::viewport_3d(
                 ctx,

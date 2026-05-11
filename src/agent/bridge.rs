@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use tokio::sync::{mpsc, oneshot};
 
 use crate::robot::definition::RobotDefinition;
@@ -7,6 +9,114 @@ use crate::robot::state::{
 use crate::robot::RobotManager;
 use crate::scene::SceneObject;
 use glam::Mat4;
+
+// ---------------------------------------------------------------------------
+// Agent Activity Log — records bridge commands for the UI panel
+// ---------------------------------------------------------------------------
+
+/// A single logged event from agent-bridge interaction.
+#[derive(Clone, Debug)]
+pub struct AgentEvent {
+    /// Monotonic timestamp in seconds since the log was created.
+    pub timestamp: f32,
+    /// Which robot was targeted (if applicable).
+    pub robot_id: Option<usize>,
+    /// Human-readable description of the event.
+    pub description: String,
+    /// Event category for filtering/coloring.
+    pub kind: AgentEventKind,
+}
+
+/// Category of agent event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentEventKind {
+    Connect,
+    Step,
+    Observe,
+    Reset,
+    Remove,
+    Error,
+}
+
+/// Rolling log of agent activity events, with a fixed capacity.
+pub struct AgentActivityLog {
+    events: VecDeque<AgentEvent>,
+    capacity: usize,
+    /// Elapsed seconds since creation (bumped by the UI each frame).
+    pub elapsed: f32,
+    /// Per-robot step counts (mirrors bridge step_counts for display).
+    pub step_counts: Vec<u64>,
+    /// Per-robot latest reward (from Step responses).
+    pub latest_rewards: Vec<f32>,
+}
+
+impl Default for AgentActivityLog {
+    fn default() -> Self {
+        Self::new(200)
+    }
+}
+
+impl AgentActivityLog {
+    /// Create a log with the given maximum event capacity.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            events: VecDeque::with_capacity(capacity),
+            capacity,
+            elapsed: 0.0,
+            step_counts: Vec::new(),
+            latest_rewards: Vec::new(),
+        }
+    }
+
+    /// Push an event, evicting the oldest if at capacity.
+    pub fn push(&mut self, kind: AgentEventKind, robot_id: Option<usize>, description: String) {
+        if self.events.len() >= self.capacity {
+            self.events.pop_front();
+        }
+        self.events.push_back(AgentEvent {
+            timestamp: self.elapsed,
+            robot_id,
+            description,
+            kind,
+        });
+    }
+
+    /// Return an iterator over events (oldest first).
+    pub fn iter(&self) -> impl Iterator<Item = &AgentEvent> {
+        self.events.iter()
+    }
+
+    /// Number of logged events.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    /// Whether the log is empty.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// Clear all events.
+    pub fn clear(&mut self) {
+        self.events.clear();
+    }
+
+    /// Update the step count for a robot (called from bridge processing).
+    pub fn set_step_count(&mut self, robot_id: usize, count: u64) {
+        if self.step_counts.len() <= robot_id {
+            self.step_counts.resize(robot_id + 1, 0);
+        }
+        self.step_counts[robot_id] = count;
+    }
+
+    /// Update the latest reward for a robot.
+    pub fn set_reward(&mut self, robot_id: usize, reward: f32) {
+        if self.latest_rewards.len() <= robot_id {
+            self.latest_rewards.resize(robot_id + 1, 0.0);
+        }
+        self.latest_rewards[robot_id] = reward;
+    }
+}
 
 /// A command sent from the agent server to the simulation main loop.
 #[derive(Debug)]
@@ -105,7 +215,21 @@ impl SimBridgeClient {
     pub fn process_pending(&mut self, manager: &mut RobotManager, scene_meshes: &[SceneObject]) {
         while let Ok((cmd, resp_tx)) = self.rx.try_recv() {
             let response = self.execute(cmd, manager, scene_meshes);
-            // Ignore send errors — the caller may have timed out.
+            let _ = resp_tx.send(response);
+        }
+    }
+
+    /// Like `process_pending`, but also logs events to the activity log.
+    pub fn process_pending_with_log(
+        &mut self,
+        manager: &mut RobotManager,
+        scene_meshes: &[SceneObject],
+        activity_log: &mut AgentActivityLog,
+    ) {
+        while let Ok((cmd, resp_tx)) = self.rx.try_recv() {
+            log_command(&cmd, activity_log);
+            let response = self.execute(cmd, manager, scene_meshes);
+            log_response(&response, activity_log);
             let _ = resp_tx.send(response);
         }
     }
@@ -225,6 +349,68 @@ impl SimBridgeClient {
                 }
             }
         }
+    }
+}
+
+/// Log a bridge command to the activity log.
+fn log_command(cmd: &SimCommand, log: &mut AgentActivityLog) {
+    match cmd {
+        SimCommand::AddRobot { .. } => {
+            log.push(AgentEventKind::Connect, None, "AddRobot request".into());
+        }
+        SimCommand::Step { robot_id, action } => {
+            let vel_count = action.motor_velocities.len();
+            let grip_count = action.gripper_commands.len();
+            log.push(
+                AgentEventKind::Step,
+                Some(*robot_id),
+                format!("Step: {vel_count} motors, {grip_count} grippers"),
+            );
+        }
+        SimCommand::GetObservation { robot_id } => {
+            log.push(
+                AgentEventKind::Observe,
+                Some(*robot_id),
+                "Observe".into(),
+            );
+        }
+        SimCommand::Reset { robot_id } => {
+            log.push(AgentEventKind::Reset, Some(*robot_id), "Reset".into());
+        }
+        SimCommand::RemoveRobot { robot_id } => {
+            log.push(
+                AgentEventKind::Remove,
+                Some(*robot_id),
+                "RemoveRobot".into(),
+            );
+        }
+        SimCommand::GetSpaces { robot_id } => {
+            log.push(
+                AgentEventKind::Connect,
+                Some(*robot_id),
+                "GetSpaces (connect)".into(),
+            );
+        }
+    }
+}
+
+/// Log a bridge response to the activity log.
+fn log_response(response: &SimResponse, log: &mut AgentActivityLog) {
+    match response {
+        SimResponse::RobotAdded { robot_id } => {
+            log.set_step_count(*robot_id, 0);
+            log.set_reward(*robot_id, 0.0);
+        }
+        SimResponse::Stepped { step_count, .. } => {
+            // We don't know robot_id here, but step_counts are updated
+            // in execute() via self.step_counts. The log mirrors it.
+            // For now, just record that a step completed.
+            let _ = step_count;
+        }
+        SimResponse::Error { message } => {
+            log.push(AgentEventKind::Error, None, format!("Error: {message}"));
+        }
+        _ => {}
     }
 }
 

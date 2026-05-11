@@ -128,10 +128,13 @@ pub fn start_agent_server(
 
             rt.block_on(async move {
                 // Bind TCP server.
-                let tcp_server =
-                    TcpAgentServer::bind(config.tcp_port, bridge_server.clone(), config.max_connections)
-                        .await
-                        .expect("failed to bind TCP agent server");
+                let tcp_server = TcpAgentServer::bind(
+                    config.tcp_port,
+                    bridge_server.clone(),
+                    config.max_connections,
+                )
+                .await
+                .expect("failed to bind TCP agent server");
                 let actual_tcp_port = tcp_server.local_port();
 
                 // Bind WS server.
@@ -327,11 +330,9 @@ mod tests {
         // This simulates the main loop calling process_pending each frame.
         let bridge_thread = std::thread::Builder::new()
             .name("test-bridge-processor".to_string())
-            .spawn(move || {
-                loop {
-                    bridge_client.process_pending(&mut manager, &[]);
-                    std::thread::sleep(std::time::Duration::from_micros(100));
-                }
+            .spawn(move || loop {
+                bridge_client.process_pending(&mut manager, &[]);
+                std::thread::sleep(std::time::Duration::from_micros(100));
             })
             .expect("failed to spawn bridge processing thread");
 
@@ -442,9 +443,17 @@ mod tests {
         let (mut writer, mut reader) = tcp_connect(tcp_port).await;
 
         // Connect to robot 0.
-        let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Connect { robot_id: 0 }).await;
+        let resp = tcp_send_recv(
+            &mut writer,
+            &mut reader,
+            &ClientMessage::Connect { robot_id: 0 },
+        )
+        .await;
         match &resp {
-            ServerMessage::Connected { observation_space, action_space } => {
+            ServerMessage::Connected {
+                observation_space,
+                action_space,
+            } => {
                 assert_eq!(observation_space.num_joint_positions, 2);
                 assert_eq!(action_space.num_motors, 2);
             }
@@ -454,7 +463,9 @@ mod tests {
         // Reset.
         let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Reset).await;
         match &resp {
-            ServerMessage::Observation { step_count, done, .. } => {
+            ServerMessage::Observation {
+                step_count, done, ..
+            } => {
                 assert_eq!(*step_count, 0, "reset should yield step_count=0");
                 assert!(!done, "done should be false after reset");
             }
@@ -470,11 +481,18 @@ mod tests {
             let resp = tcp_send_recv(
                 &mut writer,
                 &mut reader,
-                &ClientMessage::Step { action: action.clone() },
-            ).await;
+                &ClientMessage::Step {
+                    action: action.clone(),
+                },
+            )
+            .await;
             match &resp {
                 ServerMessage::Observation { step_count, .. } => {
-                    assert_eq!(*step_count, i, "step_count should be {} after step {}", i, i);
+                    assert_eq!(
+                        *step_count, i,
+                        "step_count should be {} after step {}",
+                        i, i
+                    );
                 }
                 other => panic!("Expected Observation after step {}, got {:?}", i, other),
             }
@@ -483,7 +501,9 @@ mod tests {
         // Observe — step_count should still be 10.
         let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Observe).await;
         match &resp {
-            ServerMessage::Observation { step_count, state, .. } => {
+            ServerMessage::Observation {
+                step_count, state, ..
+            } => {
                 assert_eq!(*step_count, 10, "observe should show step_count=10");
                 assert_eq!(state.joint_positions.len(), 2);
             }
@@ -492,7 +512,11 @@ mod tests {
 
         // Close.
         let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Close).await;
-        assert!(matches!(resp, ServerMessage::Closed), "Expected Closed, got {:?}", resp);
+        assert!(
+            matches!(resp, ServerMessage::Closed),
+            "Expected Closed, got {:?}",
+            resp
+        );
 
         // Clean up.
         drop(handle);
@@ -508,9 +532,17 @@ mod tests {
         let (mut write, mut read) = ws_connect(ws_port).await;
 
         // Connect to robot 0.
-        let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Connect { robot_id: 0 }).await;
+        let resp = ws_send_recv(
+            &mut write,
+            &mut read,
+            &ClientMessage::Connect { robot_id: 0 },
+        )
+        .await;
         match &resp {
-            ServerMessage::Connected { observation_space, action_space } => {
+            ServerMessage::Connected {
+                observation_space,
+                action_space,
+            } => {
                 assert_eq!(observation_space.num_joint_positions, 2);
                 assert_eq!(action_space.num_motors, 2);
             }
@@ -520,7 +552,9 @@ mod tests {
         // Reset.
         let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Reset).await;
         match &resp {
-            ServerMessage::Observation { step_count, done, .. } => {
+            ServerMessage::Observation {
+                step_count, done, ..
+            } => {
                 assert_eq!(*step_count, 0, "reset should yield step_count=0");
                 assert!(!done, "done should be false after reset");
             }
@@ -536,11 +570,18 @@ mod tests {
             let resp = ws_send_recv(
                 &mut write,
                 &mut read,
-                &ClientMessage::Step { action: action.clone() },
-            ).await;
+                &ClientMessage::Step {
+                    action: action.clone(),
+                },
+            )
+            .await;
             match &resp {
                 ServerMessage::Observation { step_count, .. } => {
-                    assert_eq!(*step_count, i, "step_count should be {} after step {}", i, i);
+                    assert_eq!(
+                        *step_count, i,
+                        "step_count should be {} after step {}",
+                        i, i
+                    );
                 }
                 other => panic!("Expected Observation after step {}, got {:?}", i, other),
             }
@@ -549,7 +590,9 @@ mod tests {
         // Observe — step_count should still be 10.
         let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Observe).await;
         match &resp {
-            ServerMessage::Observation { step_count, state, .. } => {
+            ServerMessage::Observation {
+                step_count, state, ..
+            } => {
                 assert_eq!(*step_count, 10, "observe should show step_count=10");
                 assert_eq!(state.joint_positions.len(), 2);
             }
@@ -558,7 +601,11 @@ mod tests {
 
         // Close.
         let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Close).await;
-        assert!(matches!(resp, ServerMessage::Closed), "Expected Closed, got {:?}", resp);
+        assert!(
+            matches!(resp, ServerMessage::Closed),
+            "Expected Closed, got {:?}",
+            resp
+        );
 
         // Clean up.
         drop(handle);
@@ -574,12 +621,20 @@ mod tests {
         // Agent 1: connect to robot 0 via TCP.
         let (mut w1, mut r1) = tcp_connect(tcp_port).await;
         let resp = tcp_send_recv(&mut w1, &mut r1, &ClientMessage::Connect { robot_id: 0 }).await;
-        assert!(matches!(resp, ServerMessage::Connected { .. }), "Agent 1 should connect: {:?}", resp);
+        assert!(
+            matches!(resp, ServerMessage::Connected { .. }),
+            "Agent 1 should connect: {:?}",
+            resp
+        );
 
         // Agent 2: connect to robot 1 via TCP.
         let (mut w2, mut r2) = tcp_connect(tcp_port).await;
         let resp = tcp_send_recv(&mut w2, &mut r2, &ClientMessage::Connect { robot_id: 1 }).await;
-        assert!(matches!(resp, ServerMessage::Connected { .. }), "Agent 2 should connect: {:?}", resp);
+        assert!(
+            matches!(resp, ServerMessage::Connected { .. }),
+            "Agent 2 should connect: {:?}",
+            resp
+        );
 
         // Both agents step with different actions.
         let action1 = RobotAction {
@@ -593,7 +648,14 @@ mod tests {
 
         // Step agent 1 three times.
         for i in 1..=3 {
-            let resp = tcp_send_recv(&mut w1, &mut r1, &ClientMessage::Step { action: action1.clone() }).await;
+            let resp = tcp_send_recv(
+                &mut w1,
+                &mut r1,
+                &ClientMessage::Step {
+                    action: action1.clone(),
+                },
+            )
+            .await;
             match &resp {
                 ServerMessage::Observation { step_count, .. } => {
                     assert_eq!(*step_count, i, "Agent 1 step_count should be {}", i);
@@ -604,7 +666,14 @@ mod tests {
 
         // Step agent 2 five times.
         for i in 1..=5 {
-            let resp = tcp_send_recv(&mut w2, &mut r2, &ClientMessage::Step { action: action2.clone() }).await;
+            let resp = tcp_send_recv(
+                &mut w2,
+                &mut r2,
+                &ClientMessage::Step {
+                    action: action2.clone(),
+                },
+            )
+            .await;
             match &resp {
                 ServerMessage::Observation { step_count, .. } => {
                     assert_eq!(*step_count, i, "Agent 2 step_count should be {}", i);
@@ -619,8 +688,12 @@ mod tests {
 
         match (&obs1, &obs2) {
             (
-                ServerMessage::Observation { step_count: sc1, .. },
-                ServerMessage::Observation { step_count: sc2, .. },
+                ServerMessage::Observation {
+                    step_count: sc1, ..
+                },
+                ServerMessage::Observation {
+                    step_count: sc2, ..
+                },
             ) => {
                 assert_eq!(*sc1, 3, "Agent 1 should show step_count=3");
                 assert_eq!(*sc2, 5, "Agent 2 should show step_count=5");
@@ -644,7 +717,11 @@ mod tests {
             let (mut w, mut r) = tcp_connect(tcp_port).await;
 
             let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
-            assert!(matches!(resp, ServerMessage::Connected { .. }), "First connect should succeed: {:?}", resp);
+            assert!(
+                matches!(resp, ServerMessage::Connected { .. }),
+                "First connect should succeed: {:?}",
+                resp
+            );
 
             // Step a few times.
             let action = RobotAction {
@@ -652,7 +729,14 @@ mod tests {
                 gripper_commands: vec![],
             };
             for _ in 0..3 {
-                let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: action.clone() }).await;
+                let resp = tcp_send_recv(
+                    &mut w,
+                    &mut r,
+                    &ClientMessage::Step {
+                        action: action.clone(),
+                    },
+                )
+                .await;
                 assert!(matches!(resp, ServerMessage::Observation { .. }));
             }
 
@@ -672,7 +756,10 @@ mod tests {
 
             let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
             match &resp {
-                ServerMessage::Connected { observation_space, action_space } => {
+                ServerMessage::Connected {
+                    observation_space,
+                    action_space,
+                } => {
                     assert_eq!(observation_space.num_joint_positions, 2);
                     assert_eq!(action_space.num_motors, 2);
                 }
@@ -683,7 +770,10 @@ mod tests {
             let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
             match &resp {
                 ServerMessage::Observation { step_count, .. } => {
-                    assert_eq!(*step_count, 0, "step_count should be 0 after reset on reconnect");
+                    assert_eq!(
+                        *step_count, 0,
+                        "step_count should be 0 after reset on reconnect"
+                    );
                 }
                 other => panic!("Expected Observation after reset, got {:?}", other),
             }
@@ -696,7 +786,10 @@ mod tests {
             let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action }).await;
             match &resp {
                 ServerMessage::Observation { step_count, .. } => {
-                    assert_eq!(*step_count, 1, "step_count should be 1 after first step on reconnect");
+                    assert_eq!(
+                        *step_count, 1,
+                        "step_count should be 1 after first step on reconnect"
+                    );
                 }
                 other => panic!("Expected Observation after step, got {:?}", other),
             }
@@ -733,13 +826,17 @@ mod tests {
             let resp = tcp_send_recv(
                 &mut w,
                 &mut r,
-                &ClientMessage::Step { action: action.clone() },
-            ).await;
+                &ClientMessage::Step {
+                    action: action.clone(),
+                },
+            )
+            .await;
             match &resp {
                 ServerMessage::Observation { step_count, .. } => {
                     assert_eq!(
                         *step_count, i,
-                        "step_count should be {} at rapid step {}", i, i
+                        "step_count should be {} at rapid step {}",
+                        i, i
                     );
                 }
                 other => panic!("Rapid step {}: expected Observation, got {:?}", i, other),
@@ -784,7 +881,14 @@ mod tests {
             gripper_commands: vec![],
         };
         for _ in 0..10 {
-            tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: action.clone() }).await;
+            tcp_send_recv(
+                &mut w,
+                &mut r,
+                &ClientMessage::Step {
+                    action: action.clone(),
+                },
+            )
+            .await;
         }
 
         // Observe and compare.

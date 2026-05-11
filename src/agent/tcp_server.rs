@@ -158,9 +158,7 @@ impl TcpAgentServer {
         }
 
         // Ensure the session is cleaned up (releases robot assignment).
-        let _ = session
-            .handle_message(ClientMessage::Close)
-            .await;
+        let _ = session.handle_message(ClientMessage::Close).await;
     }
 
     /// Serialize a `ServerMessage` as JSON followed by a newline, and flush.
@@ -224,7 +222,12 @@ mod tests {
     async fn start_server(
         bridge: SimBridgeServer,
         max_connections: usize,
-    ) -> (u16, CancellationToken, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    ) -> (
+        u16,
+        CancellationToken,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let server = TcpAgentServer::bind(0, bridge, max_connections)
             .await
             .expect("bind should succeed");
@@ -295,8 +298,7 @@ mod tests {
         let (mut writer, mut reader) = connect_client(port).await;
 
         // Send Connect
-        let connect_json = serde_json::to_string(&ClientMessage::Connect { robot_id: 0 })
-            .unwrap();
+        let connect_json = serde_json::to_string(&ClientMessage::Connect { robot_id: 0 }).unwrap();
         let response = send_and_recv(&mut writer, &mut reader, &connect_json).await;
         let msg: ServerMessage = serde_json::from_str(response.trim()).unwrap();
 

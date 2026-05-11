@@ -36,16 +36,27 @@ pub enum SimCommand {
 /// A response sent from the simulation main loop back to the agent server.
 #[derive(Debug)]
 pub enum SimResponse {
-    RobotAdded { robot_id: usize },
-    Stepped { state: GymRobotState, step_count: u64 },
-    Observation { state: GymRobotState },
-    Reset { state: GymRobotState },
+    RobotAdded {
+        robot_id: usize,
+    },
+    Stepped {
+        state: GymRobotState,
+        step_count: u64,
+    },
+    Observation {
+        state: GymRobotState,
+    },
+    Reset {
+        state: GymRobotState,
+    },
     Removed,
     Spaces {
         observation_space: ObservationSpace,
         action_space: ActionSpace,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 /// Payload carried through the command channel: a command plus a oneshot
@@ -91,11 +102,7 @@ impl SimBridgeClient {
     /// For each pending command, executes the operation on `manager` and
     /// sends the result back through the oneshot. `scene_meshes` is passed
     /// to `RobotManager::step` when stepping the simulation.
-    pub fn process_pending(
-        &mut self,
-        manager: &mut RobotManager,
-        scene_meshes: &[SceneObject],
-    ) {
+    pub fn process_pending(&mut self, manager: &mut RobotManager, scene_meshes: &[SceneObject]) {
         while let Ok((cmd, resp_tx)) = self.rx.try_recv() {
             let response = self.execute(cmd, manager, scene_meshes);
             // Ignore send errors — the caller may have timed out.
@@ -160,8 +167,7 @@ impl SimBridgeClient {
 
             SimCommand::GetObservation { robot_id } => {
                 if let Some(robot) = manager.get_robot(robot_id) {
-                    let state =
-                        GymRobotState::from_robot_state(&robot.state, &robot.definition);
+                    let state = GymRobotState::from_robot_state(&robot.state, &robot.definition);
                     SimResponse::Observation { state }
                 } else {
                     SimResponse::Error {
@@ -206,8 +212,7 @@ impl SimBridgeClient {
 
             SimCommand::GetSpaces { robot_id } => {
                 if let Some(robot) = manager.get_robot(robot_id) {
-                    let observation_space =
-                        ObservationSpace::from_definition(&robot.definition);
+                    let observation_space = ObservationSpace::from_definition(&robot.definition);
                     let action_space = ActionSpace::from_definition(&robot.definition);
                     SimResponse::Spaces {
                         observation_space,
@@ -351,11 +356,10 @@ mod tests {
         let _ = handle.await.unwrap();
 
         // Now reset.
-        let handle = tokio::spawn(async move {
-            server
-                .send_command(SimCommand::Reset { robot_id: 0 })
-                .await
-        });
+        let handle =
+            tokio::spawn(
+                async move { server.send_command(SimCommand::Reset { robot_id: 0 }).await },
+            );
         tokio::task::yield_now().await;
         client.process_pending(&mut manager, &[]);
 

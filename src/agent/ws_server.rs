@@ -2,8 +2,8 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use futures_util::stream::StreamExt;
 use futures_util::sink::SinkExt;
+use futures_util::stream::StreamExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -240,7 +240,12 @@ mod tests {
     async fn start_server(
         bridge: SimBridgeServer,
         max_connections: usize,
-    ) -> (u16, CancellationToken, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    ) -> (
+        u16,
+        CancellationToken,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let server = WsAgentServer::bind(0, bridge, max_connections)
             .await
             .expect("bind should succeed");
@@ -389,12 +394,7 @@ mod tests {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
         };
-        let resp = ws_send_recv(
-            &mut write,
-            &mut read,
-            &ClientMessage::Step { action },
-        )
-        .await;
+        let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Step { action }).await;
         match &resp {
             ServerMessage::Observation { step_count, .. } => {
                 assert_eq!(*step_count, 1, "first step should yield step_count=1");
@@ -503,12 +503,7 @@ mod tests {
 
         // Client 1: connect to robot 0
         let (mut w1, mut r1) = ws_connect(port).await;
-        let resp = ws_send_recv(
-            &mut w1,
-            &mut r1,
-            &ClientMessage::Connect { robot_id: 0 },
-        )
-        .await;
+        let resp = ws_send_recv(&mut w1, &mut r1, &ClientMessage::Connect { robot_id: 0 }).await;
         assert!(
             matches!(resp, ServerMessage::Connected { .. }),
             "Client 1 should connect to robot 0"
@@ -516,12 +511,7 @@ mod tests {
 
         // Client 2: connect to robot 1
         let (mut w2, mut r2) = ws_connect(port).await;
-        let resp = ws_send_recv(
-            &mut w2,
-            &mut r2,
-            &ClientMessage::Connect { robot_id: 1 },
-        )
-        .await;
+        let resp = ws_send_recv(&mut w2, &mut r2, &ClientMessage::Connect { robot_id: 1 }).await;
         assert!(
             matches!(resp, ServerMessage::Connected { .. }),
             "Client 2 should connect to robot 1"
@@ -541,12 +531,7 @@ mod tests {
             },
         )
         .await;
-        let resp2 = ws_send_recv(
-            &mut w2,
-            &mut r2,
-            &ClientMessage::Step { action },
-        )
-        .await;
+        let resp2 = ws_send_recv(&mut w2, &mut r2, &ClientMessage::Step { action }).await;
 
         assert!(
             matches!(resp1, ServerMessage::Observation { step_count: 1, .. }),

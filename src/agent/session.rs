@@ -111,10 +111,7 @@ impl AgentSession {
         }
     }
 
-    async fn handle_step(
-        &mut self,
-        action: crate::robot::state::RobotAction,
-    ) -> ServerMessage {
+    async fn handle_step(&mut self, action: crate::robot::state::RobotAction) -> ServerMessage {
         let robot_id = match self.robot_id {
             Some(id) => id,
             None => {
@@ -336,9 +333,7 @@ mod tests {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
         };
-        session
-            .handle_message(ClientMessage::Step { action })
-            .await;
+        session.handle_message(ClientMessage::Step { action }).await;
 
         // Observe should return step_count=1 (not incremented)
         let response = session.handle_message(ClientMessage::Observe).await;
@@ -394,9 +389,7 @@ mod tests {
             motor_velocities: vec![1.0],
             gripper_commands: vec![],
         };
-        let response = session
-            .handle_message(ClientMessage::Step { action })
-            .await;
+        let response = session.handle_message(ClientMessage::Step { action }).await;
 
         match response {
             ServerMessage::Error { message } => {

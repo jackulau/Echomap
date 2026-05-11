@@ -2,6 +2,7 @@ use glam::Vec3;
 
 /// Gas species definition with physical properties and visualization color.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct GasSpecies {
     pub name: String,
     pub diffusion_coefficient: f32,
@@ -12,6 +13,7 @@ pub struct GasSpecies {
 
 /// Cell classification for gas boundary handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum GasCellType {
     Gas,
     Solid,
@@ -93,6 +95,7 @@ impl GasGrid {
 
     /// Decompose a cell-centered linear index back to (i, j, k).
     #[inline]
+    #[allow(dead_code)]
     pub fn idx_to_ijk(&self, index: usize) -> (usize, usize, usize) {
         let i = index % self.nx;
         let jk = index / self.nx;
@@ -112,6 +115,7 @@ impl GasGrid {
     }
 
     /// Check whether the cell indices are within bounds.
+    #[allow(dead_code)]
     pub fn in_bounds(&self, i: i32, j: i32, k: i32) -> bool {
         i >= 0
             && j >= 0
@@ -132,22 +136,24 @@ impl GasGrid {
 
     /// Trilinear interpolation of concentration for a given species at a
     /// world-space position.
+    #[allow(dead_code)]
     pub fn concentration_at(&self, species_idx: usize, pos: Vec3) -> f32 {
         self.interpolate_cell_centered(&self.concentrations[species_idx], pos)
     }
 
     /// Trilinear interpolation of the temperature field at a world-space position.
+    #[allow(dead_code)]
     pub fn temperature_at(&self, pos: Vec3) -> f32 {
         self.interpolate_cell_centered(&self.temperature, pos)
     }
 
-    // ----- Private interpolation helpers -----
+    // ----- Interpolation helpers -----
 
     /// Trilinear interpolation for a cell-centered scalar field.
     ///
     /// Cell centers are at (i+0.5)*dx relative to origin, so we shift by -0.5
     /// to get fractional cell coordinates before interpolating.
-    fn interpolate_cell_centered(&self, field: &[f32], pos: Vec3) -> f32 {
+    pub fn interpolate_cell_centered(&self, field: &[f32], pos: Vec3) -> f32 {
         let rel = pos - self.origin;
         let fi = rel.x / self.dx - 0.5;
         let fj = rel.y / self.dx - 0.5;
@@ -381,5 +387,242 @@ mod tests {
         assert!((c0 - 1.0).abs() < 1e-4, "Species 0 should be 1.0, got {c0}");
         assert!((c1 - 2.0).abs() < 1e-4, "Species 1 should be 2.0, got {c1}");
         assert!((c2 - 3.0).abs() < 1e-4, "Species 2 should be 3.0, got {c2}");
+    }
+
+    // ---- Q3 Edge Case Tests ----
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be > 0")]
+    fn test_edge_zero_ny() {
+        let species = vec![make_species("Air")];
+        GasGrid::new(4, 0, 4, 0.1, Vec3::ZERO, species);
+    }
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be > 0")]
+    fn test_edge_zero_nz() {
+        let species = vec![make_species("Air")];
+        GasGrid::new(4, 4, 0, 0.1, Vec3::ZERO, species);
+    }
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be <= 1024")]
+    fn test_edge_exceed_max_dim_nx() {
+        let species = vec![make_species("Air")];
+        GasGrid::new(1025, 1, 1, 0.1, Vec3::ZERO, species);
+    }
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be <= 1024")]
+    fn test_edge_exceed_max_dim_ny() {
+        let species = vec![make_species("Air")];
+        GasGrid::new(1, 1025, 1, 0.1, Vec3::ZERO, species);
+    }
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be <= 1024")]
+    fn test_edge_exceed_max_dim_nz() {
+        let species = vec![make_species("Air")];
+        GasGrid::new(1, 1, 1025, 0.1, Vec3::ZERO, species);
+    }
+
+    #[test]
+    fn test_edge_empty_species_list() {
+        let g = GasGrid::new(4, 4, 4, 0.1, Vec3::ZERO, vec![]);
+        assert_eq!(g.species.len(), 0);
+        assert_eq!(g.concentrations.len(), 0);
+        // Other fields should still be allocated
+        assert_eq!(g.temperature.len(), 64);
+        assert_eq!(g.vel_x.len(), 64);
+    }
+
+    #[test]
+    fn test_edge_single_cell_grid() {
+        let species = vec![make_species("Air")];
+        let g = GasGrid::new(1, 1, 1, 1.0, Vec3::ZERO, species);
+        assert_eq!(g.idx(0, 0, 0), 0);
+        let (i, j, k) = g.idx_to_ijk(0);
+        assert_eq!((i, j, k), (0, 0, 0));
+
+        let center = g.cell_center(0, 0, 0);
+        assert!((center.x - 0.5).abs() < 1e-6);
+        assert!((center.y - 0.5).abs() < 1e-6);
+        assert!((center.z - 0.5).abs() < 1e-6);
+
+        assert!(g.in_bounds(0, 0, 0));
+        assert!(!g.in_bounds(1, 0, 0));
+        assert!(!g.in_bounds(0, 1, 0));
+        assert!(!g.in_bounds(0, 0, 1));
+    }
+
+    #[test]
+    fn test_edge_single_cell_interpolation() {
+        // Test that interpolation works on 1x1x1 grid (saturating_sub edge)
+        let species = vec![make_species("Air")];
+        let mut g = GasGrid::new(1, 1, 1, 1.0, Vec3::ZERO, species);
+        g.vel_x[0] = 7.0;
+        g.vel_y[0] = 8.0;
+        g.vel_z[0] = 9.0;
+        g.concentrations[0][0] = 42.0;
+        g.temperature[0] = 300.0;
+
+        let center = g.cell_center(0, 0, 0);
+        let vel = g.velocity_at(center);
+        assert!(
+            (vel.x - 7.0).abs() < 1e-4,
+            "Single cell vel_x should be 7.0, got {}",
+            vel.x
+        );
+        assert!(
+            (vel.y - 8.0).abs() < 1e-4,
+            "Single cell vel_y should be 8.0, got {}",
+            vel.y
+        );
+        assert!(
+            (vel.z - 9.0).abs() < 1e-4,
+            "Single cell vel_z should be 9.0, got {}",
+            vel.z
+        );
+
+        let c = g.concentration_at(0, center);
+        assert!(
+            (c - 42.0).abs() < 1e-4,
+            "Single cell concentration should be 42.0, got {c}"
+        );
+
+        let t = g.temperature_at(center);
+        assert!(
+            (t - 300.0).abs() < 1e-4,
+            "Single cell temperature should be 300.0, got {t}"
+        );
+    }
+
+    #[test]
+    fn test_edge_interpolation_outside_grid_clamps() {
+        // Position far outside the grid should clamp to boundary values
+        let species = vec![make_species("Air")];
+        let mut g = GasGrid::new(4, 4, 4, 0.25, Vec3::ZERO, species);
+        // Set a known gradient: concentration increases with i
+        for k in 0..4 {
+            for j in 0..4 {
+                for i in 0..4 {
+                    let idx = g.idx(i, j, k);
+                    g.concentrations[0][idx] = i as f32 * 10.0;
+                }
+            }
+        }
+
+        // Position way below origin should clamp to i=0 face
+        let below = Vec3::new(-100.0, -100.0, -100.0);
+        let c_below = g.concentration_at(0, below);
+        assert!(
+            (c_below - 0.0).abs() < 1e-3,
+            "Below grid should clamp to min, got {c_below}"
+        );
+
+        // Position way above grid should clamp to i=3 face
+        let above = Vec3::new(100.0, 100.0, 100.0);
+        let c_above = g.concentration_at(0, above);
+        assert!(
+            (c_above - 30.0).abs() < 1e-3,
+            "Above grid should clamp to max, got {c_above}"
+        );
+    }
+
+    #[test]
+    fn test_edge_non_uniform_dimensions_idx_roundtrip() {
+        // Highly non-square grid
+        let species = vec![make_species("Air")];
+        let g = GasGrid::new(2, 3, 5, 0.1, Vec3::ZERO, species);
+        for k in 0..g.nz {
+            for j in 0..g.ny {
+                for i in 0..g.nx {
+                    let idx = g.idx(i, j, k);
+                    let (ri, rj, rk) = g.idx_to_ijk(idx);
+                    assert_eq!(
+                        (ri, rj, rk),
+                        (i, j, k),
+                        "Non-uniform roundtrip failed for ({i},{j},{k})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_edge_cell_center_at_max_indices() {
+        let species = vec![make_species("Air")];
+        let g = GasGrid::new(4, 5, 6, 0.5, Vec3::new(1.0, 2.0, 3.0), species);
+        let c = g.cell_center(3, 4, 5);
+        let expected = Vec3::new(
+            1.0 + (3.0 + 0.5) * 0.5,
+            2.0 + (4.0 + 0.5) * 0.5,
+            3.0 + (5.0 + 0.5) * 0.5,
+        );
+        assert!(
+            (c - expected).length() < 1e-6,
+            "cell_center at max should be correct: got {c:?}, expected {expected:?}"
+        );
+    }
+
+    #[test]
+    fn test_edge_in_bounds_i32_extremes() {
+        let species = vec![make_species("Air")];
+        let g = GasGrid::new(4, 4, 4, 0.1, Vec3::ZERO, species);
+        assert!(
+            !g.in_bounds(i32::MIN, 0, 0),
+            "i32::MIN should be out of bounds"
+        );
+        assert!(
+            !g.in_bounds(0, i32::MIN, 0),
+            "i32::MIN j should be out of bounds"
+        );
+        assert!(
+            !g.in_bounds(0, 0, i32::MIN),
+            "i32::MIN k should be out of bounds"
+        );
+        assert!(
+            !g.in_bounds(i32::MAX, 0, 0),
+            "i32::MAX should be out of bounds"
+        );
+        assert!(
+            !g.in_bounds(0, i32::MAX, 0),
+            "i32::MAX j should be out of bounds"
+        );
+        assert!(
+            !g.in_bounds(0, 0, i32::MAX),
+            "i32::MAX k should be out of bounds"
+        );
+    }
+
+    #[test]
+    fn test_edge_max_dim_boundary_grid() {
+        // Grid at MAX_DIM should succeed
+        let species = vec![make_species("Air")];
+        let g = GasGrid::new(1024, 1, 1, 0.01, Vec3::ZERO, species);
+        assert_eq!(g.nx, 1024);
+        assert_eq!(g.temperature.len(), 1024);
+    }
+
+    #[test]
+    fn test_edge_temperature_at_interpolation() {
+        let species = vec![make_species("Air")];
+        let mut g = GasGrid::new(2, 2, 2, 1.0, Vec3::ZERO, species);
+        // Set gradient: temperature = i*100
+        for k in 0..2 {
+            for j in 0..2 {
+                for i in 0..2 {
+                    let idx = g.idx(i, j, k);
+                    g.temperature[idx] = i as f32 * 100.0;
+                }
+            }
+        }
+        // Midpoint between cell centers should interpolate
+        let mid = Vec3::new(1.0, 0.5, 0.5); // between i=0 center (0.5) and i=1 center (1.5)
+        let t = g.temperature_at(mid);
+        assert!(
+            (t - 50.0).abs() < 1e-2,
+            "Temperature midpoint should interpolate to 50, got {t}"
+        );
     }
 }

@@ -1,6 +1,7 @@
 use glam::Vec3;
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
@@ -18,10 +19,12 @@ impl Triangle {
         e1.cross(e2).normalize()
     }
 
+    #[allow(dead_code)]
     pub fn centroid(&self) -> Vec3 {
         (self.vertices[0].position + self.vertices[1].position + self.vertices[2].position) / 3.0
     }
 
+    #[allow(dead_code)]
     pub fn area(&self) -> f32 {
         let e1 = self.vertices[1].position - self.vertices[0].position;
         let e2 = self.vertices[2].position - self.vertices[0].position;
@@ -35,6 +38,7 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    #[allow(dead_code)]
     pub fn vertex_count(&self) -> usize {
         self.triangles.len() * 3
     }

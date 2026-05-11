@@ -4,33 +4,23 @@ use crate::fluids::grid::FluidGrid;
 use crate::gas::grid::GasGrid;
 
 /// Visualization mode for fluid slice rendering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FluidVisualizationMode {
+    #[default]
     VelocityMagnitude,
     Pressure,
     Density,
     LevelSet,
 }
 
-impl Default for FluidVisualizationMode {
-    fn default() -> Self {
-        Self::VelocityMagnitude
-    }
-}
-
 /// Visualization mode for gas slice rendering.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum GasVisualizationMode {
+    #[default]
     Concentration,
     Temperature,
     Pressure,
     VelocityMagnitude,
-}
-
-impl Default for GasVisualizationMode {
-    fn default() -> Self {
-        Self::Concentration
-    }
 }
 
 pub struct Camera {
@@ -173,6 +163,7 @@ pub fn energy_to_color(energy: f32, max_energy: f32) -> egui::Color32 {
 ///
 /// Each cell in the y=`y_slice` plane is drawn as a quad projected through
 /// `project_3d`, colored by the selected field value using `energy_to_color`.
+#[allow(clippy::too_many_arguments)]
 pub fn render_fluid_slice(
     grid: &FluidGrid,
     y_slice: usize,
@@ -280,6 +271,7 @@ fn sample_field(
 /// `project_3d`, colored by the selected field value using `energy_to_color`.
 /// When the mode is `Concentration`, the `species_idx` selects which species
 /// concentration array to visualize.
+#[allow(clippy::too_many_arguments)]
 pub fn render_gas_slice(
     grid: &GasGrid,
     y_slice: usize,
@@ -390,5 +382,3 @@ fn sample_gas_field(
         }
     }
 }
-
-use egui;

@@ -19,6 +19,7 @@ pub struct FluidSimulation {
     pub elapsed_time: f32,
 }
 
+#[allow(dead_code)]
 impl FluidSimulation {
     /// Create a new simulation with the given config but no grid allocated.
     pub fn new(config: FluidConfig) -> Self {

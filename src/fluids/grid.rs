@@ -105,6 +105,7 @@ impl FluidGrid {
 
     /// Decompose a cell-centered linear index back to (i, j, k).
     #[inline]
+    #[allow(dead_code)]
     pub fn idx_to_ijk(&self, index: usize) -> (usize, usize, usize) {
         let i = index % self.nx;
         let jk = index / self.nx;
@@ -126,6 +127,7 @@ impl FluidGrid {
     }
 
     /// Check whether the cell indices are within bounds.
+    #[allow(dead_code)]
     pub fn in_bounds(&self, i: i32, j: i32, k: i32) -> bool {
         i >= 0
             && j >= 0

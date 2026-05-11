@@ -71,6 +71,7 @@ pub fn voxelize_scene(grid: &mut GasGrid, meshes: &[SceneObject]) {
 ///   component pointing toward the solid face zeroed (no-penetration).
 /// - Zero-gradient concentration at walls (Neumann BC): solid cells copy
 ///   concentration from the average of their Gas neighbours.
+#[allow(dead_code)]
 pub fn enforce_boundary_conditions(grid: &mut GasGrid) {
     let nx = grid.nx;
     let ny = grid.ny;
@@ -100,40 +101,46 @@ pub fn enforce_boundary_conditions(grid: &mut GasGrid) {
                 }
 
                 // If neighbour in -x is Solid and vel_x < 0, zero it (flowing into wall)
-                if i > 0 && grid.cell_types[grid.idx(i - 1, j, k)] == GasCellType::Solid {
-                    if grid.vel_x[idx] < 0.0 {
-                        grid.vel_x[idx] = 0.0;
-                    }
+                if i > 0
+                    && grid.cell_types[grid.idx(i - 1, j, k)] == GasCellType::Solid
+                    && grid.vel_x[idx] < 0.0
+                {
+                    grid.vel_x[idx] = 0.0;
                 }
                 // If neighbour in +x is Solid and vel_x > 0, zero it
-                if i + 1 < nx && grid.cell_types[grid.idx(i + 1, j, k)] == GasCellType::Solid {
-                    if grid.vel_x[idx] > 0.0 {
-                        grid.vel_x[idx] = 0.0;
-                    }
+                if i + 1 < nx
+                    && grid.cell_types[grid.idx(i + 1, j, k)] == GasCellType::Solid
+                    && grid.vel_x[idx] > 0.0
+                {
+                    grid.vel_x[idx] = 0.0;
                 }
                 // -y
-                if j > 0 && grid.cell_types[grid.idx(i, j - 1, k)] == GasCellType::Solid {
-                    if grid.vel_y[idx] < 0.0 {
-                        grid.vel_y[idx] = 0.0;
-                    }
+                if j > 0
+                    && grid.cell_types[grid.idx(i, j - 1, k)] == GasCellType::Solid
+                    && grid.vel_y[idx] < 0.0
+                {
+                    grid.vel_y[idx] = 0.0;
                 }
                 // +y
-                if j + 1 < ny && grid.cell_types[grid.idx(i, j + 1, k)] == GasCellType::Solid {
-                    if grid.vel_y[idx] > 0.0 {
-                        grid.vel_y[idx] = 0.0;
-                    }
+                if j + 1 < ny
+                    && grid.cell_types[grid.idx(i, j + 1, k)] == GasCellType::Solid
+                    && grid.vel_y[idx] > 0.0
+                {
+                    grid.vel_y[idx] = 0.0;
                 }
                 // -z
-                if k > 0 && grid.cell_types[grid.idx(i, j, k - 1)] == GasCellType::Solid {
-                    if grid.vel_z[idx] < 0.0 {
-                        grid.vel_z[idx] = 0.0;
-                    }
+                if k > 0
+                    && grid.cell_types[grid.idx(i, j, k - 1)] == GasCellType::Solid
+                    && grid.vel_z[idx] < 0.0
+                {
+                    grid.vel_z[idx] = 0.0;
                 }
                 // +z
-                if k + 1 < nz && grid.cell_types[grid.idx(i, j, k + 1)] == GasCellType::Solid {
-                    if grid.vel_z[idx] > 0.0 {
-                        grid.vel_z[idx] = 0.0;
-                    }
+                if k + 1 < nz
+                    && grid.cell_types[grid.idx(i, j, k + 1)] == GasCellType::Solid
+                    && grid.vel_z[idx] > 0.0
+                {
+                    grid.vel_z[idx] = 0.0;
                 }
             }
         }
@@ -141,7 +148,6 @@ pub fn enforce_boundary_conditions(grid: &mut GasGrid) {
 
     // --- Zero-gradient concentration (Neumann BC) at solid walls ---
     // Copy concentration from average of Gas neighbours into Solid cells.
-    let num_species = grid.concentrations.len();
     let conc_snapshot: Vec<Vec<f32>> = grid.concentrations.clone();
 
     for k in 0..nz {
@@ -178,12 +184,9 @@ pub fn enforce_boundary_conditions(grid: &mut GasGrid) {
                 }
 
                 let count = gas_neighbours.len() as f32;
-                for s in 0..num_species {
-                    let avg: f32 = gas_neighbours
-                        .iter()
-                        .map(|&n| conc_snapshot[s][n])
-                        .sum::<f32>()
-                        / count;
+                for (s, conc_snap) in conc_snapshot.iter().enumerate() {
+                    let avg: f32 =
+                        gas_neighbours.iter().map(|&n| conc_snap[n]).sum::<f32>() / count;
                     grid.concentrations[s][idx] = avg;
                 }
             }
@@ -198,6 +201,7 @@ pub fn enforce_boundary_conditions(grid: &mut GasGrid) {
 /// - All other cells become `Gas` (in the gas context, non-solid cells within
 ///   the simulation domain are gas cells, unlike fluids which use a level set
 ///   to distinguish Fluid from Air).
+#[allow(dead_code)]
 pub fn classify_cells(grid: &mut GasGrid) {
     let n = grid.cell_types.len();
     for idx in 0..n {
@@ -212,10 +216,8 @@ pub fn classify_cells(grid: &mut GasGrid) {
 /// Inject concentration at source locations.
 ///
 /// For each source, all Gas cells whose center falls within the source radius
-/// receive `source.rate * dt` concentration of the specified species. Uses
-/// `dt = 1.0` (caller should scale rate by their timestep if needed, or pass
-/// the per-step amount directly in `rate`).
-pub fn apply_sources(grid: &mut GasGrid, sources: &[GasSource]) {
+/// receive `source.rate * dt` concentration of the specified species.
+pub fn apply_sources(grid: &mut GasGrid, sources: &[GasSource], dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
@@ -236,7 +238,7 @@ pub fn apply_sources(grid: &mut GasGrid, sources: &[GasSource]) {
                     let center = grid.cell_center(i, j, k);
                     let dist_sq = (center - source.position).length_squared();
                     if dist_sq <= r_sq {
-                        grid.concentrations[source.species_index][idx] += source.rate;
+                        grid.concentrations[source.species_index][idx] += source.rate * dt;
                     }
                 }
             }
@@ -508,7 +510,7 @@ mod tests {
             "Concentrations should start at zero"
         );
 
-        apply_sources(&mut grid, &[source]);
+        apply_sources(&mut grid, &[source], 1.0);
 
         // The center cell should have received concentration.
         let center_idx = grid.idx(4, 4, 4);
@@ -595,6 +597,354 @@ mod tests {
         assert_eq!(
             remaining_empty, 0,
             "classify_cells should convert all Empty to Gas"
+        );
+    }
+
+    // ---- Q3 Edge Case Tests ----
+
+    #[test]
+    fn test_edge_voxelize_empty_meshes() {
+        let species = vec![make_species("Air")];
+        let mut grid = GasGrid::new(8, 8, 8, 1.0, Vec3::ZERO, species);
+
+        voxelize_scene(&mut grid, &[]);
+
+        // No cells should have been marked as Solid
+        let solid_count = grid
+            .cell_types
+            .iter()
+            .filter(|&&ct| ct == GasCellType::Solid)
+            .count();
+        assert_eq!(solid_count, 0, "Empty mesh list should mark no cells solid");
+    }
+
+    #[test]
+    fn test_edge_voxelize_mesh_outside_grid() {
+        let species = vec![make_species("Air")];
+        let mut grid = GasGrid::new(8, 8, 8, 1.0, Vec3::ZERO, species);
+
+        // Mesh completely outside the grid bounds [0..8]
+        let mesh = box_mesh(
+            Vec3::new(100.0, 100.0, 100.0),
+            Vec3::new(110.0, 110.0, 110.0),
+        );
+        let obj = make_scene_object(mesh);
+
+        voxelize_scene(&mut grid, &[obj]);
+
+        let solid_count = grid
+            .cell_types
+            .iter()
+            .filter(|&&ct| ct == GasCellType::Solid)
+            .count();
+        assert_eq!(
+            solid_count, 0,
+            "Mesh outside grid should mark no cells solid"
+        );
+    }
+
+    #[test]
+    fn test_edge_apply_sources_out_of_range_species() {
+        let species = vec![make_species("CO2")];
+        let mut grid = GasGrid::new(8, 8, 8, 1.0, Vec3::ZERO, species);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Gas;
+        }
+
+        // species_index = 5, but only 1 species exists
+        let source = GasSource {
+            position: grid.cell_center(4, 4, 4),
+            species_index: 5,
+            rate: 10.0,
+            radius: 2.0,
+        };
+
+        // Should not panic, should skip the source
+        apply_sources(&mut grid, &[source], 1.0);
+
+        let max_conc: f32 = grid.concentrations[0]
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0, f32::max);
+        assert!(
+            max_conc < 1e-10,
+            "Out-of-range species source should inject nothing, got max={max_conc}"
+        );
+    }
+
+    #[test]
+    fn test_edge_apply_sources_zero_radius() {
+        let species = vec![make_species("CO2")];
+        let mut grid = GasGrid::new(8, 8, 8, 1.0, Vec3::ZERO, species);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Gas;
+        }
+
+        let source = GasSource {
+            position: grid.cell_center(4, 4, 4),
+            species_index: 0,
+            rate: 10.0,
+            radius: 0.0, // zero radius
+        };
+
+        apply_sources(&mut grid, &[source], 1.0);
+
+        // With radius=0, dist_sq <= 0 requires dist_sq == 0, i.e. exact center match.
+        // The cell center is exactly at the source position, so dist_sq = 0.0 <= 0.0 is true.
+        let center_idx = grid.idx(4, 4, 4);
+        let center_val = grid.concentrations[0][center_idx];
+
+        // Exactly at center should still get injected (0 <= 0)
+        assert!(
+            (center_val - 10.0).abs() < 1e-6,
+            "Zero radius: center cell should get injection (dist=0), got {center_val}"
+        );
+
+        // But no other cell should be affected
+        let mut other_max = 0.0_f32;
+        for (i, &v) in grid.concentrations[0].iter().enumerate() {
+            if i != center_idx {
+                other_max = other_max.max(v.abs());
+            }
+        }
+        assert!(
+            other_max < 1e-10,
+            "Zero radius: non-center cells should have no injection, got max={other_max}"
+        );
+    }
+
+    #[test]
+    fn test_edge_apply_sources_empty_list() {
+        let species = vec![make_species("CO2")];
+        let mut grid = GasGrid::new(4, 4, 4, 1.0, Vec3::ZERO, species);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Gas;
+        }
+
+        let before = grid.concentrations[0].clone();
+        apply_sources(&mut grid, &[], 1.0);
+
+        for (i, (b, a)) in before.iter().zip(grid.concentrations[0].iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "Empty sources: concentration should not change at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_apply_sources_on_solid_cell() {
+        let species = vec![make_species("CO2")];
+        let mut grid = GasGrid::new(8, 8, 8, 1.0, Vec3::ZERO, species);
+        // Mark all as Solid
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Solid;
+        }
+
+        let source = GasSource {
+            position: grid.cell_center(4, 4, 4),
+            species_index: 0,
+            rate: 10.0,
+            radius: 3.0,
+        };
+
+        apply_sources(&mut grid, &[source], 1.0);
+
+        // No cell should have received concentration (all Solid, source skips non-Gas)
+        let max_conc: f32 = grid.concentrations[0]
+            .iter()
+            .map(|v| v.abs())
+            .fold(0.0, f32::max);
+        assert!(
+            max_conc < 1e-10,
+            "Source on solid cells should inject nothing, got max={max_conc}"
+        );
+    }
+
+    #[test]
+    fn test_edge_enforce_bc_all_solid() {
+        let species = vec![make_species("CO2")];
+        let mut grid = GasGrid::new(4, 4, 4, 1.0, Vec3::ZERO, species);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Solid;
+        }
+        // Set non-zero velocity
+        for v in grid.vel_x.iter_mut() {
+            *v = 5.0;
+        }
+        for v in grid.vel_y.iter_mut() {
+            *v = 3.0;
+        }
+        for v in grid.vel_z.iter_mut() {
+            *v = 7.0;
+        }
+
+        enforce_boundary_conditions(&mut grid);
+
+        // All velocity should be zeroed (all cells solid)
+        assert!(
+            grid.vel_x.iter().all(|&v| v.abs() < 1e-10),
+            "All-solid: vel_x should be zeroed"
+        );
+        assert!(
+            grid.vel_y.iter().all(|&v| v.abs() < 1e-10),
+            "All-solid: vel_y should be zeroed"
+        );
+        assert!(
+            grid.vel_z.iter().all(|&v| v.abs() < 1e-10),
+            "All-solid: vel_z should be zeroed"
+        );
+    }
+
+    #[test]
+    fn test_edge_enforce_bc_single_cell_gas() {
+        let species = vec![make_species("CO2")];
+        let mut grid = GasGrid::new(1, 1, 1, 1.0, Vec3::ZERO, species);
+        grid.cell_types[0] = GasCellType::Gas;
+        grid.vel_x[0] = 5.0;
+        grid.vel_y[0] = -3.0;
+        grid.vel_z[0] = 2.0;
+        grid.concentrations[0][0] = 42.0;
+
+        enforce_boundary_conditions(&mut grid);
+
+        // Single Gas cell with no neighbours -- velocity should be preserved
+        // (no solid neighbours to enforce no-penetration)
+        assert!(
+            (grid.vel_x[0] - 5.0).abs() < 1e-6,
+            "Single gas cell vel_x should be preserved"
+        );
+        assert!(
+            (grid.vel_y[0] - (-3.0)).abs() < 1e-6,
+            "Single gas cell vel_y should be preserved"
+        );
+        assert!(
+            (grid.vel_z[0] - 2.0).abs() < 1e-6,
+            "Single gas cell vel_z should be preserved"
+        );
+        assert!(
+            (grid.concentrations[0][0] - 42.0).abs() < 1e-6,
+            "Single gas cell concentration should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_edge_neumann_bc_solid_no_gas_neighbours() {
+        // Solid cell surrounded by other Solid cells -- no Gas neighbours
+        let species = vec![make_species("CO2")];
+        let mut grid = GasGrid::new(4, 4, 4, 1.0, Vec3::ZERO, species);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Solid;
+        }
+        // Set some concentration on the center solid cell
+        let center = grid.idx(2, 2, 2);
+        grid.concentrations[0][center] = 99.0;
+
+        enforce_boundary_conditions(&mut grid);
+
+        // Solid with no Gas neighbours should keep its concentration (skip branch)
+        assert!(
+            (grid.concentrations[0][center] - 99.0).abs() < 1e-6,
+            "Solid cell with no gas neighbours should keep concentration"
+        );
+    }
+
+    #[test]
+    fn test_edge_classify_cells_already_all_gas() {
+        let species = vec![make_species("Air")];
+        let mut grid = GasGrid::new(4, 4, 4, 1.0, Vec3::ZERO, species);
+        // First classify: Empty -> Gas
+        classify_cells(&mut grid);
+
+        let gas_count_before = grid
+            .cell_types
+            .iter()
+            .filter(|&&ct| ct == GasCellType::Gas)
+            .count();
+        assert_eq!(gas_count_before, 64);
+
+        // Classify again -- should be idempotent
+        classify_cells(&mut grid);
+
+        let gas_count_after = grid
+            .cell_types
+            .iter()
+            .filter(|&&ct| ct == GasCellType::Gas)
+            .count();
+        assert_eq!(
+            gas_count_after, 64,
+            "classify_cells should be idempotent on all-Gas grid"
+        );
+    }
+
+    #[test]
+    fn test_edge_no_penetration_all_directions() {
+        // Gas cell surrounded by Solid on all 6 faces
+        let species = vec![make_species("Air")];
+        let mut grid = GasGrid::new(3, 3, 3, 1.0, Vec3::ZERO, species);
+        // All solid except center
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Solid;
+        }
+        let center = grid.idx(1, 1, 1);
+        grid.cell_types[center] = GasCellType::Gas;
+
+        // Set velocity pointing outward in all directions
+        grid.vel_x[center] = 5.0; // +x toward solid
+        grid.vel_y[center] = 5.0; // +y toward solid
+        grid.vel_z[center] = 5.0; // +z toward solid
+
+        enforce_boundary_conditions(&mut grid);
+
+        // All positive velocity components should be zeroed (pointing into solid)
+        assert!(
+            grid.vel_x[center].abs() < 1e-6,
+            "vel_x toward +x solid should be zeroed, got {}",
+            grid.vel_x[center]
+        );
+        assert!(
+            grid.vel_y[center].abs() < 1e-6,
+            "vel_y toward +y solid should be zeroed, got {}",
+            grid.vel_y[center]
+        );
+        assert!(
+            grid.vel_z[center].abs() < 1e-6,
+            "vel_z toward +z solid should be zeroed, got {}",
+            grid.vel_z[center]
+        );
+    }
+
+    #[test]
+    fn test_edge_no_penetration_negative_directions() {
+        // Gas cell surrounded by Solid on all 6 faces, velocity pointing in -x,-y,-z
+        let species = vec![make_species("Air")];
+        let mut grid = GasGrid::new(3, 3, 3, 1.0, Vec3::ZERO, species);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Solid;
+        }
+        let center = grid.idx(1, 1, 1);
+        grid.cell_types[center] = GasCellType::Gas;
+
+        grid.vel_x[center] = -5.0; // -x toward solid
+        grid.vel_y[center] = -5.0; // -y toward solid
+        grid.vel_z[center] = -5.0; // -z toward solid
+
+        enforce_boundary_conditions(&mut grid);
+
+        assert!(
+            grid.vel_x[center].abs() < 1e-6,
+            "vel_x toward -x solid should be zeroed, got {}",
+            grid.vel_x[center]
+        );
+        assert!(
+            grid.vel_y[center].abs() < 1e-6,
+            "vel_y toward -y solid should be zeroed, got {}",
+            grid.vel_y[center]
+        );
+        assert!(
+            grid.vel_z[center].abs() < 1e-6,
+            "vel_z toward -z solid should be zeroed, got {}",
+            grid.vel_z[center]
         );
     }
 }

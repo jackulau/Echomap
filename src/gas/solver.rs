@@ -1,6 +1,9 @@
 use glam::Vec3;
 
-use super::grid::{GasCellType, GasGrid, GasSpecies};
+use super::grid::{GasCellType, GasGrid};
+
+#[cfg(test)]
+use super::grid::GasSpecies;
 
 /// Configuration for the gas advection-diffusion solver.
 #[derive(Clone, Debug)]
@@ -22,6 +25,7 @@ impl GasConfig {
     ///
     /// # Panics
     /// - `dt` is zero or negative.
+    #[allow(dead_code)]
     pub fn new(
         dt: f32,
         ambient_temperature: f32,
@@ -70,19 +74,10 @@ pub fn advect_concentrations(grid: &mut GasGrid, dt: f32) {
     let ny = grid.ny;
     let nz = grid.nz;
 
-    // Snapshot old concentration arrays.
-    let old_concentrations = grid.concentrations.clone();
+    // Snapshot only the concentration arrays (not the full grid).
+    let old_concentrations: Vec<Vec<f32>> = grid.concentrations.clone();
 
-    // Build a temporary grid that holds the old data for interpolation.
-    // We reuse the existing grid's interpolation but need old values, so we
-    // swap in old data, sample, then write results.
-    let old_grid = {
-        let mut g = grid.clone();
-        g.concentrations = old_concentrations;
-        g
-    };
-
-    for s in 0..num_species {
+    for (s, old_conc) in old_concentrations.iter().enumerate() {
         for k in 0..nz {
             for j in 0..ny {
                 for i in 0..nx {
@@ -93,7 +88,8 @@ pub fn advect_concentrations(grid: &mut GasGrid, dt: f32) {
                     let pos = grid.cell_center(i, j, k);
                     let vel = grid.velocity_at(pos);
                     let back_pos = pos - vel * dt;
-                    grid.concentrations[s][idx] = old_grid.concentration_at(s, back_pos);
+                    grid.concentrations[s][idx] =
+                        grid.interpolate_cell_centered(old_conc, back_pos);
                 }
             }
         }
@@ -106,7 +102,7 @@ pub fn advect_temperature(grid: &mut GasGrid, dt: f32) {
     let ny = grid.ny;
     let nz = grid.nz;
 
-    let old_grid = grid.clone();
+    let old_temperature: Vec<f32> = grid.temperature.clone();
 
     for k in 0..nz {
         for j in 0..ny {
@@ -118,7 +114,7 @@ pub fn advect_temperature(grid: &mut GasGrid, dt: f32) {
                 let pos = grid.cell_center(i, j, k);
                 let vel = grid.velocity_at(pos);
                 let back_pos = pos - vel * dt;
-                grid.temperature[idx] = old_grid.temperature_at(back_pos);
+                grid.temperature[idx] = grid.interpolate_cell_centered(&old_temperature, back_pos);
             }
         }
     }
@@ -1017,5 +1013,409 @@ mod tests {
                 "concentration[{s}] has NaN/Inf after 1000 steps"
             );
         }
+    }
+
+    // ---- Q3 Edge Case Tests ----
+
+    #[test]
+    #[should_panic(expected = "Timestep dt must be positive")]
+    fn test_edge_config_negative_dt() {
+        GasConfig::new(-0.01, 293.15, 0.02, 0.01, Vec3::new(0.0, -9.81, 0.0));
+    }
+
+    #[test]
+    fn test_edge_advect_empty_species() {
+        let mut grid = {
+            let mut g = GasGrid::new(4, 4, 4, 0.25, Vec3::ZERO, vec![]);
+            for ct in g.cell_types.iter_mut() {
+                *ct = GasCellType::Gas;
+            }
+            g
+        };
+        advect_concentrations(&mut grid, 0.01);
+        assert_eq!(grid.concentrations.len(), 0);
+    }
+
+    #[test]
+    fn test_edge_diffuse_zero_coefficient() {
+        let species = vec![make_species("Inert", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let center_idx = grid.idx(4, 4, 4);
+        grid.concentrations[0][center_idx] = 100.0;
+
+        let before = grid.concentrations[0].clone();
+        diffuse_concentrations(&mut grid, 0.01);
+
+        for (i, (b, a)) in before.iter().zip(grid.concentrations[0].iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "Zero diffusion coeff should leave concentration unchanged at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_diffuse_negative_coefficient() {
+        let species = vec![make_species("Neg", -0.5)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let center_idx = grid.idx(4, 4, 4);
+        grid.concentrations[0][center_idx] = 100.0;
+
+        let before = grid.concentrations[0].clone();
+        diffuse_concentrations(&mut grid, 0.01);
+
+        for (i, (b, a)) in before.iter().zip(grid.concentrations[0].iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "Negative diffusion coeff should leave concentration unchanged at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_diffuse_temperature_zero_diffusivity() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let idx_center = grid.idx(4, 4, 4);
+        grid.temperature[idx_center] = 500.0;
+
+        let before = grid.temperature.clone();
+        diffuse_temperature(&mut grid, 0.0, 0.01);
+
+        for (i, (b, a)) in before.iter().zip(grid.temperature.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "Zero thermal diffusivity should leave temperature unchanged at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_diffuse_temperature_negative_diffusivity() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let idx_center = grid.idx(4, 4, 4);
+        grid.temperature[idx_center] = 500.0;
+
+        let before = grid.temperature.clone();
+        diffuse_temperature(&mut grid, -1.0, 0.01);
+
+        for (i, (b, a)) in before.iter().zip(grid.temperature.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "Negative thermal diffusivity should leave temperature unchanged at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_all_solid_grid_noop() {
+        let species = vec![make_species("CO2", 0.2)];
+        let mut grid = GasGrid::new(4, 4, 4, 0.25, Vec3::ZERO, species);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = GasCellType::Solid;
+        }
+        let ci = grid.idx(2, 2, 2);
+        grid.concentrations[0][ci] = 100.0;
+        grid.temperature[ci] = 500.0;
+
+        let conc_before = grid.concentrations[0].clone();
+        let temp_before = grid.temperature.clone();
+        let config = default_config();
+        step(&mut grid, &config);
+
+        for (i, (b, a)) in conc_before
+            .iter()
+            .zip(grid.concentrations[0].iter())
+            .enumerate()
+        {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "All-solid grid: concentration should not change at index {i}"
+            );
+        }
+        for (i, (b, a)) in temp_before.iter().zip(grid.temperature.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "All-solid grid: temperature should not change at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_all_empty_grid_noop() {
+        let species = vec![make_species("CO2", 0.2)];
+        let mut grid = GasGrid::new(4, 4, 4, 0.25, Vec3::ZERO, species);
+        let ci = grid.idx(2, 2, 2);
+        grid.concentrations[0][ci] = 100.0;
+        grid.temperature[ci] = 500.0;
+
+        let conc_before = grid.concentrations[0].clone();
+        let temp_before = grid.temperature.clone();
+        let config = default_config();
+        step(&mut grid, &config);
+
+        for (i, (b, a)) in conc_before
+            .iter()
+            .zip(grid.concentrations[0].iter())
+            .enumerate()
+        {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "All-empty grid: concentration should not change at index {i}"
+            );
+        }
+        for (i, (b, a)) in temp_before.iter().zip(grid.temperature.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "All-empty grid: temperature should not change at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_single_gas_cell_diffusion() {
+        let species = vec![make_species("CO2", 0.5)];
+        let mut grid = make_gas_grid(1, 1.0, species);
+        grid.concentrations[0][0] = 42.0;
+
+        diffuse_concentrations(&mut grid, 0.01);
+        assert!(
+            (grid.concentrations[0][0] - 42.0).abs() < 1e-10,
+            "Single cell diffusion should keep concentration: got {}",
+            grid.concentrations[0][0]
+        );
+    }
+
+    #[test]
+    fn test_edge_single_gas_cell_full_step() {
+        let species = vec![make_species("CO2", 0.5)];
+        let mut grid = make_gas_grid(1, 1.0, species);
+        grid.concentrations[0][0] = 42.0;
+        grid.temperature[0] = 300.0;
+
+        let config = default_config();
+        step(&mut grid, &config);
+
+        assert!(grid.concentrations[0][0].is_finite());
+        assert!(grid.temperature[0].is_finite());
+        assert!(grid.vel_x[0].is_finite());
+        assert!(grid.vel_y[0].is_finite());
+        assert!(grid.vel_z[0].is_finite());
+    }
+
+    #[test]
+    fn test_edge_buoyancy_zero_gravity() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(4, 0.25, species);
+        let ci = grid.idx(2, 2, 2);
+        grid.temperature[ci] = 500.0;
+
+        let config = GasConfig {
+            dt: 0.01,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 0.0,
+            buoyancy_coefficient: 0.5,
+            gravity: Vec3::ZERO,
+        };
+
+        let vel_before = grid.vel_y.clone();
+        apply_buoyancy(&mut grid, &config, config.dt);
+
+        for (i, (b, a)) in vel_before.iter().zip(grid.vel_y.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "Zero gravity: vel_y should not change at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_buoyancy_zero_coefficient() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(4, 0.25, species);
+        let ci = grid.idx(2, 2, 2);
+        grid.temperature[ci] = 500.0;
+
+        let config = GasConfig {
+            dt: 0.01,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 0.0,
+            buoyancy_coefficient: 0.0,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+        };
+
+        let vel_before = grid.vel_y.clone();
+        apply_buoyancy(&mut grid, &config, config.dt);
+
+        for (i, (b, a)) in vel_before.iter().zip(grid.vel_y.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "Zero buoyancy coeff: vel_y should not change at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_buoyancy_at_ambient_temp() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(4, 0.25, species);
+        for t in grid.temperature.iter_mut() {
+            *t = 293.15;
+        }
+
+        let config = GasConfig {
+            dt: 0.01,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 0.0,
+            buoyancy_coefficient: 0.5,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+        };
+
+        let vel_before = grid.vel_y.clone();
+        apply_buoyancy(&mut grid, &config, config.dt);
+
+        for (i, (b, a)) in vel_before.iter().zip(grid.vel_y.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-10,
+                "At ambient temp: no buoyancy force expected at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_pressure_gradient_uniform_pressure() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        for p in grid.pressure.iter_mut() {
+            *p = 100.0;
+        }
+
+        let vel_x_before = grid.vel_x.clone();
+        let vel_y_before = grid.vel_y.clone();
+        let vel_z_before = grid.vel_z.clone();
+        apply_pressure_gradient(&mut grid, 0.01);
+
+        for i in 0..grid.vel_x.len() {
+            assert!(
+                (grid.vel_x[i] - vel_x_before[i]).abs() < 1e-10,
+                "Uniform pressure: vel_x should not change at index {i}"
+            );
+            assert!(
+                (grid.vel_y[i] - vel_y_before[i]).abs() < 1e-10,
+                "Uniform pressure: vel_y should not change at index {i}"
+            );
+            assert!(
+                (grid.vel_z[i] - vel_z_before[i]).abs() < 1e-10,
+                "Uniform pressure: vel_z should not change at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_advection_zero_velocity() {
+        let species = vec![make_species("CO2", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let ci = grid.idx(4, 4, 4);
+        grid.concentrations[0][ci] = 100.0;
+        let before = grid.concentrations[0].clone();
+
+        advect_concentrations(&mut grid, 0.01);
+
+        for (i, (b, a)) in before.iter().zip(grid.concentrations[0].iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-4,
+                "Zero velocity: concentration unchanged at idx {i}, before={b}, after={a}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_advection_temperature_zero_velocity() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let idx_center = grid.idx(4, 4, 4);
+        grid.temperature[idx_center] = 500.0;
+        let before = grid.temperature.clone();
+
+        advect_temperature(&mut grid, 0.01);
+
+        for (i, (b, a)) in before.iter().zip(grid.temperature.iter()).enumerate() {
+            assert!(
+                (b - a).abs() < 1e-4,
+                "Zero velocity: temperature unchanged at idx {i}, before={b}, after={a}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_diffusion_stability_clamping() {
+        let species = vec![make_species("Fast", 100.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let ci = grid.idx(4, 4, 4);
+        grid.concentrations[0][ci] = 1000.0;
+
+        diffuse_concentrations(&mut grid, 1.0);
+
+        assert!(
+            grid.concentrations[0].iter().all(|v| v.is_finite()),
+            "Clamped diffusion should remain finite"
+        );
+        assert!(
+            grid.concentrations[0][ci] < 1000.0,
+            "Center should diffuse outward even with clamping"
+        );
+    }
+
+    #[test]
+    fn test_edge_mixed_species_diffusion_rates() {
+        let species = vec![make_species("Active", 0.2), make_species("Frozen", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+        let center = grid.idx(4, 4, 4);
+        grid.concentrations[0][center] = 100.0;
+        grid.concentrations[1][center] = 100.0;
+
+        for _ in 0..10 {
+            diffuse_concentrations(&mut grid, 0.01);
+        }
+
+        assert!(
+            grid.concentrations[0][center] < 100.0,
+            "Active species should diffuse: got {}",
+            grid.concentrations[0][center]
+        );
+        assert!(
+            (grid.concentrations[1][center] - 100.0).abs() < 1e-10,
+            "Frozen species should not diffuse: got {}",
+            grid.concentrations[1][center]
+        );
+    }
+
+    #[test]
+    fn test_edge_buoyancy_cold_sinks() {
+        let species = vec![make_species("Air", 0.0)];
+        let mut grid = make_gas_grid(8, 0.125, species);
+
+        let config = GasConfig {
+            dt: 0.01,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 0.0,
+            buoyancy_coefficient: 0.5,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+        };
+
+        for t in grid.temperature.iter_mut() {
+            *t = config.ambient_temperature;
+        }
+        let cold_idx = grid.idx(4, 4, 4);
+        grid.temperature[cold_idx] = 100.0;
+
+        apply_buoyancy(&mut grid, &config, config.dt);
+
+        assert!(
+            grid.vel_y[cold_idx] < 0.0,
+            "Cold gas should gain downward velocity, got {}",
+            grid.vel_y[cold_idx]
+        );
     }
 }

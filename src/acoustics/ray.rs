@@ -2,6 +2,7 @@ use crate::scene::material::MediumProperties;
 use crate::scene::{AcousticMaterial, Triangle};
 use glam::Vec3;
 
+#[allow(dead_code)]
 pub struct RefractionResult {
     pub reflected_direction: Vec3,
     pub reflected_energy: f32,
@@ -19,6 +20,7 @@ pub struct AcousticRay {
     pub frequency_hz: f32,
 }
 
+#[allow(dead_code)]
 pub struct RayHit {
     pub point: Vec3,
     pub normal: Vec3,

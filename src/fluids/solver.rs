@@ -15,12 +15,14 @@ pub struct FluidConfig {
     /// Gravitational acceleration vector.
     pub gravity: Vec3,
     /// Surface tension coefficient (currently unused placeholder).
+    #[allow(dead_code)]
     pub surface_tension: f32,
     /// Number of Jacobi iterations for pressure solve.
     pub jacobi_iterations: u32,
 }
 
 impl FluidConfig {
+    #[allow(dead_code)]
     pub fn new(
         dt: f32,
         viscosity: f32,
@@ -169,6 +171,7 @@ fn sample_w(data: &[f32], nx: usize, ny: usize, nz: usize, fi: f32, fj: f32, fk:
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn lerp3(
     c000: f32,
     c100: f32,
@@ -192,6 +195,7 @@ fn lerp3(
 }
 
 /// Interpolate velocity from raw arrays at an arbitrary world position.
+#[allow(clippy::too_many_arguments)]
 fn velocity_from_arrays(
     u: &[f32],
     v: &[f32],
@@ -310,7 +314,7 @@ pub fn advect(grid: &FluidGrid, dt: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     new_w.par_chunks_mut(nx).enumerate().for_each(|(jk, row)| {
         let j = jk % ny;
         let k = jk / ny;
-        for i in 0..nx {
+        for (i, row_val) in row.iter_mut().enumerate() {
             let pos =
                 origin + Vec3::new((i as f32 + 0.5) * dx, (j as f32 + 0.5) * dx, k as f32 * dx);
             let vel = velocity_from_arrays(&old_u, &old_v, &old_w, nx, ny, nz, dx, origin, pos);
@@ -319,7 +323,7 @@ pub fn advect(grid: &FluidGrid, dt: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
             let fi = rel.x / dx - 0.5;
             let fj = rel.y / dx - 0.5;
             let fk = rel.z / dx;
-            row[i] = sample_w(&old_w, nx, ny, nz, fi, fj, fk);
+            *row_val = sample_w(&old_w, nx, ny, nz, fi, fj, fk);
         }
     });
 

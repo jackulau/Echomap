@@ -54,6 +54,7 @@ pub fn voxelize_scene(grid: &mut FluidGrid, meshes: &[SceneObject]) {
 /// - Velocity faces adjacent to solid cells are set to zero.
 /// - Pressure gradient is zero at solid walls (Neumann BC), enforced by
 ///   copying pressure from the fluid neighbour into the solid cell.
+#[allow(dead_code)]
 pub fn enforce_boundary_conditions(grid: &mut FluidGrid) {
     let nx = grid.nx;
     let ny = grid.ny;
@@ -207,6 +208,7 @@ pub fn classify_cells(grid: &mut FluidGrid) {
 ///
 /// Traces particles backward through the velocity field and interpolates
 /// the old level set value at the departure point.
+#[allow(dead_code)]
 pub fn advect_level_set(grid: &mut FluidGrid, dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
@@ -274,6 +276,7 @@ pub fn advect_level_set(grid: &mut FluidGrid, dt: f32) {
 /// Uses the PDE-based approach:
 ///   phi_t + sign(phi0) * (|grad(phi)| - 1) = 0
 /// with forward Euler time stepping.
+#[allow(dead_code)]
 pub fn reinitialize_level_set(grid: &mut FluidGrid, iterations: u32) {
     let nx = grid.nx;
     let ny = grid.ny;

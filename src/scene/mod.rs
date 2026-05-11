@@ -9,6 +9,7 @@ use glam::Vec3;
 
 use crate::gas::grid::GasSpecies;
 
+#[allow(dead_code)]
 pub struct GasVolume {
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
@@ -30,6 +31,7 @@ impl GasVolume {
     }
 }
 
+#[allow(dead_code)]
 pub struct FluidVolume {
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
@@ -53,6 +55,7 @@ impl FluidVolume {
     }
 }
 
+#[allow(dead_code)]
 pub struct Scene {
     pub meshes: Vec<SceneObject>,
     pub sound_sources: Vec<SoundSource>,

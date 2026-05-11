@@ -20,6 +20,7 @@ pub struct GasSimulation {
     pub sources: Vec<GasSource>,
 }
 
+#[allow(dead_code)]
 impl GasSimulation {
     /// Create a new simulation with the given config but no grid allocated.
     pub fn new(config: GasConfig) -> Self {
@@ -83,7 +84,7 @@ impl GasSimulation {
     pub fn step(&mut self) {
         if let Some(ref mut grid) = self.grid {
             // Apply sources to inject concentration.
-            apply_sources(grid, &self.sources);
+            apply_sources(grid, &self.sources, self.config.dt);
             // Run the full solver step (advect -> diffuse -> buoyancy -> pressure).
             solver::step(grid, &self.config);
             self.frame += 1;
@@ -228,5 +229,148 @@ mod tests {
             "Elapsed time should be 0.0 after reset"
         );
         assert!(!sim.running, "Simulation should not be running after reset");
+    }
+
+    // ---- Q3 Edge Case Tests ----
+
+    #[test]
+    fn test_edge_step_no_grid() {
+        // step() with no grid initialized should be a no-op (not panic)
+        let mut sim = GasSimulation::new(GasConfig::default());
+        assert!(sim.grid.is_none());
+
+        sim.step();
+
+        assert_eq!(sim.frame, 0, "Frame should stay 0 with no grid");
+        assert!(
+            (sim.elapsed_time - 0.0).abs() < 1e-6,
+            "Elapsed time should stay 0 with no grid"
+        );
+    }
+
+    #[test]
+    fn test_edge_default_simulation() {
+        let sim = GasSimulation::default();
+        assert!(sim.grid.is_none());
+        assert!(!sim.running);
+        assert_eq!(sim.frame, 0);
+        assert!((sim.elapsed_time - 0.0).abs() < 1e-6);
+        assert!(sim.sources.is_empty());
+        // Verify default config values
+        assert!((sim.config.dt - 0.016).abs() < 1e-6);
+        assert!((sim.config.ambient_temperature - 293.15).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_edge_reinitialize() {
+        let mut sim = GasSimulation::new(GasConfig::default());
+        let species1 = vec![make_species("CO2")];
+        let bounds1 = (Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0));
+        sim.initialize(bounds1, 0.5, species1, &[]);
+        sim.step();
+        sim.step();
+        assert_eq!(sim.frame, 2);
+
+        // Re-initialize with different parameters
+        let species2 = vec![make_species("CH4"), make_species("N2O")];
+        let bounds2 = (Vec3::ZERO, Vec3::new(3.0, 3.0, 3.0));
+        sim.initialize(bounds2, 1.0, species2, &[]);
+
+        // Frame and elapsed time should be reset
+        assert_eq!(sim.frame, 0, "Frame should reset on re-initialize");
+        assert!(
+            (sim.elapsed_time - 0.0).abs() < 1e-6,
+            "Elapsed time should reset on re-initialize"
+        );
+
+        let grid = sim.grid.as_ref().unwrap();
+        assert_eq!(grid.species.len(), 2, "Should have new species count");
+        assert_eq!(grid.nx, 3, "Should have new dimensions");
+    }
+
+    #[test]
+    fn test_edge_step_with_sources() {
+        let mut sim = GasSimulation::new(GasConfig::default());
+        let species = vec![make_species("CO2")];
+        let bounds = (Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
+        sim.initialize(bounds, 1.0, species, &[]);
+
+        // Add a source
+        let grid = sim.grid.as_ref().unwrap();
+        let source_pos = grid.cell_center(2, 2, 2);
+        sim.sources.push(GasSource {
+            position: source_pos,
+            species_index: 0,
+            rate: 10.0,
+            radius: 1.5,
+        });
+
+        // Step should apply sources then run solver
+        sim.step();
+
+        let grid = sim.grid.as_ref().unwrap();
+        let center_idx = grid.idx(2, 2, 2);
+        assert!(
+            grid.concentrations[0][center_idx] > 0.0,
+            "Source should inject concentration during step"
+        );
+        assert_eq!(sim.frame, 1);
+    }
+
+    #[test]
+    fn test_edge_initialize_tiny_extent() {
+        // Very small extent should still produce at least 1x1x1 grid
+        let mut sim = GasSimulation::new(GasConfig::default());
+        let species = vec![make_species("Air")];
+        let bounds = (Vec3::ZERO, Vec3::new(0.01, 0.01, 0.01));
+        sim.initialize(bounds, 1.0, species, &[]);
+
+        let grid = sim.grid.as_ref().unwrap();
+        assert!(grid.nx >= 1, "nx should be at least 1");
+        assert!(grid.ny >= 1, "ny should be at least 1");
+        assert!(grid.nz >= 1, "nz should be at least 1");
+    }
+
+    #[test]
+    fn test_edge_initialize_sets_ambient_temperature() {
+        let config = GasConfig {
+            dt: 0.01,
+            ambient_temperature: 350.0,
+            thermal_diffusivity: 0.02,
+            buoyancy_coefficient: 0.01,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+        };
+        let mut sim = GasSimulation::new(config);
+        let species = vec![make_species("Air")];
+        let bounds = (Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0));
+        sim.initialize(bounds, 1.0, species, &[]);
+
+        let grid = sim.grid.as_ref().unwrap();
+        // All Gas cells should have ambient temperature
+        for idx in 0..grid.temperature.len() {
+            if grid.cell_types[idx] == grid::GasCellType::Gas {
+                assert!(
+                    (grid.temperature[idx] - 350.0).abs() < 1e-3,
+                    "Gas cell should have ambient temp 350.0, got {}",
+                    grid.temperature[idx]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_edge_reset_then_step() {
+        let mut sim = GasSimulation::new(GasConfig::default());
+        let species = vec![make_species("Air")];
+        sim.initialize((Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)), 1.0, species, &[]);
+        sim.step();
+        sim.reset();
+
+        // Step after reset should be a no-op (no grid)
+        sim.step();
+        assert_eq!(
+            sim.frame, 0,
+            "Step after reset with no grid should be no-op"
+        );
     }
 }

@@ -1293,5 +1293,3 @@ fn focus_on_scene(cam: &mut Camera, scene: &Scene) {
     let radius = (max - min).length() * 0.5;
     cam.focus_on(center, radius);
 }
-
-use egui;

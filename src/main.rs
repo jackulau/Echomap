@@ -20,7 +20,10 @@ fn main() -> eframe::Result<()> {
 
 mod app {
     use echomap::acoustics::SimulationState;
-    use echomap::agent::bridge::{create_bridge, AgentActivityLog, SimBridgeClient};
+    use echomap::agent::bridge::{
+        create_bridge, AgentActivityLog, SimBridgeClient, SimBridgeServer,
+    };
+    use echomap::agent::demo::{DemoAgentHandle, DemoBehavior};
     use echomap::agent::{AgentServerConfig, AgentServerHandle};
     use echomap::fluids::FluidSimulation;
     use echomap::gas::GasSimulation;
@@ -38,9 +41,12 @@ mod app {
         viewport: ViewportState,
         show_settings: bool,
         bridge_client: SimBridgeClient,
+        bridge_server: Option<SimBridgeServer>,
         agent_server_config: AgentServerConfig,
         agent_server_handle: Option<AgentServerHandle>,
         activity_log: AgentActivityLog,
+        demo_handle: Option<DemoAgentHandle>,
+        demo_behavior: DemoBehavior,
     }
 
     impl EchoMapApp {
@@ -48,19 +54,15 @@ mod app {
             let (bridge_server, bridge_client) = create_bridge();
 
             let agent_server_config = AgentServerConfig::default();
-            let agent_server_handle = if agent_server_config.enabled {
+            let (agent_server_handle, retained_bridge) = if agent_server_config.enabled {
                 log::info!("Starting agent server (enabled by default config)");
-                Some(echomap::agent::start_agent_server(
+                let handle = echomap::agent::start_agent_server(
                     agent_server_config.clone(),
-                    bridge_server,
-                ))
+                    bridge_server.clone(),
+                );
+                (Some(handle), Some(bridge_server))
             } else {
-                // Store the bridge server for later use when toggled on.
-                // We need to keep it alive; store via Option dance.
-                // Since bridge_server is Clone, we just drop it here — a new
-                // bridge will be created when the server is toggled on.
-                drop(bridge_server);
-                None
+                (None, Some(bridge_server))
             };
 
             Self {
@@ -72,9 +74,12 @@ mod app {
                 viewport: ViewportState::default(),
                 show_settings: false,
                 bridge_client,
+                bridge_server: retained_bridge,
                 agent_server_config,
                 agent_server_handle,
                 activity_log: AgentActivityLog::default(),
+                demo_handle: None,
+                demo_behavior: DemoBehavior::ReachTarget,
             }
         }
     }
@@ -115,6 +120,9 @@ mod app {
                 &self.activity_log,
                 &self.robot_manager,
                 &self.agent_server_handle,
+                &mut self.demo_handle,
+                &mut self.demo_behavior,
+                &self.bridge_server,
             );
             echomap::ui::viewport_3d(
                 ctx,
@@ -141,6 +149,11 @@ mod app {
                     &mut self.fluid_sim,
                     &mut self.gas_sim,
                 );
+            }
+
+            // Request continuous repainting when demo agent is running.
+            if self.demo_handle.as_ref().is_some_and(|h| h.is_running()) {
+                ctx.request_repaint();
             }
         }
     }

@@ -1,7 +1,10 @@
 use glam::Vec3;
 
 use crate::acoustics::SimulationState;
-use crate::agent::bridge::{create_bridge, AgentActivityLog, AgentEventKind, SimBridgeClient};
+use crate::agent::bridge::{
+    create_bridge, AgentActivityLog, AgentEventKind, SimBridgeClient, SimBridgeServer,
+};
+use crate::agent::demo::{DemoAgentHandle, DemoBehavior};
 use crate::agent::{AgentServerConfig, AgentServerHandle};
 use crate::fluids::FluidSimulation;
 use crate::gas::GasSimulation;
@@ -1467,18 +1470,77 @@ pub fn status_bar(ctx: &egui::Context, vp: &ViewportState, scene: &Scene) {
 }
 
 /// Agent activity panel: shows live connection status, command log, sensor
-/// readings, step count, and reward per robot.
+/// readings, step count, and reward per robot. Also controls the demo agent.
+#[allow(clippy::too_many_arguments)]
 pub fn agent_activity_panel(
     ctx: &egui::Context,
     activity_log: &AgentActivityLog,
     robot_manager: &RobotManager,
     agent_handle: &Option<AgentServerHandle>,
+    demo_handle: &mut Option<DemoAgentHandle>,
+    demo_behavior: &mut DemoBehavior,
+    bridge_server: &Option<SimBridgeServer>,
 ) {
     egui::SidePanel::right("agent_activity_panel")
         .default_width(260.0)
         .resizable(true)
         .show(ctx, |ui| {
             ui.heading("Agent Activity");
+            ui.separator();
+
+            // --- Demo Agent Controls ---
+            egui::CollapsingHeader::new("Demo Agent")
+                .id_salt("demo_agent_ctrl")
+                .default_open(true)
+                .show(ui, |ui| {
+                    let is_running = demo_handle.as_ref().is_some_and(|h| h.is_running());
+
+                    if is_running {
+                        ui.colored_label(egui::Color32::from_rgb(80, 220, 80), "Running");
+
+                        // Behavior selector
+                        ui.horizontal(|ui| {
+                            ui.label("Behavior:");
+                        });
+                        let behaviors = [
+                            DemoBehavior::ReachTarget,
+                            DemoBehavior::ExploreRoom,
+                            DemoBehavior::AvoidObstacles,
+                        ];
+                        for b in &behaviors {
+                            if ui
+                                .selectable_label(*demo_behavior == *b, b.label())
+                                .clicked()
+                            {
+                                *demo_behavior = *b;
+                                if let Some(ref h) = demo_handle {
+                                    h.set_behavior(*b);
+                                }
+                            }
+                        }
+
+                        if ui.button("Stop Demo Agent").clicked() {
+                            if let Some(ref mut h) = demo_handle {
+                                h.stop();
+                            }
+                            *demo_handle = None;
+                        }
+                    } else {
+                        ui.colored_label(egui::Color32::from_rgb(180, 180, 180), "Stopped");
+                        if let Some(ref bridge) = bridge_server {
+                            if ui.button("Start Demo Agent").clicked() {
+                                let handle = crate::agent::demo::start_demo_agent(
+                                    bridge.clone(),
+                                    *demo_behavior,
+                                );
+                                *demo_handle = Some(handle);
+                            }
+                        } else {
+                            ui.label("Enable Agent Server first.");
+                        }
+                    }
+                });
+
             ui.separator();
 
             // --- Connection Status ---

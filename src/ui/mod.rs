@@ -1088,6 +1088,7 @@ pub fn viewport_3d(
     fluid_sim: &crate::fluids::FluidSimulation,
     gas_sim: &GasSimulation,
     robot_manager: &RobotManager,
+    activity_log: &AgentActivityLog,
 ) {
     egui::CentralPanel::default().show(ctx, |ui| {
         let (response, painter) =
@@ -1354,6 +1355,7 @@ pub fn viewport_3d(
                 &painter,
                 robot_manager,
                 vp.show_sensor_rays,
+                activity_log,
                 cam,
                 center,
                 scale,
@@ -1595,8 +1597,16 @@ pub fn agent_activity_panel(
                     }
                     for (i, robot) in robot_manager.robots.iter().enumerate() {
                         let color = robot_color(i);
+                        let connected = activity_log.is_connected(i);
+                        let conn_label = if connected { "connected" } else { "idle" };
+                        let conn_color = if connected {
+                            egui::Color32::from_rgb(80, 220, 80)
+                        } else {
+                            egui::Color32::from_rgb(150, 150, 150)
+                        };
                         ui.horizontal(|ui| {
-                            ui.colored_label(color, format!("[{}] {}", i, robot.definition.name));
+                            ui.colored_label(color, format!("R{} {}", i, robot.definition.name));
+                            ui.colored_label(conn_color, conn_label);
                         });
 
                         let steps = activity_log.step_counts.get(i).copied().unwrap_or(0);
@@ -1883,6 +1893,7 @@ fn render_robots(
     painter: &egui::Painter,
     robot_manager: &RobotManager,
     show_sensor_rays: bool,
+    activity_log: &AgentActivityLog,
     cam: &Camera,
     center: egui::Pos2,
     scale: f32,
@@ -1941,7 +1952,7 @@ fn render_robots(
             render_sensor_rays(painter, robot, sensor_color, cam, center, scale);
         }
 
-        // --- Label: robot name above base link ---
+        // --- Label: robot name + connection status above base link ---
         if !link_poses.is_empty() {
             let base_pos = Vec3::new(
                 link_poses[0].w_axis.x,
@@ -1950,13 +1961,27 @@ fn render_robots(
             );
             let lp = project_3d(base_pos, cam, center, scale);
             if rect.contains(lp) {
+                // Connection status indicator
+                let connected = activity_log.is_connected(robot_idx);
+                let status_icon = if connected { "[A]" } else { "[-]" };
+                let status_color = if connected {
+                    egui::Color32::from_rgb(80, 220, 80)
+                } else {
+                    egui::Color32::from_rgb(150, 150, 150)
+                };
+
+                let label = format!("{} {} R{}", status_icon, robot.definition.name, robot_idx);
                 painter.text(
                     lp,
                     egui::Align2::CENTER_BOTTOM,
-                    &robot.definition.name,
+                    &label,
                     egui::FontId::proportional(11.0),
                     color,
                 );
+
+                // Small status dot next to the label
+                let dot_pos = egui::Pos2::new(lp.x - 30.0, lp.y - 4.0);
+                painter.circle_filled(dot_pos, 3.0, status_color);
             }
         }
     }

@@ -48,6 +48,8 @@ pub struct AgentActivityLog {
     pub step_counts: Vec<u64>,
     /// Per-robot latest reward (from Step responses).
     pub latest_rewards: Vec<f32>,
+    /// Per-robot connection status.
+    pub connected_robots: Vec<bool>,
 }
 
 impl Default for AgentActivityLog {
@@ -65,6 +67,7 @@ impl AgentActivityLog {
             elapsed: 0.0,
             step_counts: Vec::new(),
             latest_rewards: Vec::new(),
+            connected_robots: Vec::new(),
         }
     }
 
@@ -115,6 +118,26 @@ impl AgentActivityLog {
             self.latest_rewards.resize(robot_id + 1, 0.0);
         }
         self.latest_rewards[robot_id] = reward;
+    }
+
+    /// Record that a robot is connected (controlled by an agent).
+    pub fn set_connected(&mut self, robot_id: usize) {
+        if self.connected_robots.len() <= robot_id {
+            self.connected_robots.resize(robot_id + 1, false);
+        }
+        self.connected_robots[robot_id] = true;
+    }
+
+    /// Record that a robot has been disconnected/removed.
+    pub fn set_disconnected(&mut self, robot_id: usize) {
+        if robot_id < self.connected_robots.len() {
+            self.connected_robots[robot_id] = false;
+        }
+    }
+
+    /// Check if a robot is currently connected to an agent.
+    pub fn is_connected(&self, robot_id: usize) -> bool {
+        self.connected_robots.get(robot_id).copied().unwrap_or(false)
     }
 }
 
@@ -383,6 +406,7 @@ fn log_command(cmd: &SimCommand, log: &mut AgentActivityLog) {
                 Some(*robot_id),
                 "RemoveRobot".into(),
             );
+            log.set_disconnected(*robot_id);
         }
         SimCommand::GetSpaces { robot_id } => {
             log.push(
@@ -400,12 +424,18 @@ fn log_response(response: &SimResponse, log: &mut AgentActivityLog) {
         SimResponse::RobotAdded { robot_id } => {
             log.set_step_count(*robot_id, 0);
             log.set_reward(*robot_id, 0.0);
+            log.set_connected(*robot_id);
+        }
+        SimResponse::Removed => {
+            // Robot removed; we don't have the id here but the command
+            // log captured it.
         }
         SimResponse::Stepped { step_count, .. } => {
-            // We don't know robot_id here, but step_counts are updated
-            // in execute() via self.step_counts. The log mirrors it.
-            // For now, just record that a step completed.
             let _ = step_count;
+        }
+        SimResponse::Spaces { .. } => {
+            // GetSpaces succeeded — marks a successful agent connection.
+            // Robot ID was logged in log_command.
         }
         SimResponse::Error { message } => {
             log.push(AgentEventKind::Error, None, format!("Error: {message}"));

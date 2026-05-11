@@ -29,6 +29,7 @@ fn main() -> eframe::Result<()> {
 mod app {
     use crate::acoustics::SimulationState;
     use crate::fluids::FluidSimulation;
+    use crate::gas::GasSimulation;
     use crate::scene::Scene;
     use crate::ui::ViewportState;
     use eframe::egui;
@@ -37,6 +38,7 @@ mod app {
         scene: Scene,
         simulation: SimulationState,
         fluid_sim: FluidSimulation,
+        gas_sim: GasSimulation,
         viewport: ViewportState,
         show_settings: bool,
     }
@@ -47,6 +49,7 @@ mod app {
                 scene: Scene::default(),
                 simulation: SimulationState::default(),
                 fluid_sim: FluidSimulation::default(),
+                gas_sim: GasSimulation::default(),
                 viewport: ViewportState::default(),
                 show_settings: false,
             }

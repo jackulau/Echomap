@@ -1359,6 +1359,19 @@ pub fn viewport_3d(
                 scale,
                 rect,
             );
+
+            // --- Environment interaction overlays ---
+            render_environment_interactions(
+                &painter,
+                robot_manager,
+                scene,
+                fluid_sim,
+                gas_sim,
+                cam,
+                center,
+                scale,
+                rect,
+            );
         }
 
         // Sound sources
@@ -2188,5 +2201,348 @@ fn render_sensor_rays(
             // Contact and IMU sensors have no visual ray
             SensorDefinition::Contact | SensorDefinition::Imu => {}
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Environment interaction visualization
+// ---------------------------------------------------------------------------
+
+/// Draw contact force arrows, fluid disturbance indicators, and gas
+/// displacement effects near robot links.
+#[allow(clippy::too_many_arguments)]
+fn render_environment_interactions(
+    painter: &egui::Painter,
+    robot_manager: &RobotManager,
+    scene: &Scene,
+    fluid_sim: &crate::fluids::FluidSimulation,
+    gas_sim: &GasSimulation,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    for (robot_idx, robot) in robot_manager.robots.iter().enumerate() {
+        let link_poses = robot.state.link_poses_as_mat4();
+        let color = robot_color(robot_idx);
+
+        for (link_idx, link_def) in robot.definition.links.iter().enumerate() {
+            if link_idx >= link_poses.len() {
+                break;
+            }
+            let pose = link_poses[link_idx];
+            let link_pos = Vec3::new(pose.w_axis.x, pose.w_axis.y, pose.w_axis.z);
+
+            // --- Contact force arrows ---
+            render_contact_arrows(
+                painter,
+                link_pos,
+                &link_def.collision_shape,
+                scene,
+                cam,
+                center,
+                scale,
+                rect,
+            );
+
+            // --- Fluid disturbance indicators ---
+            if let Some(ref grid) = fluid_sim.grid {
+                render_fluid_disturbance(painter, link_pos, grid, color, cam, center, scale, rect);
+            }
+
+            // --- Gas displacement visualization ---
+            if let Some(ref grid) = gas_sim.grid {
+                render_gas_displacement(painter, link_pos, grid, cam, center, scale, rect);
+            }
+        }
+    }
+}
+
+/// Draw contact force arrows when a robot link is near scene geometry.
+///
+/// For each scene triangle, if the link center is within a threshold
+/// distance, draw an arrow from the triangle surface toward the link
+/// center, indicating a repulsion/contact force.
+#[allow(clippy::too_many_arguments)]
+fn render_contact_arrows(
+    painter: &egui::Painter,
+    link_pos: Vec3,
+    shape: &CollisionShape,
+    scene: &Scene,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let contact_radius = match shape {
+        CollisionShape::Sphere { radius } => *radius,
+        CollisionShape::Cuboid { half_extents } => half_extents.length(),
+        CollisionShape::Cylinder { radius, height } => {
+            (radius * radius + (height / 2.0).powi(2)).sqrt()
+        }
+    };
+
+    // Extend the detection radius slightly for visual feedback.
+    let detect_radius = contact_radius * 1.5;
+    let arrow_color = egui::Color32::from_rgb(255, 80, 60);
+
+    for obj in &scene.meshes {
+        if !obj.visible {
+            continue;
+        }
+        for tri in &obj.mesh.triangles {
+            // Use triangle centroid as proxy for closest point.
+            let centroid =
+                (tri.vertices[0].position + tri.vertices[1].position + tri.vertices[2].position)
+                    / 3.0;
+            let diff = link_pos - centroid;
+            let dist = diff.length();
+
+            if dist < detect_radius && dist > 1e-6 {
+                // Draw an arrow from centroid toward link (contact normal direction).
+                let arrow_dir = diff / dist;
+                let arrow_len = (detect_radius - dist).min(0.3);
+                let arrow_end = centroid + arrow_dir * arrow_len;
+
+                let p1 = project_3d(centroid, cam, center, scale);
+                let p2 = project_3d(arrow_end, cam, center, scale);
+
+                if rect.contains(p1) || rect.contains(p2) {
+                    // Arrow shaft.
+                    let intensity = 1.0 - (dist / detect_radius);
+                    let alpha = (intensity * 200.0) as u8;
+                    let c = egui::Color32::from_rgba_premultiplied(
+                        arrow_color.r(),
+                        arrow_color.g(),
+                        arrow_color.b(),
+                        alpha,
+                    );
+                    painter.line_segment([p1, p2], egui::Stroke::new(2.0, c));
+
+                    // Arrowhead (small triangle).
+                    painter.circle_filled(p2, 3.0, c);
+                }
+            }
+        }
+    }
+}
+
+/// Draw fluid disturbance indicators near a robot link.
+///
+/// Samples the fluid velocity field at the link's grid cell and nearby
+/// cells, drawing small velocity arrows to show fluid being disturbed.
+#[allow(clippy::too_many_arguments)]
+fn render_fluid_disturbance(
+    painter: &egui::Painter,
+    link_pos: Vec3,
+    grid: &crate::fluids::grid::FluidGrid,
+    color: egui::Color32,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    // Convert link position to grid coordinates.
+    let rel = link_pos - grid.origin;
+    let gi = (rel.x / grid.dx) as i32;
+    let gj = (rel.y / grid.dx) as i32;
+    let gk = (rel.z / grid.dx) as i32;
+
+    let nx = grid.nx as i32;
+    let ny = grid.ny as i32;
+    let nz = grid.nz as i32;
+
+    // Sample a 3x3x3 neighborhood around the link cell.
+    let arrow_color = egui::Color32::from_rgba_premultiplied(
+        color.r() / 2 + 60,
+        color.g() / 2 + 100,
+        color.b() / 2 + 120,
+        140,
+    );
+
+    for di in -1..=1 {
+        for dj in -1..=1 {
+            for dk in -1..=1 {
+                let ci = gi + di;
+                let cj = gj + dj;
+                let ck = gk + dk;
+
+                if ci < 0 || cj < 0 || ck < 0 || ci >= nx || cj >= ny || ck >= nz {
+                    continue;
+                }
+
+                let ci = ci as usize;
+                let cj = cj as usize;
+                let ck = ck as usize;
+
+                // Sample cell-centered velocity (average of face values).
+                let u_avg = sample_u(grid, ci, cj, ck);
+                let v_avg = sample_v(grid, ci, cj, ck);
+                let w_avg = sample_w(grid, ci, cj, ck);
+
+                let speed = (u_avg * u_avg + v_avg * v_avg + w_avg * w_avg).sqrt();
+                if speed < 0.01 {
+                    continue;
+                }
+
+                // World position of cell center.
+                let cell_pos = grid.origin
+                    + Vec3::new(
+                        (ci as f32 + 0.5) * grid.dx,
+                        (cj as f32 + 0.5) * grid.dx,
+                        (ck as f32 + 0.5) * grid.dx,
+                    );
+
+                let vel = Vec3::new(u_avg, v_avg, w_avg);
+                let arrow_len = (speed * 0.5).min(grid.dx * 2.0);
+                let end = cell_pos + vel.normalize() * arrow_len;
+
+                let p1 = project_3d(cell_pos, cam, center, scale);
+                let p2 = project_3d(end, cam, center, scale);
+
+                if rect.contains(p1) || rect.contains(p2) {
+                    painter.line_segment([p1, p2], egui::Stroke::new(1.5, arrow_color));
+                    painter.circle_filled(p2, 2.0, arrow_color);
+                }
+            }
+        }
+    }
+}
+
+/// Sample cell-centered x-velocity by averaging adjacent face values.
+fn sample_u(grid: &crate::fluids::grid::FluidGrid, i: usize, j: usize, k: usize) -> f32 {
+    let idx_lo = i * grid.ny * grid.nz + j * grid.nz + k;
+    let idx_hi = (i + 1) * grid.ny * grid.nz + j * grid.nz + k;
+    let u_lo = grid.u.get(idx_lo).copied().unwrap_or(0.0);
+    let u_hi = grid.u.get(idx_hi).copied().unwrap_or(0.0);
+    (u_lo + u_hi) * 0.5
+}
+
+/// Sample cell-centered y-velocity by averaging adjacent face values.
+fn sample_v(grid: &crate::fluids::grid::FluidGrid, i: usize, j: usize, k: usize) -> f32 {
+    let idx_lo = i * (grid.ny + 1) * grid.nz + j * grid.nz + k;
+    let idx_hi = i * (grid.ny + 1) * grid.nz + (j + 1) * grid.nz + k;
+    let v_lo = grid.v.get(idx_lo).copied().unwrap_or(0.0);
+    let v_hi = grid.v.get(idx_hi).copied().unwrap_or(0.0);
+    (v_lo + v_hi) * 0.5
+}
+
+/// Sample cell-centered z-velocity by averaging adjacent face values.
+fn sample_w(grid: &crate::fluids::grid::FluidGrid, i: usize, j: usize, k: usize) -> f32 {
+    let idx_lo = i * grid.ny * (grid.nz + 1) + j * (grid.nz + 1) + k;
+    let idx_hi = i * grid.ny * (grid.nz + 1) + j * (grid.nz + 1) + (k + 1);
+    let w_lo = grid.w.get(idx_lo).copied().unwrap_or(0.0);
+    let w_hi = grid.w.get(idx_hi).copied().unwrap_or(0.0);
+    (w_lo + w_hi) * 0.5
+}
+
+/// Draw gas displacement visualization near a robot link.
+///
+/// Shows concentration gradient disturbance as small colored circles
+/// where the gas density differs significantly from average.
+#[allow(clippy::too_many_arguments)]
+fn render_gas_displacement(
+    painter: &egui::Painter,
+    link_pos: Vec3,
+    grid: &crate::gas::grid::GasGrid,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let rel = link_pos - grid.origin;
+    let gi = (rel.x / grid.dx) as i32;
+    let gj = (rel.y / grid.dx) as i32;
+    let gk = (rel.z / grid.dx) as i32;
+
+    let nx = grid.nx as i32;
+    let ny = grid.ny as i32;
+    let nz = grid.nz as i32;
+
+    if grid.concentrations.is_empty() {
+        return;
+    }
+
+    // Use first species for visualization.
+    let conc = &grid.concentrations[0];
+
+    // Sample 3x3x3 neighborhood and compute average concentration.
+    let mut sum = 0.0_f32;
+    let mut count = 0_u32;
+    let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+
+    for di in -1..=1 {
+        for dj in -1..=1 {
+            for dk in -1..=1 {
+                let ci = gi + di;
+                let cj = gj + dj;
+                let ck = gk + dk;
+                if ci < 0 || cj < 0 || ck < 0 || ci >= nx || cj >= ny || ck >= nz {
+                    continue;
+                }
+                let ci = ci as usize;
+                let cj = cj as usize;
+                let ck = ck as usize;
+                let idx = ci * grid.ny * grid.nz + cj * grid.nz + ck;
+                if let Some(&c) = conc.get(idx) {
+                    sum += c;
+                    count += 1;
+                    cells.push((ci, cj, ck));
+                }
+            }
+        }
+    }
+
+    if count == 0 {
+        return;
+    }
+
+    let avg = sum / count as f32;
+    if avg < 1e-6 {
+        return;
+    }
+
+    // Draw indicators where concentration deviates from average.
+    for (ci, cj, ck) in cells {
+        let idx = ci * grid.ny * grid.nz + cj * grid.nz + ck;
+        let c = conc.get(idx).copied().unwrap_or(0.0);
+        let deviation = (c - avg).abs() / avg;
+
+        if deviation < 0.05 {
+            continue;
+        }
+
+        let cell_pos = grid.origin
+            + Vec3::new(
+                (ci as f32 + 0.5) * grid.dx,
+                (cj as f32 + 0.5) * grid.dx,
+                (ck as f32 + 0.5) * grid.dx,
+            );
+
+        let p = project_3d(cell_pos, cam, center, scale);
+        if !rect.contains(p) {
+            continue;
+        }
+
+        // Color: green = higher concentration, yellow = lower.
+        let intensity = deviation.min(1.0);
+        let gas_color = if c > avg {
+            egui::Color32::from_rgba_premultiplied(
+                80,
+                (180.0 + intensity * 75.0) as u8,
+                80,
+                (100.0 + intensity * 100.0) as u8,
+            )
+        } else {
+            egui::Color32::from_rgba_premultiplied(
+                (200.0 + intensity * 55.0) as u8,
+                (200.0 + intensity * 55.0) as u8,
+                60,
+                (80.0 + intensity * 100.0) as u8,
+            )
+        };
+
+        let radius = 2.0 + intensity * 4.0;
+        painter.circle_filled(p, radius, gas_color);
     }
 }

@@ -29,7 +29,8 @@ pub fn compute_scattering(
     }
 
     // Wavelength = speed_of_sound / frequency
-    let frequency_hz = frequency_hz.max(1.0); // guard against zero frequency
+    let frequency_hz = frequency_hz.max(1.0);
+    let speed_of_sound = speed_of_sound.max(1e-6);
     let wavelength = speed_of_sound / frequency_hz;
 
     // Ratio of roughness to wavelength determines scattering behavior.
@@ -230,5 +231,276 @@ mod tests {
                 u2
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Edge case tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_edge_roughness_one_max_diffuse() {
+        // roughness = 1.0 (max realistic), should be fully diffuse at typical audio
+        let result = compute_scattering(1.0, 1000.0, 343.0);
+        assert!(
+            result.diffuse_weight > 0.99,
+            "roughness=1.0 should be nearly fully diffuse, got diffuse={}",
+            result.diffuse_weight
+        );
+        assert!(
+            (result.specular_weight + result.diffuse_weight - 1.0).abs() < EPSILON,
+            "Weights should sum to 1.0"
+        );
+    }
+
+    #[test]
+    fn test_edge_frequency_1hz() {
+        // Very low frequency: huge wavelength, surface appears smooth
+        let result = compute_scattering(0.01, 1.0, 343.0);
+        // wavelength = 343.0m, roughness/wavelength = 0.01/343 ~ 3e-5
+        assert!(
+            result.specular_weight > 0.99,
+            "1Hz frequency should make any surface appear specular, got {}",
+            result.specular_weight
+        );
+    }
+
+    #[test]
+    fn test_edge_frequency_1mhz() {
+        // Very high frequency: tiny wavelength, even smooth surface becomes diffuse
+        let result = compute_scattering(0.001, 1_000_000.0, 343.0);
+        // wavelength = 343/1e6 = 0.000343m, roughness/wavelength = 0.001/0.000343 ~ 2.9
+        assert!(
+            result.diffuse_weight > 0.9,
+            "1MHz with roughness=0.001 should be mostly diffuse, got diffuse={}",
+            result.diffuse_weight
+        );
+    }
+
+    #[test]
+    fn test_edge_speed_of_sound_zero() {
+        // speed_of_sound = 0 should be clamped to 1e-6
+        let result = compute_scattering(0.01, 1000.0, 0.0);
+        assert!(
+            result.specular_weight.is_finite(),
+            "speed_of_sound=0 should produce finite result, got specular={}",
+            result.specular_weight
+        );
+        assert!(
+            result.diffuse_weight.is_finite(),
+            "speed_of_sound=0 should produce finite diffuse result"
+        );
+    }
+
+    #[test]
+    fn test_edge_speed_of_sound_negative() {
+        // Negative speed_of_sound should be clamped to 1e-6
+        let result = compute_scattering(0.01, 1000.0, -343.0);
+        assert!(
+            result.specular_weight.is_finite(),
+            "Negative speed_of_sound should produce finite result"
+        );
+    }
+
+    #[test]
+    fn test_edge_negative_roughness_clamped() {
+        let result = compute_scattering(-0.5, 1000.0, 343.0);
+        // Negative roughness clamped to 0 -> specular
+        assert!(
+            (result.specular_weight - 1.0).abs() < EPSILON,
+            "Negative roughness should be clamped to 0 (fully specular), got {}",
+            result.specular_weight
+        );
+    }
+
+    #[test]
+    fn test_edge_negative_frequency_clamped() {
+        // Negative frequency clamped to 1.0
+        let result = compute_scattering(0.01, -1000.0, 343.0);
+        assert!(
+            result.specular_weight.is_finite(),
+            "Negative frequency should produce finite result"
+        );
+    }
+
+    #[test]
+    fn test_edge_all_zero_inputs() {
+        let result = compute_scattering(0.0, 0.0, 0.0);
+        // roughness=0 triggers the early return for perfect mirror
+        assert!(
+            (result.specular_weight - 1.0).abs() < EPSILON,
+            "All-zero inputs should be specular (roughness=0 path)"
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_theta_zero() {
+        // theta=0 should give the peak value
+        let pdf = beckmann_pdf(0.0, 0.3);
+        assert!(
+            pdf > 0.0 && pdf.is_finite(),
+            "PDF at theta=0 should be positive finite, got {}",
+            pdf
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_theta_pi_over_2() {
+        // At theta = pi/2, cos(theta) = 0, should return 0.0 (guard clause)
+        let pdf = beckmann_pdf(std::f32::consts::FRAC_PI_2, 0.3);
+        assert!(
+            pdf.abs() < EPSILON,
+            "PDF at theta=pi/2 should be 0.0, got {}",
+            pdf
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_roughness_1() {
+        // High roughness: PDF should be broader and lower at peak
+        let pdf_low = beckmann_pdf(0.01, 0.1);
+        let pdf_high = beckmann_pdf(0.01, 1.0);
+        assert!(
+            pdf_low > pdf_high,
+            "Low roughness should have higher peak PDF: low={} > high={}",
+            pdf_low,
+            pdf_high
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_zero_roughness() {
+        // roughness=0 -> delta function, returns 0.0
+        let pdf = beckmann_pdf(0.1, 0.0);
+        assert!(
+            pdf.abs() < EPSILON,
+            "Zero roughness PDF should return 0.0, got {}",
+            pdf
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_negative_roughness() {
+        // Negative roughness clamped to 0 -> returns 0.0
+        let pdf = beckmann_pdf(0.1, -0.5);
+        assert!(
+            pdf.abs() < EPSILON,
+            "Negative roughness PDF should return 0.0, got {}",
+            pdf
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_negative_theta() {
+        // Negative theta: cos(-theta)=cos(theta), should still work
+        let pdf_pos = beckmann_pdf(0.3, 0.5);
+        let pdf_neg = beckmann_pdf(-0.3, 0.5);
+        assert!(
+            (pdf_pos - pdf_neg).abs() < EPSILON,
+            "PDF should be symmetric: pos={}, neg={}",
+            pdf_pos,
+            pdf_neg
+        );
+    }
+
+    #[test]
+    fn test_edge_sample_beckmann_zero_roughness() {
+        let dir = sample_beckmann(0.0, 0.5, 0.5);
+        // Should return surface normal (0, 0, 1)
+        assert!(
+            (dir.z - 1.0).abs() < 1e-4,
+            "Zero roughness should sample surface normal, got z={}",
+            dir.z
+        );
+    }
+
+    #[test]
+    fn test_edge_sample_beckmann_u1_zero() {
+        let dir = sample_beckmann(0.5, 0.0, 0.5);
+        // u1=0 -> ln(1-0)=0 -> tan_theta=0 -> theta=0 -> z=1
+        assert!(
+            dir.z > 0.99,
+            "u1=0 should produce near-normal direction, got z={}",
+            dir.z
+        );
+        assert!((dir.length() - 1.0).abs() < 1e-4, "Should be unit length");
+    }
+
+    #[test]
+    fn test_edge_sample_beckmann_u1_one() {
+        // u1=1.0 is clamped to 1.0-1e-7 to avoid ln(0)
+        let dir = sample_beckmann(0.5, 1.0, 0.5);
+        assert!(
+            dir.z >= 0.0,
+            "u1=1.0 should still be in upper hemisphere, got z={}",
+            dir.z
+        );
+        assert!(
+            dir.length().is_finite(),
+            "u1=1.0 should produce finite direction"
+        );
+    }
+
+    #[test]
+    fn test_edge_sample_beckmann_u2_zero_and_one() {
+        // u2 controls azimuthal angle
+        let dir0 = sample_beckmann(0.5, 0.5, 0.0);
+        let dir1 = sample_beckmann(0.5, 0.5, 1.0);
+        // phi=0 and phi=2*pi should be nearly the same direction
+        assert!(
+            (dir0 - dir1).length() < 1e-3,
+            "u2=0 and u2=1 should produce same direction (phi=0 vs 2pi)"
+        );
+    }
+
+    #[test]
+    fn test_edge_sample_beckmann_negative_roughness() {
+        let dir = sample_beckmann(-1.0, 0.5, 0.5);
+        // Negative roughness clamped to 0 -> returns normal
+        assert!(
+            (dir.z - 1.0).abs() < 1e-4,
+            "Negative roughness should clamp to 0 and return normal"
+        );
+    }
+
+    #[test]
+    fn test_edge_scattering_weights_sum_to_one_sweep() {
+        // Sweep roughness and frequency, verify weights always sum to 1.0
+        for roughness in [0.0001, 0.001, 0.01, 0.1, 0.5, 1.0] {
+            for freq in [1.0_f32, 100.0, 1000.0, 10000.0, 100000.0] {
+                let result = compute_scattering(roughness, freq, 343.0);
+                let sum = result.specular_weight + result.diffuse_weight;
+                assert!(
+                    (sum - 1.0).abs() < EPSILON,
+                    "Weights must sum to 1.0 for roughness={roughness}, freq={freq}: got {sum}"
+                );
+                assert!(
+                    result.specular_weight >= 0.0 && result.specular_weight <= 1.0,
+                    "Specular weight out of range [0,1]: {} for roughness={roughness}, freq={freq}",
+                    result.specular_weight
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_edge_scattering_nan_roughness() {
+        let result = compute_scattering(f32::NAN, 1000.0, 343.0);
+        // NaN.max(0.0) returns 0.0 in Rust -> should produce specular
+        assert!(
+            (result.specular_weight - 1.0).abs() < EPSILON,
+            "NaN roughness should be clamped to 0.0 (specular), got {}",
+            result.specular_weight
+        );
+    }
+
+    #[test]
+    fn test_edge_scattering_inf_roughness() {
+        let result = compute_scattering(f32::INFINITY, 1000.0, 343.0);
+        // Inf roughness: k_sigma = Inf, exp(-Inf) = 0 -> fully diffuse
+        assert!(
+            result.diffuse_weight >= 1.0 - EPSILON,
+            "Infinite roughness should be fully diffuse, got {}",
+            result.diffuse_weight
+        );
     }
 }

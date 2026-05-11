@@ -353,10 +353,11 @@ pub fn side_panel(
                                         )
                                         .text("Static Friction"),
                                     );
+                                    let max_kinetic = scene.meshes[i].material.friction_static;
                                     ui.add(
                                         egui::Slider::new(
                                             &mut scene.meshes[i].material.friction_kinetic,
-                                            0.0..=2.0,
+                                            0.0..=max_kinetic,
                                         )
                                         .text("Kinetic Friction"),
                                     );

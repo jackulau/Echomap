@@ -37,7 +37,7 @@ fn default_roughness() -> f32 {
     0.002
 }
 fn default_contact_angle() -> f32 {
-    std::f32::consts::FRAC_PI_2
+    std::f32::consts::FRAC_PI_4
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

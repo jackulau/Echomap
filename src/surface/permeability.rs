@@ -17,7 +17,8 @@ pub fn compute_permeation(
     porosity: f32,
     dx: f32,
 ) -> PermeationResult {
-    // Clamp dx to avoid division by zero
+    let permeability = permeability.max(0.0);
+    let porosity = porosity.clamp(0.0, 1.0);
     let dx = dx.abs().max(1e-10);
     let k_eff = effective_permeability(permeability, porosity);
     let flux = k_eff * concentration_gradient / dx;
@@ -32,7 +33,7 @@ pub fn compute_permeation(
 ///
 /// k_eff = k * porosity
 pub fn effective_permeability(permeability: f32, porosity: f32) -> f32 {
-    permeability * porosity
+    permeability.max(0.0) * porosity.clamp(0.0, 1.0)
 }
 
 #[cfg(test)]

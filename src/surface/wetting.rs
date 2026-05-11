@@ -17,6 +17,7 @@ pub fn compute_wetting(
     surface_tension: f32,
     pore_radius: f32,
 ) -> WettingResult {
+    let surface_tension = surface_tension.max(0.0);
     let cos_angle = contact_angle.cos();
     let surface_energy = surface_tension * cos_angle;
 

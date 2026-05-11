@@ -77,6 +77,7 @@ mod app {
                 &mut self.viewport,
                 &mut self.fluid_sim,
                 &mut self.gas_sim,
+                &mut self.robot_manager,
             );
             crate::ui::viewport_3d(
                 ctx,

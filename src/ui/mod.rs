@@ -7,6 +7,9 @@ use crate::renderer::{
     energy_to_color, project_3d, ray_ground_intersect, render_fluid_slice, render_gas_slice,
     screen_to_ray, Camera, FluidVisualizationMode, GasVisualizationMode,
 };
+use crate::robot::definition::RobotDefinition;
+use crate::robot::state::ActuatorCommand;
+use crate::robot::RobotManager;
 use crate::scene::{Listener, MaterialLibrary, MediumLibrary, Scene, SoundSource};
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +46,7 @@ pub struct ViewportState {
     pub gas_viz_mode: GasVisualizationMode,
     pub gas_slice_y: usize,
     pub gas_species_idx: usize,
+    pub selected_robot: usize,
 }
 
 impl Default for ViewportState {
@@ -64,6 +68,7 @@ impl Default for ViewportState {
             gas_viz_mode: GasVisualizationMode::default(),
             gas_slice_y: 0,
             gas_species_idx: 0,
+            selected_robot: 0,
         }
     }
 }
@@ -206,6 +211,7 @@ pub fn side_panel(
     vp: &mut ViewportState,
     fluid_sim: &mut FluidSimulation,
     gas_sim: &mut GasSimulation,
+    robot_manager: &mut RobotManager,
 ) {
     egui::SidePanel::left("side_panel")
         .default_width(280.0)
@@ -808,6 +814,179 @@ pub fn side_panel(
                         egui::Slider::new(&mut vp.gas_slice_y, 0..=gas_max_y.max(1))
                             .text("Slice Y"),
                     );
+                });
+
+            ui.separator();
+
+            // --- Robot Control ---
+            egui::CollapsingHeader::new(format!("Robot Control ({})", robot_manager.robots.len()))
+                .id_salt("robot_control")
+                .default_open(false)
+                .show(ui, |ui| {
+                    // Start/Stop toggle
+                    ui.horizontal(|ui| {
+                        let label = if robot_manager.running {
+                            "Stop"
+                        } else {
+                            "Start"
+                        };
+                        if ui.button(label).clicked() {
+                            robot_manager.running = !robot_manager.running;
+                        }
+                    });
+
+                    // Add Simple Arm button
+                    if ui.button("Add Simple Arm").clicked() {
+                        let def = RobotDefinition::simple_arm(3);
+                        robot_manager.add_robot(def, glam::Mat4::IDENTITY);
+                    }
+
+                    if robot_manager.robots.is_empty() {
+                        ui.label("No robots. Click 'Add Simple Arm' to add one.");
+                        return;
+                    }
+
+                    // Robot selector (dropdown if multiple robots)
+                    let robot_count = robot_manager.robots.len();
+                    let selected_idx = vp.selected_robot.min(robot_count.saturating_sub(1));
+                    vp.selected_robot = selected_idx;
+
+                    if robot_count > 1 {
+                        let selected_name = robot_manager
+                            .robots
+                            .get(selected_idx)
+                            .map_or("None".to_string(), |r| {
+                                format!("{} [{}]", r.definition.name, selected_idx)
+                            });
+                        egui::ComboBox::from_id_salt("robot_selector")
+                            .selected_text(selected_name)
+                            .show_ui(ui, |ui| {
+                                for (i, robot) in robot_manager.robots.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut vp.selected_robot,
+                                        i,
+                                        format!("{} [{}]", robot.definition.name, i),
+                                    );
+                                }
+                            });
+                    }
+
+                    // Display selected robot details
+                    if let Some(robot) = robot_manager.robots.get(selected_idx) {
+                        ui.label(format!("Name: {}", robot.definition.name));
+                        ui.label(format!(
+                            "Joints: {} | Links: {} | Sensors: {}",
+                            robot.definition.joints.len(),
+                            robot.definition.links.len(),
+                            robot.definition.sensors.len()
+                        ));
+
+                        // Collect joint info for sliders (need to separate borrow)
+                        let joint_infos: Vec<(String, f32, f32, f32, f32)> = robot
+                            .definition
+                            .joints
+                            .iter()
+                            .enumerate()
+                            .map(|(i, jd)| {
+                                let pos =
+                                    robot.state.joint_positions.get(i).copied().unwrap_or(0.0);
+                                let vel =
+                                    robot.state.joint_velocities.get(i).copied().unwrap_or(0.0);
+                                (jd.name.clone(), jd.limit_min, jd.limit_max, pos, vel)
+                            })
+                            .collect();
+
+                        // Sensor reading snapshot
+                        let sensor_readings: Vec<_> = robot.state.sensor_readings.to_vec();
+                        let sensor_defs: Vec<_> = robot.definition.sensors.to_vec();
+
+                        // Joint angles with sliders
+                        if !joint_infos.is_empty() {
+                            ui.separator();
+                            ui.label("Joint Angles:");
+                            let mut commands: Vec<(usize, ActuatorCommand)> = Vec::new();
+                            for (i, (name, limit_min, limit_max, pos, vel)) in
+                                joint_infos.iter().enumerate()
+                            {
+                                egui::CollapsingHeader::new(name)
+                                    .id_salt(format!("joint_{}", i))
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        let mut current_pos = *pos;
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut current_pos,
+                                                    *limit_min..=*limit_max,
+                                                )
+                                                .text("Position"),
+                                            )
+                                            .changed()
+                                        {
+                                            commands
+                                                .push((i, ActuatorCommand::Position(current_pos)));
+                                        }
+                                        ui.label(format!("Velocity: {:.3} rad/s", vel));
+                                    });
+                            }
+                            // Apply slider commands
+                            for (joint_idx, cmd) in commands {
+                                robot_manager.set_command(selected_idx, joint_idx, cmd);
+                            }
+                        }
+
+                        // Sensor readings display
+                        if !sensor_readings.is_empty() {
+                            ui.separator();
+                            ui.label("Sensor Readings:");
+                            for (i, reading) in sensor_readings.iter().enumerate() {
+                                let sensor_name =
+                                    sensor_defs.get(i).map_or(format!("Sensor {}", i), |sd| {
+                                        match &sd.sensor {
+                                        crate::robot::definition::SensorDefinition::Distance {
+                                            ..
+                                        } => format!("Distance [{}]", i),
+                                        crate::robot::definition::SensorDefinition::Lidar {
+                                            ..
+                                        } => format!("Lidar [{}]", i),
+                                        crate::robot::definition::SensorDefinition::Contact => {
+                                            format!("Contact [{}]", i)
+                                        }
+                                        crate::robot::definition::SensorDefinition::Imu => {
+                                            format!("IMU [{}]", i)
+                                        }
+                                    }
+                                    });
+                                match reading {
+                                    crate::robot::state::SensorReading::Distance(d) => {
+                                        ui.label(format!("  {}: {:.3} m", sensor_name, d));
+                                    }
+                                    crate::robot::state::SensorReading::Lidar(rays) => {
+                                        ui.label(format!("  {}: {} rays", sensor_name, rays.len()));
+                                    }
+                                    crate::robot::state::SensorReading::Contact(c) => {
+                                        ui.label(format!("  {}: {}", sensor_name, c));
+                                    }
+                                    crate::robot::state::SensorReading::Imu {
+                                        linear_accel,
+                                        angular_vel,
+                                    } => {
+                                        ui.label(format!(
+                                            "  {}: accel=({:.2},{:.2},{:.2})",
+                                            sensor_name,
+                                            linear_accel.x,
+                                            linear_accel.y,
+                                            linear_accel.z
+                                        ));
+                                        ui.label(format!(
+                                            "    gyro=({:.2},{:.2},{:.2})",
+                                            angular_vel.x, angular_vel.y, angular_vel.z
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 });
         });
 }

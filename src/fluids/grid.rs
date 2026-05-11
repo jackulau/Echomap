@@ -17,6 +17,7 @@ pub enum CellType {
 ///
 /// Scalars (pressure, density, level_set, cell_types) are cell-centered:
 ///   nx x ny x nz
+#[derive(Clone)]
 pub struct FluidGrid {
     /// Number of cells along each axis.
     pub nx: usize,

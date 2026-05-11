@@ -2,6 +2,7 @@ use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
 use super::definition::RobotDefinition;
+use super::sensors::ImuReading;
 
 // ---- Enums ----
 
@@ -93,6 +94,162 @@ impl RobotState {
             self.link_poses[index] = mat.to_cols_array();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Task 6: Gym-compatible robot state types
+// ---------------------------------------------------------------------------
+
+/// Aggregated sensor readings decomposed by sensor type for gym interfaces.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GymSensorReadings {
+    pub distances: Vec<f32>,
+    pub contacts: Vec<bool>,
+    pub imu: Vec<ImuReading>,
+    pub camera_visible: Vec<Vec<usize>>,
+}
+
+/// Gripper open/close state with optional attached object index.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GripperState {
+    pub is_open: bool,
+    pub attached_object: Option<usize>,
+}
+
+/// Gym-compatible snapshot of a robot's full state for agent communication.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GymRobotState {
+    pub joint_positions: Vec<f32>,
+    pub joint_velocities: Vec<f32>,
+    pub sensor_readings: GymSensorReadings,
+    pub gripper_states: Vec<GripperState>,
+}
+
+impl GymRobotState {
+    /// Build a GymRobotState from a low-level RobotState and its definition.
+    ///
+    /// Decomposes the flat `sensor_readings` vector into typed buckets
+    /// (distances, contacts, imu, camera_visible). Camera visible is always
+    /// empty here because the base RobotState does not carry camera data.
+    pub fn from_robot_state(state: &RobotState, _def: &RobotDefinition) -> Self {
+        let mut distances = Vec::new();
+        let mut contacts = Vec::new();
+        let mut imu = Vec::new();
+        let camera_visible: Vec<Vec<usize>> = Vec::new();
+
+        for reading in &state.sensor_readings {
+            match reading {
+                SensorReading::Distance(d) => distances.push(*d),
+                SensorReading::Contact(c) => contacts.push(*c),
+                SensorReading::Imu {
+                    linear_accel,
+                    angular_vel,
+                } => imu.push(ImuReading {
+                    linear_acceleration: *linear_accel,
+                    angular_velocity: *angular_vel,
+                }),
+                SensorReading::Lidar(_) => {
+                    // LIDAR readings are not decomposed into distances here
+                }
+            }
+        }
+
+        Self {
+            joint_positions: state.joint_positions.clone(),
+            joint_velocities: state.joint_velocities.clone(),
+            sensor_readings: GymSensorReadings {
+                distances,
+                contacts,
+                imu,
+                camera_visible,
+            },
+            gripper_states: Vec::new(),
+        }
+    }
+}
+
+/// Describes the dimensions and ranges of sensor outputs (observation space)
+/// for gym-compatible agent interfaces.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ObservationSpace {
+    /// Number of joint position dimensions.
+    pub num_joint_positions: usize,
+    /// Number of joint velocity dimensions.
+    pub num_joint_velocities: usize,
+    /// Total number of sensors.
+    pub num_sensors: usize,
+    /// Per-joint position limits: (min, max).
+    pub joint_position_limits: Vec<(f32, f32)>,
+}
+
+impl ObservationSpace {
+    /// Build an ObservationSpace from a robot definition.
+    pub fn from_definition(def: &RobotDefinition) -> Self {
+        let joint_position_limits: Vec<(f32, f32)> = def
+            .joints
+            .iter()
+            .map(|j| (j.limit_min, j.limit_max))
+            .collect();
+
+        Self {
+            num_joint_positions: def.joints.len(),
+            num_joint_velocities: def.joints.len(),
+            num_sensors: def.sensors.len(),
+            joint_position_limits,
+        }
+    }
+}
+
+/// Describes the dimensions and ranges of motor/gripper commands (action space)
+/// for gym-compatible agent interfaces.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActionSpace {
+    /// Number of motor velocity dimensions (one per joint).
+    pub num_motors: usize,
+    /// Per-motor velocity limits: (min, max) derived from joint max_torque.
+    pub motor_limits: Vec<(f32, f32)>,
+    /// Number of gripper command dimensions.
+    pub num_grippers: usize,
+}
+
+impl ActionSpace {
+    /// Build an ActionSpace from a robot definition.
+    pub fn from_definition(def: &RobotDefinition) -> Self {
+        let motor_limits: Vec<(f32, f32)> = def
+            .joints
+            .iter()
+            .map(|j| (-j.max_torque, j.max_torque))
+            .collect();
+
+        Self {
+            num_motors: def.joints.len(),
+            motor_limits,
+            num_grippers: 0, // grippers are not defined in RobotDefinition
+        }
+    }
+}
+
+/// An action to apply to a robot: motor velocity targets and gripper commands.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RobotAction {
+    /// Target velocity for each motor (one per joint).
+    pub motor_velocities: Vec<f32>,
+    /// Gripper commands: true = close, false = open.
+    pub gripper_commands: Vec<bool>,
+}
+
+/// Apply a RobotAction to a RobotState by setting actuator commands.
+///
+/// Each motor velocity becomes an `ActuatorCommand::Velocity`. The number of
+/// motor velocities is clamped to the number of joints in the definition.
+pub fn apply_action(def: &RobotDefinition, state: &mut RobotState, action: &RobotAction) {
+    let num_joints = def.joints.len();
+    let num_motors = action.motor_velocities.len().min(num_joints);
+
+    state.actuator_commands = action.motor_velocities[..num_motors]
+        .iter()
+        .map(|&v| ActuatorCommand::Velocity(v))
+        .collect();
 }
 
 #[cfg(test)]
@@ -438,5 +595,281 @@ mod tests {
             let deser: SensorReading = serde_json::from_str(&json).unwrap();
             assert_eq!(reading, &deser);
         }
+    }
+
+    // ---- Task 6: Robot state serialization tests ----
+
+    use crate::robot::sensors::ImuReading;
+
+    /// Helper: build a RobotDefinition with 2 joints, 1 distance sensor, 1 contact
+    /// sensor, and 1 IMU sensor for gym-interface tests.
+    fn gym_definition() -> RobotDefinition {
+        use crate::robot::definition::SensorDefinition;
+        RobotDefinition {
+            name: "gym_bot".to_string(),
+            links: vec![
+                LinkDefinition {
+                    name: "base".to_string(),
+                    mass: 5.0,
+                    inertia: 1.0,
+                    collision_shape: CollisionShape::Cuboid {
+                        half_extents: Vec3::splat(0.1),
+                    },
+                    parent_joint: None,
+                },
+                LinkDefinition {
+                    name: "link_1".to_string(),
+                    mass: 1.0,
+                    inertia: 0.1,
+                    collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                    parent_joint: Some(0),
+                },
+                LinkDefinition {
+                    name: "link_2".to_string(),
+                    mass: 1.0,
+                    inertia: 0.1,
+                    collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                    parent_joint: Some(1),
+                },
+            ],
+            joints: vec![
+                JointDefinition {
+                    name: "joint_0".to_string(),
+                    joint_type: JointType::Revolute,
+                    axis: Vec3::Y,
+                    parent_link: 0,
+                    child_link: 1,
+                    limit_min: -std::f32::consts::PI,
+                    limit_max: std::f32::consts::PI,
+                    max_torque: 10.0,
+                    damping: 0.1,
+                },
+                JointDefinition {
+                    name: "joint_1".to_string(),
+                    joint_type: JointType::Revolute,
+                    axis: Vec3::Y,
+                    parent_link: 1,
+                    child_link: 2,
+                    limit_min: -std::f32::consts::PI,
+                    limit_max: std::f32::consts::PI,
+                    max_torque: 5.0,
+                    damping: 0.05,
+                },
+            ],
+            sensors: vec![
+                SensorMount {
+                    link_index: 0,
+                    local_offset: Vec3::ZERO,
+                    sensor: SensorDefinition::Distance {
+                        direction: Vec3::Z,
+                        max_range: 10.0,
+                    },
+                },
+                SensorMount {
+                    link_index: 1,
+                    local_offset: Vec3::ZERO,
+                    sensor: SensorDefinition::Contact,
+                },
+                SensorMount {
+                    link_index: 2,
+                    local_offset: Vec3::ZERO,
+                    sensor: SensorDefinition::Imu,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn test_robot_state_json_roundtrip() {
+        // Build a GymRobotState with non-trivial values and verify JSON round-trip.
+        let state = GymRobotState {
+            joint_positions: vec![1.0, -0.5],
+            joint_velocities: vec![0.1, -0.2],
+            sensor_readings: GymSensorReadings {
+                distances: vec![5.0, 3.2],
+                contacts: vec![true, false],
+                imu: vec![ImuReading {
+                    linear_acceleration: Vec3::new(0.0, -9.81, 0.0),
+                    angular_velocity: Vec3::new(0.1, 0.0, 0.0),
+                }],
+                camera_visible: vec![vec![0, 2], vec![1]],
+            },
+            gripper_states: vec![GripperState {
+                is_open: false,
+                attached_object: Some(3),
+            }],
+        };
+
+        let json = serde_json::to_string(&state).expect("serialization failed");
+        let deser: GymRobotState = serde_json::from_str(&json).expect("deserialization failed");
+
+        // Joint positions
+        assert_eq!(deser.joint_positions.len(), state.joint_positions.len());
+        for (a, b) in state
+            .joint_positions
+            .iter()
+            .zip(deser.joint_positions.iter())
+        {
+            assert!((a - b).abs() < 1e-6);
+        }
+        // Joint velocities
+        for (a, b) in state
+            .joint_velocities
+            .iter()
+            .zip(deser.joint_velocities.iter())
+        {
+            assert!((a - b).abs() < 1e-6);
+        }
+        // Sensor readings
+        assert_eq!(
+            deser.sensor_readings.distances.len(),
+            state.sensor_readings.distances.len()
+        );
+        assert_eq!(
+            deser.sensor_readings.contacts,
+            state.sensor_readings.contacts
+        );
+        assert_eq!(
+            deser.sensor_readings.camera_visible,
+            state.sensor_readings.camera_visible
+        );
+        assert_eq!(
+            deser.sensor_readings.imu.len(),
+            state.sensor_readings.imu.len()
+        );
+        // Gripper states
+        assert_eq!(deser.gripper_states.len(), 1);
+        assert_eq!(deser.gripper_states[0].is_open, false);
+        assert_eq!(deser.gripper_states[0].attached_object, Some(3));
+    }
+
+    #[test]
+    fn test_observation_space_describes_robot() {
+        let def = gym_definition();
+        let obs = ObservationSpace::from_definition(&def);
+
+        // 2 joints => 2 joint position dims + 2 joint velocity dims
+        assert_eq!(
+            obs.num_joint_positions, 2,
+            "should have 2 joint position dimensions"
+        );
+        assert_eq!(
+            obs.num_joint_velocities, 2,
+            "should have 2 joint velocity dimensions"
+        );
+        // 3 sensors
+        assert_eq!(
+            obs.num_sensors,
+            def.sensors.len(),
+            "should match number of sensors"
+        );
+    }
+
+    #[test]
+    fn test_action_space_describes_robot() {
+        let def = gym_definition();
+        let action = ActionSpace::from_definition(&def);
+
+        // 2 joints => 2 motor velocity dimensions
+        assert_eq!(
+            action.num_motors, 2,
+            "should have 2 motor dimensions (one per joint)"
+        );
+        // Limits should match joint limits
+        for (i, joint) in def.joints.iter().enumerate() {
+            assert!(
+                (action.motor_limits[i].0 - (-joint.max_torque)).abs() < 1e-6,
+                "motor limit min should be -max_torque"
+            );
+            assert!(
+                (action.motor_limits[i].1 - joint.max_torque).abs() < 1e-6,
+                "motor limit max should be max_torque"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_action_sets_motors() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+
+        let action = RobotAction {
+            motor_velocities: vec![1.5, -2.0],
+            gripper_commands: vec![],
+        };
+
+        apply_action(&def, &mut state, &action);
+
+        // Actuator commands should be set to Velocity for each motor
+        assert_eq!(state.actuator_commands.len(), 2);
+        assert_eq!(state.actuator_commands[0], ActuatorCommand::Velocity(1.5));
+        assert_eq!(state.actuator_commands[1], ActuatorCommand::Velocity(-2.0));
+    }
+
+    #[test]
+    fn test_apply_action_sets_grippers() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+
+        let action = RobotAction {
+            motor_velocities: vec![0.0, 0.0],
+            gripper_commands: vec![true, false],
+        };
+
+        apply_action(&def, &mut state, &action);
+
+        // Motor commands applied
+        assert_eq!(state.actuator_commands.len(), 2);
+        // Gripper commands are stored in the action and accessible
+        assert_eq!(action.gripper_commands[0], true);
+        assert_eq!(action.gripper_commands[1], false);
+    }
+
+    #[test]
+    fn test_empty_robot_state() {
+        // Robot with no joints and no sensors should have empty state vectors.
+        let def = RobotDefinition {
+            name: "empty_bot".to_string(),
+            links: vec![LinkDefinition {
+                name: "base".to_string(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![],
+        };
+
+        let state = GymRobotState::from_robot_state(&RobotState::new(&def), &def);
+
+        assert!(
+            state.joint_positions.is_empty(),
+            "no joints => empty joint_positions"
+        );
+        assert!(
+            state.joint_velocities.is_empty(),
+            "no joints => empty joint_velocities"
+        );
+        assert!(
+            state.sensor_readings.distances.is_empty(),
+            "no sensors => empty distances"
+        );
+        assert!(
+            state.sensor_readings.contacts.is_empty(),
+            "no sensors => empty contacts"
+        );
+        assert!(
+            state.sensor_readings.imu.is_empty(),
+            "no sensors => empty imu"
+        );
+        assert!(
+            state.sensor_readings.camera_visible.is_empty(),
+            "no sensors => empty camera_visible"
+        );
+        assert!(
+            state.gripper_states.is_empty(),
+            "no grippers => empty gripper_states"
+        );
     }
 }

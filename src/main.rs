@@ -1,4 +1,5 @@
 mod acoustics;
+mod fluids;
 mod io;
 mod renderer;
 mod scene;

@@ -1,14 +1,3 @@
-mod acoustics;
-mod agent;
-mod fluids;
-mod gas;
-mod io;
-mod renderer;
-mod robot;
-mod scene;
-mod surface;
-mod ui;
-
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
@@ -30,14 +19,14 @@ fn main() -> eframe::Result<()> {
 }
 
 mod app {
-    use crate::acoustics::SimulationState;
-    use crate::agent::bridge::{create_bridge, SimBridgeClient};
-    use crate::agent::{AgentServerConfig, AgentServerHandle};
-    use crate::fluids::FluidSimulation;
-    use crate::gas::GasSimulation;
-    use crate::robot::RobotManager;
-    use crate::scene::Scene;
-    use crate::ui::ViewportState;
+    use echomap::acoustics::SimulationState;
+    use echomap::agent::bridge::{create_bridge, SimBridgeClient};
+    use echomap::agent::{AgentServerConfig, AgentServerHandle};
+    use echomap::fluids::FluidSimulation;
+    use echomap::gas::GasSimulation;
+    use echomap::robot::RobotManager;
+    use echomap::scene::Scene;
+    use echomap::ui::ViewportState;
     use eframe::egui;
 
     pub struct EchoMapApp {
@@ -60,7 +49,7 @@ mod app {
             let agent_server_config = AgentServerConfig::default();
             let agent_server_handle = if agent_server_config.enabled {
                 log::info!("Starting agent server (enabled by default config)");
-                Some(crate::agent::start_agent_server(
+                Some(echomap::agent::start_agent_server(
                     agent_server_config.clone(),
                     bridge_server,
                 ))
@@ -94,14 +83,14 @@ mod app {
             self.bridge_client
                 .process_pending(&mut self.robot_manager, &self.scene.meshes);
 
-            crate::ui::menu_bar(
+            echomap::ui::menu_bar(
                 ctx,
                 &mut self.show_settings,
                 &mut self.scene,
                 &mut self.viewport,
             );
-            crate::ui::toolbar(ctx, &mut self.viewport);
-            crate::ui::side_panel(
+            echomap::ui::toolbar(ctx, &mut self.viewport);
+            echomap::ui::side_panel(
                 ctx,
                 &mut self.scene,
                 &mut self.simulation,
@@ -113,7 +102,7 @@ mod app {
                 &mut self.agent_server_handle,
                 &mut self.bridge_client,
             );
-            crate::ui::viewport_3d(
+            echomap::ui::viewport_3d(
                 ctx,
                 &mut self.scene,
                 &self.simulation,
@@ -121,7 +110,7 @@ mod app {
                 &self.fluid_sim,
                 &self.gas_sim,
             );
-            crate::ui::status_bar(ctx, &self.viewport, &self.scene);
+            echomap::ui::status_bar(ctx, &self.viewport, &self.scene);
 
             // Step robot simulation (skip when agent server owns stepping via bridge)
             if self.agent_server_handle.is_none() {
@@ -130,7 +119,7 @@ mod app {
             }
 
             if self.show_settings {
-                crate::ui::settings_window(
+                echomap::ui::settings_window(
                     ctx,
                     &mut self.show_settings,
                     &mut self.simulation,

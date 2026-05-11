@@ -32,6 +32,7 @@ mod app {
     use crate::acoustics::SimulationState;
     use crate::fluids::FluidSimulation;
     use crate::gas::GasSimulation;
+    use crate::robot::RobotManager;
     use crate::scene::Scene;
     use crate::ui::ViewportState;
     use eframe::egui;
@@ -41,6 +42,7 @@ mod app {
         simulation: SimulationState,
         fluid_sim: FluidSimulation,
         gas_sim: GasSimulation,
+        robot_manager: RobotManager,
         viewport: ViewportState,
         show_settings: bool,
     }
@@ -52,6 +54,7 @@ mod app {
                 simulation: SimulationState::default(),
                 fluid_sim: FluidSimulation::default(),
                 gas_sim: GasSimulation::default(),
+                robot_manager: RobotManager::default(),
                 viewport: ViewportState::default(),
                 show_settings: false,
             }
@@ -84,6 +87,10 @@ mod app {
                 &self.gas_sim,
             );
             crate::ui::status_bar(ctx, &self.viewport, &self.scene);
+
+            // Step robot simulation
+            let dt = 1.0 / 60.0;
+            self.robot_manager.step(dt, &self.scene.meshes);
 
             if self.show_settings {
                 crate::ui::settings_window(

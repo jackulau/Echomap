@@ -32,7 +32,7 @@ impl WsAgentServer {
         bridge: SimBridgeServer,
         max_connections: usize,
     ) -> io::Result<Self> {
-        let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
         Ok(Self {
             listener,
             bridge,
@@ -111,11 +111,15 @@ impl WsAgentServer {
         bridge: SimBridgeServer,
         cancel: CancellationToken,
     ) {
-        // Upgrade TCP connection to WebSocket.
-        let ws_stream = match tokio_tungstenite::accept_async(stream).await {
-            Ok(ws) => ws,
-            Err(_) => return,
-        };
+        // Upgrade TCP connection to WebSocket with message size limits.
+        let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+        ws_config.max_message_size = Some(65_536);
+        ws_config.max_frame_size = Some(65_536);
+        let ws_stream =
+            match tokio_tungstenite::accept_async_with_config(stream, Some(ws_config)).await {
+                Ok(ws) => ws,
+                Err(_) => return,
+            };
 
         let (mut write, mut read) = ws_stream.split();
         let mut session = AgentSession::new(bridge);
@@ -591,7 +595,7 @@ mod tests {
                         }
                         Some(Ok(Message::Close(_))) => break, // Also acceptable
                         Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                        other => {
+                        _other => {
                             // Connection might just close -- acceptable
                             break;
                         }

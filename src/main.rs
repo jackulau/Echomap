@@ -123,9 +123,11 @@ mod app {
             );
             crate::ui::status_bar(ctx, &self.viewport, &self.scene);
 
-            // Step robot simulation
-            let dt = 1.0 / 60.0;
-            self.robot_manager.step(dt, &self.scene.meshes);
+            // Step robot simulation (skip when agent server owns stepping via bridge)
+            if self.agent_server_handle.is_none() {
+                let dt = 1.0 / 60.0;
+                self.robot_manager.step(dt, &self.scene.meshes);
+            }
 
             if self.show_settings {
                 crate::ui::settings_window(

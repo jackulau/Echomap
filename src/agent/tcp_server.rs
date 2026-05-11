@@ -31,7 +31,7 @@ impl TcpAgentServer {
         bridge: SimBridgeServer,
         max_connections: usize,
     ) -> io::Result<Self> {
-        let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+        let listener = TcpListener::bind(("127.0.0.1", port)).await?;
         Ok(Self {
             listener,
             bridge,
@@ -101,6 +101,8 @@ impl TcpAgentServer {
         }
     }
 
+    const MAX_LINE_BYTES: usize = 65_536;
+
     /// Handle a single TCP connection.
     async fn handle_connection(
         stream: tokio::net::TcpStream,
@@ -111,22 +113,31 @@ impl TcpAgentServer {
         let mut br = BufReader::new(reader);
         let mut bw = BufWriter::new(writer);
         let mut session = AgentSession::new(bridge);
-        let mut line = String::new();
+        let mut buf = Vec::with_capacity(1024);
 
         loop {
-            line.clear();
+            buf.clear();
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break;
                 }
-                result = br.read_line(&mut line) => {
+                result = AsyncBufReadExt::read_until(&mut br, b'\n', &mut buf) => {
                     match result {
                         Ok(0) => {
-                            // EOF — client disconnected.
                             break;
                         }
+                        Ok(n) if n > Self::MAX_LINE_BYTES => {
+                            let err = ServerMessage::Error {
+                                message: "message too large".to_string(),
+                            };
+                            if Self::write_message(&mut bw, &err).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         Ok(_) => {
-                            let trimmed = line.trim();
+                            let trimmed = String::from_utf8_lossy(&buf);
+                            let trimmed = trimmed.trim();
                             if trimmed.is_empty() {
                                 continue;
                             }

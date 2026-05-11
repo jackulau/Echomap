@@ -6,3 +6,5 @@ pub mod protocol;
 pub mod session;
 #[allow(dead_code)]
 pub mod tcp_server;
+#[allow(dead_code)]
+pub mod ws_server;

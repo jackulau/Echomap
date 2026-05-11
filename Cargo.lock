@@ -1079,6 +1079,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "env_logger",
+ "futures-util",
  "glam",
  "log",
  "nalgebra",

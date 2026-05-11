@@ -52,6 +52,7 @@ pub fn box_room(width: f32, depth: f32, height: f32) -> SceneObject {
         mesh: Mesh { triangles },
         material: AcousticMaterial::default(),
         visible: true,
+        interior_medium: None,
     }
 }
 
@@ -155,6 +156,7 @@ pub fn l_room(
         mesh: Mesh { triangles },
         material: AcousticMaterial::default(),
         visible: true,
+        interior_medium: None,
     }]
 }
 
@@ -199,6 +201,7 @@ pub fn partition_wall(position: Vec3, width: f32, height: f32, thickness: f32) -
             color: [0.9, 0.9, 0.85],
         },
         visible: true,
+        interior_medium: None,
     }
 }
 
@@ -242,5 +245,6 @@ pub fn platform(position: Vec3, width: f32, depth: f32, height: f32) -> SceneObj
             color: [0.6, 0.4, 0.2],
         },
         visible: true,
+        interior_medium: None,
     }
 }

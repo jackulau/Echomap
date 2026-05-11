@@ -398,6 +398,7 @@ fn build_shell_object(
         },
         material: AcousticMaterial::default(),
         visible: true,
+        interior_medium: None,
     })
 }
 

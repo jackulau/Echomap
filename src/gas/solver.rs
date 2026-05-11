@@ -639,4 +639,383 @@ mod tests {
     fn test_gas_solver_config_validation() {
         GasConfig::new(0.0, 293.15, 0.02, 0.01, Vec3::new(0.0, -9.81, 0.0));
     }
+
+    // ----- 6 integration tests (Task 8) -----
+
+    /// Point source in 3D, verify concentration profile approaches Gaussian.
+    ///
+    /// Place all concentration at the center cell, run diffusion, then verify
+    /// the radial profile has the Gaussian shape (monotone decay, correct
+    /// ratios between distances) within 10% tolerance.
+    #[test]
+    fn test_integration_point_source_diffusion() {
+        let diff_coeff = 0.05; // scaled for grid
+        let species = vec![make_species("CO2", diff_coeff)];
+        let n = 32;
+        let dx = 0.1;
+        let mut grid = make_gas_grid(n, dx, species);
+
+        // Stability: D*dt/dx^2 <= 1/6 => dt <= dx^2/(6*D) = 0.01/(0.3) ~ 0.033
+        // The solver clamps the factor to 1/6, so the effective D may differ.
+        // Use many small steps for accuracy.
+        let dt = 0.005;
+        let num_steps = 200; // 200 * 0.005 = 1.0s
+        let t = num_steps as f32 * dt;
+
+        // Place point source at center cell.
+        let ci = n / 2;
+        let center_idx = grid.idx(ci, ci, ci);
+        grid.concentrations[0][center_idx] = 1000.0;
+
+        // Run pure diffusion for ~1s.
+        for _ in 0..num_steps {
+            diffuse_concentrations(&mut grid, dt);
+        }
+
+        let c_center = grid.concentrations[0][center_idx];
+
+        // 1. Monotone radial decay: center > r=1 > r=2 > r=4 cells away
+        let c_r1 = grid.concentrations[0][grid.idx(ci + 1, ci, ci)];
+        let c_r2 = grid.concentrations[0][grid.idx(ci + 2, ci, ci)];
+        let c_r4 = grid.concentrations[0][grid.idx(ci + 4, ci, ci)];
+        assert!(
+            c_center > c_r1 && c_r1 > c_r2 && c_r2 > c_r4,
+            "Gaussian should decay monotonically: c0={c_center:.4}, c1={c_r1:.4}, c2={c_r2:.4}, c4={c_r4:.4}"
+        );
+
+        // 2. Gaussian shape check: for a Gaussian C(r) = A * exp(-r^2 / (4*D*t)),
+        //    the ratio C(r2)/C(r1) = exp(-(r2^2 - r1^2) / (4*D*t)).
+        //    Use the effective D from the clamped factor.
+        let factor = (diff_coeff * dt / (dx * dx)).min(1.0 / 6.0);
+        let d_eff = factor * dx * dx / dt;
+        let sigma_sq = 4.0 * d_eff * t;
+
+        // Compare ratio at r=2 cells vs r=0 (center):
+        // r = 2*dx in physical units
+        let r2_phys = 2.0 * dx;
+        let expected_ratio = (-r2_phys * r2_phys / sigma_sq).exp();
+        let actual_ratio = c_r2 / c_center;
+
+        let ratio_err = (actual_ratio - expected_ratio).abs() / expected_ratio.max(1e-10);
+        assert!(
+            ratio_err < 0.10,
+            "Gaussian ratio at r=2dx should match within 10%: \
+             actual={actual_ratio:.4}, expected={expected_ratio:.4}, err={ratio_err:.4}"
+        );
+
+        // 3. Isotropy: concentration at same distance in different directions
+        //    should be approximately equal.
+        let c_r2_y = grid.concentrations[0][grid.idx(ci, ci + 2, ci)];
+        let c_r2_z = grid.concentrations[0][grid.idx(ci, ci, ci + 2)];
+        let iso_err_y = (c_r2 - c_r2_y).abs() / c_r2.max(1e-10);
+        let iso_err_z = (c_r2 - c_r2_z).abs() / c_r2.max(1e-10);
+        assert!(
+            iso_err_y < 0.05 && iso_err_z < 0.05,
+            "Diffusion should be isotropic: c_r2_x={c_r2:.4}, c_r2_y={c_r2_y:.4}, c_r2_z={c_r2_z:.4}"
+        );
+    }
+
+    /// Total concentration must remain constant (within 1%) over 100 full
+    /// solver steps.
+    #[test]
+    fn test_integration_mass_conservation() {
+        let species = vec![make_species("CO2", 0.05)];
+        let n = 16;
+        let dx = 0.1;
+        let mut grid = make_gas_grid(n, dx, species);
+
+        // Distribute some non-trivial initial concentration.
+        let ci = n / 2;
+        let idx_a = grid.idx(ci, ci, ci);
+        let idx_b = grid.idx(ci + 1, ci, ci);
+        let idx_c = grid.idx(ci, ci + 1, ci);
+        grid.concentrations[0][idx_a] = 100.0;
+        grid.concentrations[0][idx_b] = 50.0;
+        grid.concentrations[0][idx_c] = 30.0;
+
+        // Use a config with no buoyancy/thermal effects to keep mass truly
+        // conserved (advection of a uniform-velocity field and diffusion are
+        // both mass-conserving on an interior domain).
+        let config = GasConfig {
+            dt: 0.001,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 0.0,
+            buoyancy_coefficient: 0.0,
+            gravity: Vec3::ZERO,
+        };
+
+        let mass_before: f32 = grid.concentrations[0].iter().sum();
+
+        for _ in 0..100 {
+            step(&mut grid, &config);
+        }
+
+        let mass_after: f32 = grid.concentrations[0].iter().sum();
+        let rel_change = ((mass_after - mass_before) / mass_before).abs();
+
+        assert!(
+            rel_change < 0.01,
+            "Mass should be conserved within 1% over 100 steps: \
+             before={mass_before}, after={mass_after}, rel_change={rel_change}"
+        );
+    }
+
+    /// Hot spot at the bottom should develop upward velocity via buoyancy.
+    #[test]
+    fn test_integration_thermal_convection() {
+        let species = vec![make_species("Air", 0.0)];
+        let n = 16;
+        let dx = 0.1;
+        let mut grid = make_gas_grid(n, dx, species);
+
+        let config = GasConfig {
+            dt: 0.005,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 0.01,
+            buoyancy_coefficient: 0.5,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+        };
+
+        // Set all cells to ambient temperature.
+        for val in grid.temperature.iter_mut() {
+            *val = config.ambient_temperature;
+        }
+
+        // Create a hot spot in the bottom layer (j=0..2).
+        for k in 4..12 {
+            for i in 4..12 {
+                for j in 0..2 {
+                    let idx = grid.idx(i, j, k);
+                    grid.temperature[idx] = 500.0;
+                }
+            }
+        }
+
+        // Run several full timesteps.
+        for _ in 0..50 {
+            step(&mut grid, &config);
+        }
+
+        // Measure upward velocity above the hot spot at mid-height.
+        let mut total_vy_above = 0.0_f32;
+        let mut count = 0;
+        for k in 6..10 {
+            for i in 6..10 {
+                for j in 4..8 {
+                    let idx = grid.idx(i, j, k);
+                    total_vy_above += grid.vel_y[idx];
+                    count += 1;
+                }
+            }
+        }
+        let avg_vy = total_vy_above / count as f32;
+
+        assert!(
+            avg_vy > 0.0,
+            "Hot bottom should produce upward velocity above it: avg_vy={avg_vy}"
+        );
+    }
+
+    /// Two species filling adjacent halves should both diffuse toward center.
+    #[test]
+    fn test_integration_two_species_mixing() {
+        let species = vec![make_species("CO2", 0.05), make_species("CH4", 0.05)];
+        let n = 16;
+        let dx = 0.1;
+        let mut grid = make_gas_grid(n, dx, species);
+
+        // Fill left half (i < n/2) with species 0, right half with species 1.
+        let half = n / 2;
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..n {
+                    let idx = grid.idx(i, j, k);
+                    if i < half {
+                        grid.concentrations[0][idx] = 10.0;
+                    } else {
+                        grid.concentrations[1][idx] = 10.0;
+                    }
+                }
+            }
+        }
+
+        // Snapshot initial center-plane concentrations.
+        let center_i = half; // first cell of right half
+        let probe_idx = grid.idx(center_i, n / 2, n / 2);
+        let s0_right_before = grid.concentrations[0][probe_idx];
+        let s1_left_before = grid.concentrations[1][grid.idx(center_i - 1, n / 2, n / 2)];
+
+        // Run pure diffusion for many steps.
+        let dt = 0.005;
+        for _ in 0..200 {
+            diffuse_concentrations(&mut grid, dt);
+        }
+
+        // Species 0 should have diffused into the right half.
+        let s0_right_after = grid.concentrations[0][probe_idx];
+        assert!(
+            s0_right_after > s0_right_before + 0.01,
+            "Species 0 should diffuse rightward: before={s0_right_before}, after={s0_right_after}"
+        );
+
+        // Species 1 should have diffused into the left half.
+        let s1_left_after = grid.concentrations[1][grid.idx(center_i - 1, n / 2, n / 2)];
+        assert!(
+            s1_left_after > s1_left_before + 0.01,
+            "Species 1 should diffuse leftward: before={s1_left_before}, after={s1_left_after}"
+        );
+    }
+
+    /// A solid wall in the middle of the grid should prevent concentration
+    /// from passing through.
+    #[test]
+    fn test_integration_solid_walls_block_diffusion() {
+        use super::super::boundary::enforce_boundary_conditions;
+
+        let species = vec![make_species("CO2", 0.05)];
+        let n = 16;
+        let dx = 0.1;
+        let mut grid = make_gas_grid(n, dx, species);
+
+        // Place a 2-cell-thick solid wall at i = n/2 and i = n/2 + 1 spanning
+        // the full y-z plane. Two cells thick ensures the diffusion stencil
+        // cannot bridge across (each Gas cell only sees Solid neighbours, not
+        // the Gas cells on the other side).
+        let wall_i0 = n / 2;
+        let wall_i1 = wall_i0 + 1;
+        for k in 0..n {
+            for j in 0..n {
+                let idx0 = grid.idx(wall_i0, j, k);
+                let idx1 = grid.idx(wall_i1, j, k);
+                grid.cell_types[idx0] = GasCellType::Solid;
+                grid.cell_types[idx1] = GasCellType::Solid;
+            }
+        }
+
+        // Put high concentration on the left side only.
+        for k in 0..n {
+            for j in 0..n {
+                for i in 0..wall_i0 {
+                    let idx = grid.idx(i, j, k);
+                    grid.concentrations[0][idx] = 100.0;
+                }
+            }
+        }
+
+        // Run diffusion + boundary enforcement for many steps.
+        let dt = 0.005;
+        for _ in 0..200 {
+            diffuse_concentrations(&mut grid, dt);
+            enforce_boundary_conditions(&mut grid);
+        }
+
+        // All Gas cells to the right of the wall (i > wall_i1) should have
+        // negligible concentration (the wall blocks diffusion).
+        let mut max_right = 0.0_f32;
+        for k in 0..n {
+            for j in 0..n {
+                for i in (wall_i1 + 1)..n {
+                    let idx = grid.idx(i, j, k);
+                    if grid.cell_types[idx] == GasCellType::Gas {
+                        let val = grid.concentrations[0][idx];
+                        if val > max_right {
+                            max_right = val;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            max_right < 1.0,
+            "Concentration should not pass through solid wall: max on right side={max_right}"
+        );
+    }
+
+    /// 1000 steps on a 16^3 grid -- all values must remain finite.
+    #[test]
+    fn test_integration_long_run_stability() {
+        let species = vec![make_species("CO2", 0.05), make_species("CH4", 0.03)];
+        let n = 16;
+        let dx = 0.1;
+        let mut grid = make_gas_grid(n, dx, species);
+
+        // Set up non-trivial initial conditions.
+        let ci = n / 2;
+        let center = grid.idx(ci, ci, ci);
+        grid.concentrations[0][center] = 100.0;
+        grid.concentrations[1][center] = 50.0;
+        grid.temperature[center] = 400.0;
+        grid.pressure[center] = 5.0;
+
+        let config = GasConfig {
+            dt: 0.001,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 0.01,
+            buoyancy_coefficient: 0.01,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+        };
+
+        for iteration in 0..1000 {
+            step(&mut grid, &config);
+
+            // Spot-check every 100 steps to catch blowup early.
+            if iteration % 100 == 99 {
+                assert!(
+                    grid.vel_x.iter().all(|v| v.is_finite()),
+                    "vel_x has NaN/Inf at step {iteration}"
+                );
+                assert!(
+                    grid.vel_y.iter().all(|v| v.is_finite()),
+                    "vel_y has NaN/Inf at step {iteration}"
+                );
+                assert!(
+                    grid.vel_z.iter().all(|v| v.is_finite()),
+                    "vel_z has NaN/Inf at step {iteration}"
+                );
+                assert!(
+                    grid.temperature.iter().all(|v| v.is_finite()),
+                    "temperature has NaN/Inf at step {iteration}"
+                );
+                assert!(
+                    grid.pressure.iter().all(|v| v.is_finite()),
+                    "pressure has NaN/Inf at step {iteration}"
+                );
+                for (s, conc) in grid.concentrations.iter().enumerate() {
+                    assert!(
+                        conc.iter().all(|v| v.is_finite()),
+                        "concentration[{s}] has NaN/Inf at step {iteration}"
+                    );
+                }
+            }
+        }
+
+        // Final check: every single value must be finite.
+        assert!(
+            grid.vel_x.iter().all(|v| v.is_finite()),
+            "vel_x has NaN/Inf after 1000 steps"
+        );
+        assert!(
+            grid.vel_y.iter().all(|v| v.is_finite()),
+            "vel_y has NaN/Inf after 1000 steps"
+        );
+        assert!(
+            grid.vel_z.iter().all(|v| v.is_finite()),
+            "vel_z has NaN/Inf after 1000 steps"
+        );
+        assert!(
+            grid.temperature.iter().all(|v| v.is_finite()),
+            "temperature has NaN/Inf after 1000 steps"
+        );
+        assert!(
+            grid.pressure.iter().all(|v| v.is_finite()),
+            "pressure has NaN/Inf after 1000 steps"
+        );
+        for (s, conc) in grid.concentrations.iter().enumerate() {
+            assert!(
+                conc.iter().all(|v| v.is_finite()),
+                "concentration[{s}] has NaN/Inf after 1000 steps"
+            );
+        }
+    }
 }

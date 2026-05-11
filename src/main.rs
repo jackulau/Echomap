@@ -89,6 +89,7 @@ mod app {
                     &mut self.show_settings,
                     &mut self.simulation,
                     &mut self.fluid_sim,
+                    &mut self.gas_sim,
                 );
             }
         }

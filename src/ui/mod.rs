@@ -559,6 +559,141 @@ pub fn side_panel(
 
             ui.separator();
 
+            // --- Gas Simulation Controls ---
+            egui::CollapsingHeader::new("Gas Simulation")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let label = if gas_sim.running { "Stop" } else { "Start" };
+                        if ui.button(label).clicked() {
+                            gas_sim.running = !gas_sim.running;
+                        }
+                        if ui.button("Step").clicked() {
+                            gas_sim.step();
+                        }
+                        if ui.button("Reset").clicked() {
+                            gas_sim.reset();
+                        }
+                    });
+                    ui.label(format!("Frame: {}", gas_sim.frame));
+
+                    ui.separator();
+                    ui.label("Settings:");
+
+                    ui.add(
+                        egui::Slider::new(&mut gas_sim.config.dt, 0.001..=0.1).text("Timestep (s)"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut gas_sim.config.ambient_temperature, 200.0..=500.0)
+                            .text("Ambient Temp (K)"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut gas_sim.config.thermal_diffusivity, 0.0..=0.1)
+                            .text("Thermal Diff"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut gas_sim.config.buoyancy_coefficient, 0.0..=1.0)
+                            .text("Buoyancy Coeff"),
+                    );
+
+                    ui.label("Gravity:");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut gas_sim.config.gravity.x)
+                                .prefix("x: ")
+                                .speed(0.1),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut gas_sim.config.gravity.y)
+                                .prefix("y: ")
+                                .speed(0.1),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut gas_sim.config.gravity.z)
+                                .prefix("z: ")
+                                .speed(0.1),
+                        );
+                    });
+
+                    // --- Gas Source Controls ---
+                    ui.separator();
+                    ui.label(format!("Gas Sources ({}):", gas_sim.sources.len()));
+                    if ui.button("Add Source").clicked() {
+                        gas_sim.sources.push(crate::gas::boundary::GasSource {
+                            position: Vec3::ZERO,
+                            species_index: 0,
+                            rate: 1.0,
+                            radius: 0.5,
+                        });
+                    }
+
+                    let species_count = gas_sim.grid.as_ref().map_or(0, |g| g.species.len());
+                    let mut to_remove_src = None;
+                    for (si, source) in gas_sim.sources.iter_mut().enumerate() {
+                        egui::CollapsingHeader::new(format!("Source {}", si + 1))
+                            .id_salt(format!("gas_source_{si}"))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("Pos:");
+                                    ui.add(
+                                        egui::DragValue::new(&mut source.position.x)
+                                            .prefix("x:")
+                                            .speed(0.1),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut source.position.y)
+                                            .prefix("y:")
+                                            .speed(0.1),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut source.position.z)
+                                            .prefix("z:")
+                                            .speed(0.1),
+                                    );
+                                });
+
+                                if species_count > 0 {
+                                    let sp_name = gas_sim
+                                        .grid
+                                        .as_ref()
+                                        .and_then(|g| g.species.get(source.species_index))
+                                        .map_or("None".to_string(), |s| s.name.clone());
+                                    egui::ComboBox::from_id_salt(format!("gas_src_species_{si}"))
+                                        .selected_text(sp_name)
+                                        .show_ui(ui, |ui| {
+                                            if let Some(ref grid) = gas_sim.grid {
+                                                for (idx, sp) in grid.species.iter().enumerate() {
+                                                    ui.selectable_value(
+                                                        &mut source.species_index,
+                                                        idx,
+                                                        &sp.name,
+                                                    );
+                                                }
+                                            }
+                                        });
+                                }
+
+                                ui.add(
+                                    egui::Slider::new(&mut source.rate, 0.0..=100.0).text("Rate"),
+                                );
+                                ui.add(
+                                    egui::Slider::new(&mut source.radius, 0.01..=5.0)
+                                        .text("Radius"),
+                                );
+
+                                if ui.button("Delete Source").clicked() {
+                                    to_remove_src = Some(si);
+                                }
+                            });
+                    }
+                    if let Some(idx) = to_remove_src {
+                        gas_sim.sources.remove(idx);
+                    }
+                });
+
+            ui.separator();
+
             // --- Gas Visualization ---
             egui::CollapsingHeader::new("Gas Visualization")
                 .default_open(false)
@@ -1004,6 +1139,7 @@ pub fn settings_window(
     open: &mut bool,
     sim: &mut SimulationState,
     fluid_sim: &mut FluidSimulation,
+    gas_sim: &mut GasSimulation,
 ) {
     egui::Window::new("Simulation Settings")
         .open(open)
@@ -1074,6 +1210,42 @@ pub fn settings_window(
                     }
                 }
             }
+
+            ui.separator();
+            ui.heading("Gas");
+
+            ui.add(egui::Slider::new(&mut gas_sim.config.dt, 0.001..=0.1).text("Timestep (s)"));
+            ui.add(
+                egui::Slider::new(&mut gas_sim.config.ambient_temperature, 200.0..=500.0)
+                    .text("Ambient Temp (K)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut gas_sim.config.thermal_diffusivity, 0.0..=0.1)
+                    .text("Thermal Diffusivity"),
+            );
+            ui.add(
+                egui::Slider::new(&mut gas_sim.config.buoyancy_coefficient, 0.0..=1.0)
+                    .text("Buoyancy Coefficient"),
+            );
+
+            ui.label("Gravity:");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut gas_sim.config.gravity.x)
+                        .prefix("x: ")
+                        .speed(0.1),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut gas_sim.config.gravity.y)
+                        .prefix("y: ")
+                        .speed(0.1),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut gas_sim.config.gravity.z)
+                        .prefix("z: ")
+                        .speed(0.1),
+                );
+            });
         });
 }
 

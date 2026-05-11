@@ -39,8 +39,8 @@ pub fn step_dynamics(definition: &RobotDefinition, state: &mut RobotState, dt: f
         // Clamp torque to joint limits.
         let torque = raw_torque.clamp(-joint_def.max_torque, joint_def.max_torque);
 
-        // Use child link's inertia for integration.
-        let inertia = definition.links[joint_def.child_link].inertia;
+        // Use child link's inertia for integration (guard against zero).
+        let inertia = definition.links[joint_def.child_link].inertia.max(1e-6);
 
         // Update velocity: v += (torque/inertia - damping*v) * dt
         let new_velocity = velocity + (torque / inertia - joint_def.damping * velocity) * dt;
@@ -278,6 +278,182 @@ mod tests {
         assert!(
             state.joint_velocities[0].abs() < 1e-6,
             "velocity should be zero at limit, got {}",
+            state.joint_velocities[0]
+        );
+    }
+
+    // ---- Edge case tests ----
+
+    #[test]
+    fn test_zero_inertia_no_nan() {
+        let mut def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        def.links[1].inertia = 0.0;
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Torque(5.0)];
+
+        step_dynamics(&def, &mut state, 0.01);
+
+        assert!(
+            state.joint_positions[0].is_finite(),
+            "zero inertia should not produce NaN/Inf position"
+        );
+        assert!(
+            state.joint_velocities[0].is_finite(),
+            "zero inertia should not produce NaN/Inf velocity"
+        );
+    }
+
+    #[test]
+    fn test_zero_dt_is_noop() {
+        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Torque(100.0)];
+        let pos_before = state.joint_positions[0];
+
+        step_dynamics(&def, &mut state, 0.0);
+
+        assert!(
+            (state.joint_positions[0] - pos_before).abs() < 1e-9,
+            "dt=0 should not change position"
+        );
+    }
+
+    #[test]
+    fn test_negative_dt_is_noop() {
+        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Torque(100.0)];
+        step_dynamics(&def, &mut state, -0.01);
+
+        assert!(
+            state.joint_positions[0].is_finite(),
+            "negative dt should not produce NaN"
+        );
+    }
+
+    #[test]
+    fn test_large_dt_finite() {
+        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Velocity(10.0)];
+
+        step_dynamics(&def, &mut state, 1.0);
+
+        assert!(
+            state.joint_positions[0].is_finite(),
+            "large dt should produce finite position"
+        );
+        assert!(
+            state.joint_velocities[0].is_finite(),
+            "large dt should produce finite velocity"
+        );
+    }
+
+    #[test]
+    fn test_limit_min_equals_max() {
+        let def = one_joint_robot(100.0, 0.0, 0.5, 0.5);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Torque(100.0)];
+
+        for _ in 0..100 {
+            step_dynamics(&def, &mut state, 0.01);
+        }
+
+        assert!(
+            (state.joint_positions[0] - 0.5).abs() < 1e-6,
+            "locked joint (min==max) should stay at limit, got {}",
+            state.joint_positions[0]
+        );
+    }
+
+    #[test]
+    fn test_zero_max_torque() {
+        let def = one_joint_robot(0.0, 0.0, -3.14, 3.14);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Torque(999.0)];
+
+        step_dynamics(&def, &mut state, 0.01);
+
+        assert!(
+            state.joint_velocities[0].abs() < 1e-9,
+            "zero max_torque should clamp all torque to zero, got velocity {}",
+            state.joint_velocities[0]
+        );
+    }
+
+    #[test]
+    fn test_nan_command_produces_finite() {
+        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Torque(f32::NAN)];
+
+        step_dynamics(&def, &mut state, 0.01);
+
+        // NaN torque is clamped to [-max_torque, max_torque] — NaN.clamp produces NaN.
+        // This tests that we don't panic.
+    }
+
+    #[test]
+    fn test_empty_robot_no_panic() {
+        let def = RobotDefinition {
+            name: "empty".to_string(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 1.0,
+                collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: Vec::new(),
+        };
+        let mut state = RobotState::new(&def);
+
+        step_dynamics(&def, &mut state, 0.01);
+        // No joints => nothing to step => should not panic
+    }
+
+    #[test]
+    fn test_more_commands_than_joints() {
+        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![
+            ActuatorCommand::Velocity(1.0),
+            ActuatorCommand::Velocity(2.0),
+            ActuatorCommand::Velocity(3.0),
+        ];
+
+        step_dynamics(&def, &mut state, 0.01);
+        // Extra commands should be ignored, no panic
+        assert!(state.joint_positions[0].is_finite());
+    }
+
+    #[test]
+    fn test_fewer_commands_than_joints() {
+        let def = RobotDefinition::simple_arm(3);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Velocity(1.0)];
+
+        step_dynamics(&def, &mut state, 0.01);
+        // Only joint 0 gets a command; joints 1,2 get zero torque
+        assert!(state.joint_velocities[0].abs() > 0.0);
+        assert!(state.joint_velocities[1].abs() < 1e-9);
+        assert!(state.joint_velocities[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_high_damping_stabilizes() {
+        let def = one_joint_robot(100.0, 100.0, -3.14, 3.14);
+        let mut state = RobotState::new(&def);
+        state.joint_velocities[0] = 10.0;
+
+        for _ in 0..100 {
+            step_dynamics(&def, &mut state, 0.01);
+        }
+
+        assert!(
+            state.joint_velocities[0].abs() < 1.0,
+            "high damping should reduce velocity, got {}",
             state.joint_velocities[0]
         );
     }

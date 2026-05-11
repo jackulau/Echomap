@@ -1096,4 +1096,248 @@ mod tests {
             dir
         );
     }
+
+    // ---- Edge case tests ----
+
+    #[test]
+    fn test_def_lidar_zero_rays() {
+        let def = one_link_def_with_sensor(SensorDefinition::Lidar {
+            num_rays: 0,
+            fov_rad: std::f32::consts::PI,
+            max_range: 100.0,
+        });
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        let meshes: Vec<SceneObject> = vec![];
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Lidar(dists) => {
+                assert!(dists.is_empty(), "zero rays should produce empty vec");
+            }
+            other => panic!("Expected Lidar reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_lidar_single_ray() {
+        let def = one_link_def_with_sensor(SensorDefinition::Lidar {
+            num_rays: 1,
+            fov_rad: std::f32::consts::PI,
+            max_range: 50.0,
+        });
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        let meshes: Vec<SceneObject> = vec![];
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Lidar(dists) => {
+                assert_eq!(dists.len(), 1, "single ray should produce 1 distance");
+                assert!(
+                    (dists[0] - 50.0).abs() < EPSILON,
+                    "single ray should return max_range with no scene"
+                );
+            }
+            other => panic!("Expected Lidar reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_contact_sensor_touching() {
+        let def = one_link_def_with_sensor(SensorDefinition::Contact);
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        // Place triangle vertices within collision radius of origin
+        let t = tri(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.1, 0.0, 0.0),
+            Vec3::new(0.0, 0.1, 0.0),
+        );
+        let meshes = vec![scene_obj("touching", vec![t])];
+
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Contact(c) => {
+                assert!(*c, "Should be in contact when geometry is at origin");
+            }
+            other => panic!("Expected Contact reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_imu_with_rotating_joint() {
+        let def = two_link_def_with_sensor(SensorDefinition::Imu, 1);
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+        state.set_link_pose(1, Mat4::IDENTITY);
+        state.joint_velocities = vec![2.0]; // joint 0 rotating at 2 rad/s
+
+        let meshes: Vec<SceneObject> = vec![];
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Imu {
+                angular_vel,
+                linear_accel,
+            } => {
+                // Angular velocity should include joint 0's contribution
+                assert!(
+                    angular_vel.length() > 0.1,
+                    "IMU on child link should detect angular velocity from parent joint, got {:?}",
+                    angular_vel
+                );
+                // Linear accel should be gravity
+                assert!(
+                    (linear_accel.y - (-9.81)).abs() < 0.01,
+                    "IMU linear_accel Y should be gravity"
+                );
+            }
+            other => panic!("Expected Imu reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_no_sensors_no_panic() {
+        let def = RobotDefinition {
+            name: "no_sensors".into(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![],
+        };
+        let mut state = RobotState::new(&def);
+        let meshes: Vec<SceneObject> = vec![];
+        simulate_sensors(&def, &mut state, &meshes);
+        assert!(state.sensor_readings.is_empty());
+    }
+
+    #[test]
+    fn test_def_distance_sensor_negative_range() {
+        let def = one_link_def_with_sensor(SensorDefinition::Distance {
+            direction: Vec3::Z,
+            max_range: -5.0,
+        });
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        let t = tri(
+            Vec3::new(-2.0, -2.0, 1.0),
+            Vec3::new(2.0, -2.0, 1.0),
+            Vec3::new(0.0, 2.0, 1.0),
+        );
+        let meshes = vec![scene_obj("wall", vec![t])];
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Distance(d) => {
+                assert!(
+                    d.is_finite(),
+                    "negative max_range should produce finite result"
+                );
+            }
+            other => panic!("Expected Distance reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_empty_scene_all_sensors() {
+        // Robot with all sensor types, empty scene
+        let def = RobotDefinition {
+            name: "multi_sensor".into(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Sphere { radius: 0.2 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![
+                SensorMount {
+                    link_index: 0,
+                    local_offset: Vec3::ZERO,
+                    sensor: SensorDefinition::Distance {
+                        direction: Vec3::Z,
+                        max_range: 10.0,
+                    },
+                },
+                SensorMount {
+                    link_index: 0,
+                    local_offset: Vec3::ZERO,
+                    sensor: SensorDefinition::Lidar {
+                        num_rays: 5,
+                        fov_rad: 1.0,
+                        max_range: 10.0,
+                    },
+                },
+                SensorMount {
+                    link_index: 0,
+                    local_offset: Vec3::ZERO,
+                    sensor: SensorDefinition::Contact,
+                },
+                SensorMount {
+                    link_index: 0,
+                    local_offset: Vec3::ZERO,
+                    sensor: SensorDefinition::Imu,
+                },
+            ],
+        };
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        let meshes: Vec<SceneObject> = vec![];
+        simulate_sensors(&def, &mut state, &meshes);
+
+        assert_eq!(state.sensor_readings.len(), 4);
+        match &state.sensor_readings[0] {
+            SensorReading::Distance(d) => assert!((*d - 10.0).abs() < EPSILON),
+            other => panic!("Expected Distance, got {:?}", other),
+        }
+        match &state.sensor_readings[1] {
+            SensorReading::Lidar(dists) => assert_eq!(dists.len(), 5),
+            other => panic!("Expected Lidar, got {:?}", other),
+        }
+        match &state.sensor_readings[2] {
+            SensorReading::Contact(c) => assert!(!c),
+            other => panic!("Expected Contact, got {:?}", other),
+        }
+        match &state.sensor_readings[3] {
+            SensorReading::Imu { .. } => {}
+            other => panic!("Expected Imu, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_collision_shape_radius_all_variants() {
+        let sphere_r = collision_shape_radius(&CollisionShape::Sphere { radius: 1.5 });
+        assert!((sphere_r - 1.5).abs() < EPSILON);
+
+        let cuboid_r = collision_shape_radius(&CollisionShape::Cuboid {
+            half_extents: Vec3::new(1.0, 1.0, 1.0),
+        });
+        assert!((cuboid_r - 3.0_f32.sqrt()).abs() < 0.01);
+
+        let cyl_r = collision_shape_radius(&CollisionShape::Cylinder {
+            radius: 1.0,
+            height: 2.0,
+        });
+        // sqrt(1^2 + 1^2) = sqrt(2)
+        assert!((cyl_r - 2.0_f32.sqrt()).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_collision_shape_radius_zero() {
+        let r = collision_shape_radius(&CollisionShape::Sphere { radius: 0.0 });
+        assert!(r.abs() < EPSILON, "zero radius sphere should return 0");
+    }
 }

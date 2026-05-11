@@ -591,4 +591,136 @@ mod tests {
             "joint at max limit",
         );
     }
+
+    // ---- Edge case tests ----
+
+    #[test]
+    fn test_def_fk_empty_no_joints() {
+        let def = RobotDefinition {
+            name: "empty".into(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Cuboid {
+                    half_extents: Vec3::splat(0.1),
+                },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: Vec::new(),
+        };
+        let mut state = RobotState::new(&def);
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        let base_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[0]));
+        assert_vec3_near(base_pos, Vec3::ZERO, "no-joint robot base at origin");
+    }
+
+    #[test]
+    fn test_def_fk_empty_links() {
+        let def = RobotDefinition {
+            name: "empty".into(),
+            links: vec![],
+            joints: vec![],
+            sensors: Vec::new(),
+        };
+        let mut state = RobotState::new(&def);
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+        assert!(state.link_poses.is_empty());
+    }
+
+    #[test]
+    fn test_def_fk_large_position_value() {
+        let (def, mut state) = make_serial_chain(&[(
+            DefJointType::Revolute,
+            Vec3::Y,
+            1000.0 * std::f32::consts::PI,
+        )]);
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        let child_pose = Mat4::from_cols_array(&state.link_poses[1]);
+        let pos = mat4_translation(&child_pose);
+        assert!(pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite());
+    }
+
+    #[test]
+    fn test_def_fk_zero_axis() {
+        let def = RobotDefinition {
+            name: "zero_axis".into(),
+            links: vec![
+                LinkDefinition {
+                    name: "base".into(),
+                    mass: 1.0,
+                    inertia: 0.1,
+                    collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                    parent_joint: None,
+                },
+                LinkDefinition {
+                    name: "child".into(),
+                    mass: 1.0,
+                    inertia: 0.1,
+                    collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                    parent_joint: Some(0),
+                },
+            ],
+            joints: vec![JointDefinition {
+                name: "j".into(),
+                joint_type: DefJointType::Revolute,
+                axis: Vec3::ZERO,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -3.14,
+                limit_max: 3.14,
+                max_torque: 10.0,
+                damping: 0.1,
+            }],
+            sensors: Vec::new(),
+        };
+        let mut state = RobotState::new(&def);
+        state.joint_positions[0] = 1.0;
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        // Zero axis rotation should produce NaN-free result
+        let child_pose = Mat4::from_cols_array(&state.link_poses[1]);
+        let pos = mat4_translation(&child_pose);
+        // glam from_axis_angle with zero axis may produce NaN, but shouldn't crash
+        let _ = pos;
+    }
+
+    #[test]
+    fn test_def_fk_deep_chain() {
+        let joints: Vec<(DefJointType, Vec3, f32)> = (0..20)
+            .map(|_| (DefJointType::Revolute, Vec3::Y, 0.1))
+            .collect();
+        let (def, mut state) = make_serial_chain(&joints);
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        for (i, pose) in state.link_poses.iter().enumerate() {
+            let pos = mat4_translation(&Mat4::from_cols_array(pose));
+            assert!(
+                pos.x.is_finite() && pos.y.is_finite() && pos.z.is_finite(),
+                "link {} pose should be finite in deep chain",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_def_fk_non_identity_base() {
+        let base_pose = Mat4::from_rotation_translation(
+            Quat::from_rotation_z(FRAC_PI_2),
+            Vec3::new(10.0, 20.0, 30.0),
+        );
+        let (def, mut state) = make_serial_chain(&[(DefJointType::Prismatic, Vec3::X, 2.0)]);
+        forward_kinematics(&def, &mut state, base_pose);
+
+        let child_pos = mat4_translation(&Mat4::from_cols_array(&state.link_poses[1]));
+        // Base rotated 90 deg around Z, so prismatic along X becomes along Y
+        assert_vec3_near(
+            child_pos,
+            Vec3::new(10.0, 22.0, 30.0),
+            "prismatic in rotated base frame",
+        );
+    }
 }

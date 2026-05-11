@@ -872,4 +872,193 @@ mod tests {
             "no grippers => empty gripper_states"
         );
     }
+
+    // ---- Edge case tests ----
+
+    #[test]
+    fn test_set_joint_position_out_of_bounds_index() {
+        let def = test_definition();
+        let mut state = RobotState::new(&def);
+        let pos_before = state.joint_positions.clone();
+
+        state.set_joint_position(999, 1.0, -1.0, 1.0);
+
+        assert_eq!(
+            state.joint_positions, pos_before,
+            "OOB index should be no-op"
+        );
+    }
+
+    #[test]
+    fn test_set_link_pose_out_of_bounds() {
+        let def = test_definition();
+        let mut state = RobotState::new(&def);
+        let poses_before = state.link_poses.clone();
+
+        state.set_link_pose(999, Mat4::from_translation(Vec3::ONE));
+
+        assert_eq!(
+            state.link_poses, poses_before,
+            "OOB set_link_pose should be no-op"
+        );
+    }
+
+    #[test]
+    fn test_link_poses_as_mat4_roundtrip() {
+        let def = test_definition();
+        let mut state = RobotState::new(&def);
+        let rot = Mat4::from_rotation_y(1.0);
+        state.set_link_pose(0, rot);
+
+        let mats = state.link_poses_as_mat4();
+        let diff: f32 = mats[0]
+            .to_cols_array()
+            .iter()
+            .zip(rot.to_cols_array().iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff < 1e-6, "link_poses_as_mat4 roundtrip failed");
+    }
+
+    #[test]
+    fn test_apply_action_extra_motors() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+
+        let action = RobotAction {
+            motor_velocities: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+            gripper_commands: vec![],
+        };
+
+        apply_action(&def, &mut state, &action);
+
+        assert_eq!(
+            state.actuator_commands.len(),
+            2,
+            "extra motor velocities should be truncated to joint count"
+        );
+    }
+
+    #[test]
+    fn test_apply_action_empty_motors() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+
+        let action = RobotAction {
+            motor_velocities: vec![],
+            gripper_commands: vec![],
+        };
+
+        apply_action(&def, &mut state, &action);
+
+        assert!(
+            state.actuator_commands.is_empty(),
+            "zero motor velocities should produce empty commands"
+        );
+    }
+
+    #[test]
+    fn test_gym_robot_state_from_all_sensor_types() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+        state.sensor_readings = vec![
+            SensorReading::Distance(5.0),
+            SensorReading::Contact(true),
+            SensorReading::Imu {
+                linear_accel: Vec3::new(0.0, -9.81, 0.0),
+                angular_vel: Vec3::new(0.1, 0.0, 0.0),
+            },
+        ];
+
+        let gym_state = GymRobotState::from_robot_state(&state, &def);
+
+        assert_eq!(gym_state.sensor_readings.distances.len(), 1);
+        assert!((gym_state.sensor_readings.distances[0] - 5.0).abs() < 1e-6);
+        assert_eq!(gym_state.sensor_readings.contacts, vec![true]);
+        assert_eq!(gym_state.sensor_readings.imu.len(), 1);
+    }
+
+    #[test]
+    fn test_gym_robot_state_with_lidar() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+        state.sensor_readings = vec![SensorReading::Lidar(vec![1.0, 2.0, 3.0])];
+
+        let gym_state = GymRobotState::from_robot_state(&state, &def);
+
+        // LIDAR readings are not decomposed into distances
+        assert!(
+            gym_state.sensor_readings.distances.is_empty(),
+            "LIDAR should not appear in distances"
+        );
+    }
+
+    #[test]
+    fn test_observation_space_empty_robot() {
+        let def = RobotDefinition {
+            name: "empty".into(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![],
+        };
+
+        let obs = ObservationSpace::from_definition(&def);
+        assert_eq!(obs.num_joint_positions, 0);
+        assert_eq!(obs.num_joint_velocities, 0);
+        assert_eq!(obs.num_sensors, 0);
+        assert!(obs.joint_position_limits.is_empty());
+    }
+
+    #[test]
+    fn test_action_space_empty_robot() {
+        let def = RobotDefinition {
+            name: "empty".into(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![],
+        };
+
+        let action = ActionSpace::from_definition(&def);
+        assert_eq!(action.num_motors, 0);
+        assert!(action.motor_limits.is_empty());
+        assert_eq!(action.num_grippers, 0);
+    }
+
+    #[test]
+    fn test_state_serialization_with_all_reading_types() {
+        let def = test_definition();
+        let mut state = RobotState::new(&def);
+        state.sensor_readings = vec![
+            SensorReading::Distance(1.5),
+            SensorReading::Lidar(vec![1.0, 2.0]),
+            SensorReading::Contact(true),
+            SensorReading::Imu {
+                linear_accel: Vec3::new(0.0, -9.81, 0.0),
+                angular_vel: Vec3::ZERO,
+            },
+        ];
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deser: RobotState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deser.sensor_readings.len(), 4);
+        assert_eq!(deser.sensor_readings[0], SensorReading::Distance(1.5));
+        assert_eq!(
+            deser.sensor_readings[1],
+            SensorReading::Lidar(vec![1.0, 2.0])
+        );
+        assert_eq!(deser.sensor_readings[2], SensorReading::Contact(true));
+    }
 }

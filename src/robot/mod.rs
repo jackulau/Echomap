@@ -1449,4 +1449,132 @@ mod tests {
             transforms[3].position
         );
     }
+
+    // ---- Edge case tests ----
+
+    #[test]
+    fn test_manager_get_robot_invalid_index() {
+        let manager = RobotManager::new();
+        assert!(manager.get_robot(0).is_none());
+        assert!(manager.get_robot(999).is_none());
+    }
+
+    #[test]
+    fn test_manager_not_running_skips_step() {
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(1);
+        let idx = manager.add_robot(def, Mat4::IDENTITY);
+        manager.set_command(idx, 0, ActuatorCommand::Velocity(5.0));
+
+        manager.running = false;
+        manager.step(0.01, &[]);
+
+        let pos = manager.get_robot(idx).unwrap().state.joint_positions[0];
+        assert!(
+            pos.abs() < 1e-9,
+            "stopped manager should not step, got pos={}",
+            pos
+        );
+    }
+
+    #[test]
+    fn test_simulation_not_running_skips_step() {
+        let mut sim = RobotSimulation::default();
+        let def = RobotDefinition::simple_arm(1);
+        let idx = sim.manager.add_robot(def, Mat4::IDENTITY);
+        sim.manager
+            .set_command(idx, 0, ActuatorCommand::Velocity(5.0));
+
+        sim.running = false;
+        let meshes: Vec<crate::scene::SceneObject> = vec![];
+        sim.step(&meshes);
+
+        let pos = sim.manager.get_robot(idx).unwrap().state.joint_positions[0];
+        assert!(
+            pos.abs() < 1e-9,
+            "stopped simulation should not step, got pos={}",
+            pos
+        );
+    }
+
+    #[test]
+    fn test_manager_step_empty_no_panic() {
+        let mut manager = RobotManager::new();
+        manager.step(0.01, &[]);
+        // No robots => no-op, should not panic
+    }
+
+    #[test]
+    fn test_managed_robot_base_pose_mat4() {
+        let mut manager = RobotManager::new();
+        let base_pose = Mat4::from_translation(glam::Vec3::new(1.0, 2.0, 3.0));
+        let def = RobotDefinition::simple_arm(1);
+        let idx = manager.add_robot(def, base_pose);
+
+        let robot = manager.get_robot(idx).unwrap();
+        let recovered = robot.base_pose_mat4();
+        let diff: f32 = recovered
+            .to_cols_array()
+            .iter()
+            .zip(base_pose.to_cols_array().iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(diff < 1e-6, "base_pose_mat4 should roundtrip");
+    }
+
+    #[test]
+    fn test_managed_robot_serialization() {
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        let idx = manager.add_robot(def, Mat4::IDENTITY);
+        manager.set_command(idx, 0, ActuatorCommand::Velocity(1.0));
+        manager.step(0.01, &[]);
+
+        let robot = manager.get_robot(idx).unwrap();
+        let json = serde_json::to_string(robot).unwrap();
+        let deser: ManagedRobot = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deser.definition.name, robot.definition.name);
+        assert_eq!(
+            deser.state.joint_positions.len(),
+            robot.state.joint_positions.len()
+        );
+    }
+
+    #[test]
+    fn test_set_command_resizes_actuator_vec() {
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(3);
+        let idx = manager.add_robot(def, Mat4::IDENTITY);
+
+        // actuator_commands starts empty
+        assert!(manager
+            .get_robot(idx)
+            .unwrap()
+            .state
+            .actuator_commands
+            .is_empty());
+
+        // set_command on joint 2 should resize to 3
+        manager.set_command(idx, 2, ActuatorCommand::Position(1.0));
+
+        let robot = manager.get_robot(idx).unwrap();
+        assert_eq!(robot.state.actuator_commands.len(), 3);
+        assert_eq!(
+            robot.state.actuator_commands[2],
+            ActuatorCommand::Position(1.0)
+        );
+        // Other slots filled with Torque(0.0)
+        assert_eq!(
+            robot.state.actuator_commands[0],
+            ActuatorCommand::Torque(0.0)
+        );
+    }
+
+    #[test]
+    fn test_simulation_default_dt() {
+        let sim = RobotSimulation::default();
+        assert!((sim.dt - 1.0 / 60.0).abs() < 1e-6);
+        assert!(sim.running);
+    }
 }

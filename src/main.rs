@@ -3,6 +3,7 @@ mod fluids;
 mod gas;
 mod io;
 mod renderer;
+mod robot;
 mod scene;
 mod surface;
 mod ui;

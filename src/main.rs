@@ -109,6 +109,7 @@ mod app {
                 &mut self.viewport,
                 &self.fluid_sim,
                 &self.gas_sim,
+                &self.robot_manager,
             );
             echomap::ui::status_bar(ctx, &self.viewport, &self.scene);
 

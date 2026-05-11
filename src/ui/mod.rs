@@ -9,7 +9,8 @@ use crate::renderer::{
     energy_to_color, project_3d, ray_ground_intersect, render_fluid_slice, render_gas_slice,
     screen_to_ray, Camera, FluidVisualizationMode, GasVisualizationMode,
 };
-use crate::robot::definition::RobotDefinition;
+use crate::robot::definition::{CollisionShape, RobotDefinition, SensorDefinition};
+use crate::robot::sensors::sensor_world_pose;
 use crate::robot::state::ActuatorCommand;
 use crate::robot::RobotManager;
 use crate::scene::{Listener, MaterialLibrary, MediumLibrary, Scene, SoundSource};
@@ -49,6 +50,8 @@ pub struct ViewportState {
     pub gas_slice_y: usize,
     pub gas_species_idx: usize,
     pub selected_robot: usize,
+    pub show_robots: bool,
+    pub show_sensor_rays: bool,
 }
 
 impl Default for ViewportState {
@@ -71,6 +74,8 @@ impl Default for ViewportState {
             gas_slice_y: 0,
             gas_species_idx: 0,
             selected_robot: 0,
+            show_robots: true,
+            show_sensor_rays: true,
         }
     }
 }
@@ -161,6 +166,8 @@ pub fn menu_bar(
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut vp.show_grid, "Show Grid");
                 ui.checkbox(&mut vp.show_rays, "Show Ray Paths");
+                ui.checkbox(&mut vp.show_robots, "Show Robots");
+                ui.checkbox(&mut vp.show_sensor_rays, "Show Sensor Rays");
                 ui.separator();
                 if ui.button("Reset Camera").clicked() {
                     vp.camera = Camera::default();
@@ -1069,6 +1076,7 @@ pub fn side_panel(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn viewport_3d(
     ctx: &egui::Context,
     scene: &mut Scene,
@@ -1076,6 +1084,7 @@ pub fn viewport_3d(
     vp: &mut ViewportState,
     fluid_sim: &crate::fluids::FluidSimulation,
     gas_sim: &GasSimulation,
+    robot_manager: &RobotManager,
 ) {
     egui::CentralPanel::default().show(ctx, |ui| {
         let (response, painter) =
@@ -1334,6 +1343,19 @@ pub fn viewport_3d(
                     rect,
                 );
             }
+        }
+
+        // --- Robot rendering ---
+        if vp.show_robots {
+            render_robots(
+                &painter,
+                robot_manager,
+                vp.show_sensor_rays,
+                cam,
+                center,
+                scale,
+                rect,
+            );
         }
 
         // Sound sources
@@ -1602,4 +1624,354 @@ fn focus_on_scene(cam: &mut Camera, scene: &Scene) {
     let center = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
     cam.focus_on(center, radius);
+}
+
+// ---------------------------------------------------------------------------
+// Robot rendering helpers
+// ---------------------------------------------------------------------------
+
+/// Distinct colors for up to 8 robots; wraps around for more.
+const ROBOT_COLORS: [[u8; 3]; 8] = [
+    [80, 180, 255],  // blue
+    [255, 120, 80],  // orange
+    [100, 220, 100], // green
+    [220, 100, 220], // purple
+    [255, 220, 80],  // yellow
+    [80, 220, 220],  // cyan
+    [255, 100, 150], // pink
+    [180, 180, 100], // olive
+];
+
+/// Return the base color for a robot at the given index.
+fn robot_color(robot_idx: usize) -> egui::Color32 {
+    let c = ROBOT_COLORS[robot_idx % ROBOT_COLORS.len()];
+    egui::Color32::from_rgb(c[0], c[1], c[2])
+}
+
+/// Render all robots in the viewport: links as wireframe shapes, joints as
+/// spheres, and optionally sensor rays as colored lines.
+#[allow(clippy::too_many_arguments)]
+fn render_robots(
+    painter: &egui::Painter,
+    robot_manager: &RobotManager,
+    show_sensor_rays: bool,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    for (robot_idx, robot) in robot_manager.robots.iter().enumerate() {
+        let color = robot_color(robot_idx);
+        let joint_color = egui::Color32::from_rgb(
+            (color.r() as u16 * 3 / 4) as u8 + 60,
+            (color.g() as u16 * 3 / 4) as u8 + 60,
+            (color.b() as u16 * 3 / 4) as u8 + 60,
+        );
+
+        let link_poses = robot.state.link_poses_as_mat4();
+
+        // --- Draw links ---
+        for (link_idx, link_def) in robot.definition.links.iter().enumerate() {
+            if link_idx >= link_poses.len() {
+                break;
+            }
+            let pose = link_poses[link_idx];
+            render_link_shape(
+                painter,
+                &link_def.collision_shape,
+                pose,
+                color,
+                cam,
+                center,
+                scale,
+                rect,
+            );
+        }
+
+        // --- Draw joints as spheres at the child link origin ---
+        for joint_def in &robot.definition.joints {
+            if joint_def.child_link >= link_poses.len() {
+                continue;
+            }
+            let child_pose = link_poses[joint_def.child_link];
+            let joint_pos = Vec3::new(
+                child_pose.w_axis.x,
+                child_pose.w_axis.y,
+                child_pose.w_axis.z,
+            );
+            let sp = project_3d(joint_pos, cam, center, scale);
+            if rect.contains(sp) {
+                painter.circle_filled(sp, 4.0, joint_color);
+                painter.circle_stroke(sp, 4.0, egui::Stroke::new(1.0, color));
+            }
+        }
+
+        // --- Draw sensor rays ---
+        if show_sensor_rays {
+            let sensor_color =
+                egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 120);
+            render_sensor_rays(painter, robot, sensor_color, cam, center, scale);
+        }
+
+        // --- Label: robot name above base link ---
+        if !link_poses.is_empty() {
+            let base_pos = Vec3::new(
+                link_poses[0].w_axis.x,
+                link_poses[0].w_axis.y + 0.3,
+                link_poses[0].w_axis.z,
+            );
+            let lp = project_3d(base_pos, cam, center, scale);
+            if rect.contains(lp) {
+                painter.text(
+                    lp,
+                    egui::Align2::CENTER_BOTTOM,
+                    &robot.definition.name,
+                    egui::FontId::proportional(11.0),
+                    color,
+                );
+            }
+        }
+    }
+}
+
+/// Draw a single link's collision shape as a wireframe at the given world pose.
+#[allow(clippy::too_many_arguments)]
+fn render_link_shape(
+    painter: &egui::Painter,
+    shape: &CollisionShape,
+    pose: glam::Mat4,
+    color: egui::Color32,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let origin = Vec3::new(pose.w_axis.x, pose.w_axis.y, pose.w_axis.z);
+
+    match shape {
+        CollisionShape::Cuboid { half_extents } => {
+            draw_wireframe_cuboid(
+                painter,
+                pose,
+                *half_extents,
+                color,
+                cam,
+                center,
+                scale,
+                rect,
+            );
+        }
+        CollisionShape::Cylinder { radius, height } => {
+            draw_wireframe_cylinder(
+                painter, pose, *radius, *height, color, cam, center, scale, rect,
+            );
+        }
+        CollisionShape::Sphere { radius } => {
+            let sp = project_3d(origin, cam, center, scale);
+            if rect.contains(sp) {
+                let screen_radius = (*radius * scale * 5.0).clamp(3.0, 40.0);
+                painter.circle_stroke(sp, screen_radius, egui::Stroke::new(1.5, color));
+            }
+        }
+    }
+}
+
+/// Draw an axis-aligned cuboid wireframe transformed by `pose`.
+#[allow(clippy::too_many_arguments)]
+fn draw_wireframe_cuboid(
+    painter: &egui::Painter,
+    pose: glam::Mat4,
+    half: Vec3,
+    color: egui::Color32,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    // 8 corners of the cuboid in local space
+    let corners_local = [
+        Vec3::new(-half.x, -half.y, -half.z),
+        Vec3::new(half.x, -half.y, -half.z),
+        Vec3::new(half.x, half.y, -half.z),
+        Vec3::new(-half.x, half.y, -half.z),
+        Vec3::new(-half.x, -half.y, half.z),
+        Vec3::new(half.x, -half.y, half.z),
+        Vec3::new(half.x, half.y, half.z),
+        Vec3::new(-half.x, half.y, half.z),
+    ];
+
+    // Transform to world space
+    let corners: Vec<egui::Pos2> = corners_local
+        .iter()
+        .map(|c| {
+            let world = pose.transform_point3(*c);
+            project_3d(world, cam, center, scale)
+        })
+        .collect();
+
+    // Check if any corner is in view
+    if !corners.iter().any(|c| rect.contains(*c)) {
+        return;
+    }
+
+    // 12 edges of a cuboid
+    let edges = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0), // bottom face
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4), // top face
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7), // vertical edges
+    ];
+
+    let stroke = egui::Stroke::new(1.5, color);
+    for (a, b) in edges {
+        painter.line_segment([corners[a], corners[b]], stroke);
+    }
+}
+
+/// Draw a cylinder wireframe (two ellipses + vertical lines) transformed by `pose`.
+#[allow(clippy::too_many_arguments)]
+fn draw_wireframe_cylinder(
+    painter: &egui::Painter,
+    pose: glam::Mat4,
+    radius: f32,
+    height: f32,
+    color: egui::Color32,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let half_h = height / 2.0;
+    let segments = 12;
+    let stroke = egui::Stroke::new(1.5, color);
+
+    // Generate circle points at bottom and top
+    let mut bottom_pts = Vec::with_capacity(segments);
+    let mut top_pts = Vec::with_capacity(segments);
+
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let local_x = radius * angle.cos();
+        let local_z = radius * angle.sin();
+
+        let bottom_local = Vec3::new(local_x, -half_h, local_z);
+        let top_local = Vec3::new(local_x, half_h, local_z);
+
+        let bottom_world = pose.transform_point3(bottom_local);
+        let top_world = pose.transform_point3(top_local);
+
+        bottom_pts.push(project_3d(bottom_world, cam, center, scale));
+        top_pts.push(project_3d(top_world, cam, center, scale));
+    }
+
+    // Check if any point is in view
+    let in_view = bottom_pts
+        .iter()
+        .chain(top_pts.iter())
+        .any(|p| rect.contains(*p));
+    if !in_view {
+        return;
+    }
+
+    // Draw bottom and top circles
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        painter.line_segment([bottom_pts[i], bottom_pts[next]], stroke);
+        painter.line_segment([top_pts[i], top_pts[next]], stroke);
+    }
+
+    // Draw vertical lines at 4 cardinal points
+    for i in (0..segments).step_by(segments / 4) {
+        painter.line_segment([bottom_pts[i], top_pts[i]], stroke);
+    }
+}
+
+/// Draw sensor rays as lines from sensor world position along sensor direction.
+fn render_sensor_rays(
+    painter: &egui::Painter,
+    robot: &crate::robot::ManagedRobot,
+    color: egui::Color32,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+) {
+    for (sensor_idx, mount) in robot.definition.sensors.iter().enumerate() {
+        let (world_pos, world_dir) = sensor_world_pose(mount, &robot.state);
+
+        match &mount.sensor {
+            SensorDefinition::Distance { max_range, .. } => {
+                // Use actual reading if available, else max_range
+                let dist = match robot.state.sensor_readings.get(sensor_idx) {
+                    Some(crate::robot::state::SensorReading::Distance(d)) => *d,
+                    _ => *max_range,
+                };
+                let end = world_pos + world_dir * dist;
+                let p1 = project_3d(world_pos, cam, center, scale);
+                let p2 = project_3d(end, cam, center, scale);
+                painter.line_segment([p1, p2], egui::Stroke::new(1.0, color));
+
+                // Draw hit indicator if distance < max_range
+                if dist < *max_range - 0.01 {
+                    let hit_color = egui::Color32::from_rgb(255, 60, 60);
+                    painter.circle_filled(p2, 3.0, hit_color);
+                }
+            }
+            SensorDefinition::Lidar {
+                num_rays,
+                fov_rad,
+                max_range,
+            } => {
+                let readings = match robot.state.sensor_readings.get(sensor_idx) {
+                    Some(crate::robot::state::SensorReading::Lidar(rays)) => Some(rays.as_slice()),
+                    _ => None,
+                };
+
+                // Draw fan of rays
+                let num = *num_rays;
+                if num == 0 {
+                    continue;
+                }
+                let half_fov = fov_rad / 2.0;
+                // Compute a perpendicular axis for the fan plane
+                let perp = if world_dir.cross(Vec3::Y).length() > 0.01 {
+                    world_dir.cross(Vec3::Y).normalize()
+                } else {
+                    world_dir.cross(Vec3::X).normalize()
+                };
+
+                let faded =
+                    egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 60);
+
+                for ray_i in 0..num {
+                    let t = if num > 1 {
+                        ray_i as f32 / (num - 1) as f32
+                    } else {
+                        0.5
+                    };
+                    let angle = -half_fov + t * fov_rad;
+                    let rot = glam::Quat::from_axis_angle(perp, angle);
+                    let ray_dir = rot.mul_vec3(world_dir);
+
+                    let dist = readings
+                        .and_then(|r| r.get(ray_i).copied())
+                        .unwrap_or(*max_range);
+                    let end = world_pos + ray_dir * dist;
+
+                    let p1 = project_3d(world_pos, cam, center, scale);
+                    let p2 = project_3d(end, cam, center, scale);
+                    painter.line_segment([p1, p2], egui::Stroke::new(0.5, faded));
+                }
+            }
+            // Contact and IMU sensors have no visual ray
+            SensorDefinition::Contact | SensorDefinition::Imu => {}
+        }
+    }
 }

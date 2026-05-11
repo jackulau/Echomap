@@ -4,3 +4,5 @@ pub mod bridge;
 pub mod protocol;
 #[allow(dead_code)]
 pub mod session;
+#[allow(dead_code)]
+pub mod tcp_server;

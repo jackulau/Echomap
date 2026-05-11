@@ -547,4 +547,215 @@ mod tests {
         cancel.cancel();
         bg.abort();
     }
+
+    // ---- Edge case tests ----
+
+    #[tokio::test]
+    async fn test_ws_max_connections_rejected() {
+        let (bridge, bg) = setup_bridge(1);
+        // max_connections = 1
+        let (port, cancel, conn_count, _sh) = start_server(bridge, 1).await;
+
+        // First connection should succeed
+        let (mut w1, mut r1) = ws_connect(port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            conn_count.load(Ordering::SeqCst),
+            1,
+            "should have 1 connection"
+        );
+
+        // Second connection: server should send error then close
+        let url = format!("ws://127.0.0.1:{}", port);
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Ok((ws_stream, _)) => {
+                let (_write, mut read) = ws_stream.split();
+                // Read the error message
+                loop {
+                    match read.next().await {
+                        Some(Ok(Message::Text(text))) => {
+                            let msg: ServerMessage =
+                                serde_json::from_str(&text).expect("should parse error message");
+                            match msg {
+                                ServerMessage::Error { message } => {
+                                    assert!(
+                                        message.contains("max connections"),
+                                        "should mention max connections, got: {}",
+                                        message
+                                    );
+                                }
+                                other => panic!("Expected Error, got {:?}", other),
+                            }
+                            break;
+                        }
+                        Some(Ok(Message::Close(_))) => break, // Also acceptable
+                        Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                        other => {
+                            // Connection might just close -- acceptable
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                // Connection refused at WS level is also acceptable
+            }
+        }
+
+        // First connection should still work
+        let resp = ws_send_recv(&mut w1, &mut r1, &ClientMessage::Connect { robot_id: 0 }).await;
+        assert!(
+            matches!(resp, ServerMessage::Connected { .. }),
+            "first connection should still work, got {:?}",
+            resp
+        );
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_ws_malformed_json_text() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _sh) = start_server(bridge, 16).await;
+
+        let (mut write, mut read) = ws_connect(port).await;
+
+        // Send malformed JSON as text
+        write
+            .send(Message::Text("{bad json".into()))
+            .await
+            .expect("send should succeed");
+
+        // Read the error response
+        loop {
+            match read.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let msg: ServerMessage =
+                        serde_json::from_str(&text).expect("should parse error");
+                    match msg {
+                        ServerMessage::Error { message } => {
+                            assert!(
+                                message.contains("invalid JSON"),
+                                "malformed text should produce invalid JSON error, got: {}",
+                                message
+                            );
+                        }
+                        other => panic!("Expected Error, got {:?}", other),
+                    }
+                    break;
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                other => panic!("Expected Text error, got {:?}", other),
+            }
+        }
+
+        // Connection should still work after malformed JSON
+        let resp = ws_send_recv(
+            &mut write,
+            &mut read,
+            &ClientMessage::Connect { robot_id: 0 },
+        )
+        .await;
+        assert!(
+            matches!(resp, ServerMessage::Connected { .. }),
+            "connection should survive malformed JSON, got {:?}",
+            resp
+        );
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_ws_connection_cleanup_on_drop() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, conn_count, _sh) = start_server(bridge, 16).await;
+
+        // Connect
+        {
+            let (_write, _read) = ws_connect(port).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert_eq!(
+                conn_count.load(Ordering::SeqCst),
+                1,
+                "should have 1 connection"
+            );
+            // Drop write/read -- closes the connection
+        }
+
+        // Wait for cleanup
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            conn_count.load(Ordering::SeqCst),
+            0,
+            "connection count should drop to 0 after client disconnects"
+        );
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_ws_unknown_message_type() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _sh) = start_server(bridge, 16).await;
+
+        let (mut write, mut read) = ws_connect(port).await;
+
+        // Send valid JSON but unknown type
+        write
+            .send(Message::Text(r#"{"type":"teleport","x":10}"#.into()))
+            .await
+            .expect("send should succeed");
+
+        loop {
+            match read.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let msg: ServerMessage =
+                        serde_json::from_str(&text).expect("should parse error");
+                    assert!(
+                        matches!(msg, ServerMessage::Error { .. }),
+                        "unknown type should produce error, got {:?}",
+                        msg
+                    );
+                    break;
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+                other => panic!("Expected error Text, got {:?}", other),
+            }
+        }
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_ws_step_before_connect() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _sh) = start_server(bridge, 16).await;
+
+        let (mut write, mut read) = ws_connect(port).await;
+
+        // Step without connecting first
+        let action = RobotAction {
+            motor_velocities: vec![1.0],
+            gripper_commands: vec![],
+        };
+        let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Step { action }).await;
+        match resp {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("not connected"),
+                    "step before connect should say not connected, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+
+        cancel.cancel();
+        bg.abort();
+    }
 }

@@ -69,7 +69,7 @@ type CommandEnvelope = (SimCommand, oneshot::Sender<SimResponse>);
 /// response produced by the main-loop side (`SimBridgeClient`).
 #[derive(Clone)]
 pub struct SimBridgeServer {
-    tx: mpsc::UnboundedSender<CommandEnvelope>,
+    pub(crate) tx: mpsc::UnboundedSender<CommandEnvelope>,
 }
 
 impl SimBridgeServer {
@@ -476,6 +476,549 @@ mod tests {
         assert!(
             matches!(r4, SimResponse::Error { .. }),
             "fourth command should return Error for invalid robot_id"
+        );
+    }
+
+    // ---- Edge case tests ----
+
+    #[tokio::test]
+    async fn test_bridge_send_after_client_dropped() {
+        let (server, client) = create_bridge();
+        // Drop the client side, closing the receiving end of the channel.
+        drop(client);
+
+        let result = server
+            .send_command(SimCommand::GetObservation { robot_id: 0 })
+            .await;
+        assert!(result.is_err(), "send should fail when client is dropped");
+        assert!(
+            result.unwrap_err().contains("bridge channel closed"),
+            "error should mention bridge channel closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_response_channel_dropped() {
+        let (server, _client) = create_bridge();
+        // Manually send a command but drop the oneshot receiver before response
+        let (resp_tx, resp_rx) = oneshot::channel::<SimResponse>();
+        // Drop the receiver
+        drop(resp_rx);
+        // The sender should still be sendable (send returns Ok/Err based on
+        // whether receiver is alive), but the bridge server's send_command
+        // won't see this directly since it creates its own oneshot.
+        // Instead, test that if we drop the resp_tx before the bridge can
+        // respond, send_command returns an error.
+        let result = server
+            .tx
+            .send((SimCommand::GetObservation { robot_id: 0 }, resp_tx));
+        assert!(
+            result.is_ok(),
+            "channel send should succeed even if oneshot receiver is dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_step_empty_action() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::Step {
+                    robot_id: 0,
+                    action: RobotAction {
+                        motor_velocities: vec![],
+                        gripper_commands: vec![],
+                    },
+                })
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let response = handle.await.unwrap().unwrap();
+        // Empty action should still succeed; apply_action clamps to 0 motors
+        assert!(
+            matches!(response, SimResponse::Stepped { .. }),
+            "step with empty action should still succeed, got {:?}",
+            response
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_remove_then_step() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        // Remove robot 0
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::RemoveRobot { robot_id: 0 })
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let r = handle.await.unwrap().unwrap();
+        assert!(matches!(r, SimResponse::Removed));
+
+        // Now try to step the removed robot
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::Step {
+                    robot_id: 0,
+                    action: RobotAction {
+                        motor_velocities: vec![1.0, 1.0],
+                        gripper_commands: vec![],
+                    },
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let r = handle.await.unwrap().unwrap();
+        match r {
+            SimResponse::Error { message } => {
+                assert!(
+                    message.contains("invalid robot_id"),
+                    "should report invalid robot_id after removal, got: {}",
+                    message
+                );
+            }
+            other => panic!(
+                "Expected Error after stepping removed robot, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_get_spaces_invalid_robot() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetSpaces { robot_id: 999 })
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let response = handle.await.unwrap().unwrap();
+        match response {
+            SimResponse::Error { message } => {
+                assert!(
+                    message.contains("invalid robot_id"),
+                    "GetSpaces for invalid robot should error, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for invalid GetSpaces, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_remove_invalid_robot() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::RemoveRobot { robot_id: 50 })
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let response = handle.await.unwrap().unwrap();
+        match response {
+            SimResponse::Error { message } => {
+                assert!(
+                    message.contains("invalid robot_id"),
+                    "RemoveRobot for invalid id should error, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for invalid RemoveRobot, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_reset_invalid_robot() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::Reset { robot_id: 10 })
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let response = handle.await.unwrap().unwrap();
+        match response {
+            SimResponse::Error { message } => {
+                assert!(
+                    message.contains("invalid robot_id"),
+                    "Reset for invalid robot should error, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for invalid Reset, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_step_count_resets_on_reset() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        // Step 3 times
+        for _ in 0..3 {
+            let handle = tokio::spawn({
+                let tx = server.tx.clone();
+                async move {
+                    let srv = SimBridgeServer { tx };
+                    srv.send_command(SimCommand::Step {
+                        robot_id: 0,
+                        action: RobotAction {
+                            motor_velocities: vec![1.0, 1.0],
+                            gripper_commands: vec![],
+                        },
+                    })
+                    .await
+                }
+            });
+            tokio::task::yield_now().await;
+            client.process_pending(&mut manager, &[]);
+            let _ = handle.await.unwrap();
+        }
+
+        // Reset
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::Reset { robot_id: 0 }).await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let _ = handle.await.unwrap();
+
+        // Step once more -- step_count should be 1, not 4
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::Step {
+                    robot_id: 0,
+                    action: RobotAction {
+                        motor_velocities: vec![1.0, 1.0],
+                        gripper_commands: vec![],
+                    },
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let response = handle.await.unwrap().unwrap();
+        match response {
+            SimResponse::Stepped { step_count, .. } => {
+                assert_eq!(
+                    step_count, 1,
+                    "step_count should be 1 after reset then step, got {}",
+                    step_count
+                );
+            }
+            other => panic!("Expected Stepped, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_process_pending_no_commands() {
+        let (_server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        // Calling process_pending with no commands should be a no-op
+        client.process_pending(&mut manager, &[]);
+        // No panic or error means success
+    }
+
+    #[tokio::test]
+    async fn test_bridge_step_oversized_action() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm(); // 2 joints
+
+        // Send action with MORE velocities than joints (should be clamped)
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::Step {
+                    robot_id: 0,
+                    action: RobotAction {
+                        motor_velocities: vec![1.0, 2.0, 3.0, 4.0, 5.0],
+                        gripper_commands: vec![],
+                    },
+                })
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let response = handle.await.unwrap().unwrap();
+        assert!(
+            matches!(response, SimResponse::Stepped { .. }),
+            "oversized action should be clamped, not error, got {:?}",
+            response
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_add_robot_then_get_spaces() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        // Manager is empty -- add a robot via command
+        let def = RobotDefinition::simple_arm(3);
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::AddRobot {
+                    definition: def,
+                    base_pose: Mat4::IDENTITY.to_cols_array(),
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        let robot_id = match resp {
+            SimResponse::RobotAdded { robot_id } => robot_id,
+            other => panic!("Expected RobotAdded, got {:?}", other),
+        };
+
+        // Now get spaces for the newly added robot
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetSpaces { robot_id })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Spaces {
+                observation_space,
+                action_space,
+            } => {
+                assert_eq!(
+                    observation_space.num_joint_positions, 3,
+                    "simple_arm(3) should have 3 joints"
+                );
+                assert_eq!(action_space.num_motors, 3);
+            }
+            other => panic!("Expected Spaces, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_step_count_increments_correctly() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        // Step 5 times and verify step_count increments each time
+        for expected in 1u64..=5 {
+            let handle = tokio::spawn({
+                let tx = server.tx.clone();
+                async move {
+                    let srv = SimBridgeServer { tx };
+                    srv.send_command(SimCommand::Step {
+                        robot_id: 0,
+                        action: RobotAction {
+                            motor_velocities: vec![1.0, 1.0],
+                            gripper_commands: vec![],
+                        },
+                    })
+                    .await
+                }
+            });
+            tokio::task::yield_now().await;
+            client.process_pending(&mut manager, &[]);
+            let resp = handle.await.unwrap().unwrap();
+            match resp {
+                SimResponse::Stepped { step_count, .. } => {
+                    assert_eq!(
+                        step_count, expected,
+                        "step_count should be {} on step {}, got {}",
+                        expected, expected, step_count
+                    );
+                }
+                other => panic!("Expected Stepped on step {}, got {:?}", expected, other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_remove_robot_0_with_multiple_robots() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY); // robot 0
+        manager.add_robot(def, Mat4::IDENTITY); // robot 1
+
+        // Remove robot 0
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::RemoveRobot { robot_id: 0 })
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        assert!(matches!(resp, SimResponse::Removed));
+
+        // After removing index 0, what was robot 1 is now at index 0.
+        // Getting observation for robot_id=0 should succeed (it's the old robot 1).
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        assert!(
+            matches!(resp, SimResponse::Observation { .. }),
+            "robot_id 0 after removal should be the shifted robot, got {:?}",
+            resp
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_multiple_cloned_server_handles() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+        let server2 = SimBridgeServer {
+            tx: server.tx.clone(),
+        };
+
+        // Both handles can send commands
+        let h1 = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
+        });
+        let h2 = tokio::spawn(async move {
+            server2
+                .send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let r1 = h1.await.unwrap().unwrap();
+        let r2 = h2.await.unwrap().unwrap();
+        assert!(matches!(r1, SimResponse::Observation { .. }));
+        assert!(matches!(r2, SimResponse::Observation { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_bridge_step_then_observe_same_state() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        // Step once
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::Step {
+                    robot_id: 0,
+                    action: RobotAction {
+                        motor_velocities: vec![5.0, -3.0],
+                        gripper_commands: vec![],
+                    },
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let step_resp = handle.await.unwrap().unwrap();
+        let step_state = match step_resp {
+            SimResponse::Stepped { state, .. } => state,
+            other => panic!("Expected Stepped, got {:?}", other),
+        };
+
+        // Observe should return the same state (no simulation step happened)
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let obs_resp = handle.await.unwrap().unwrap();
+        let obs_state = match obs_resp {
+            SimResponse::Observation { state } => state,
+            other => panic!("Expected Observation, got {:?}", other),
+        };
+
+        assert_eq!(
+            step_state.joint_positions, obs_state.joint_positions,
+            "observe should return same state as the last step"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_double_remove_same_robot() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        // Remove robot 0 (first time -- succeeds)
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::RemoveRobot { robot_id: 0 })
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        assert!(matches!(resp, SimResponse::Removed));
+
+        // Remove robot 0 again (should error since manager is now empty)
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::RemoveRobot { robot_id: 0 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        assert!(
+            matches!(resp, SimResponse::Error { .. }),
+            "double remove should error, got {:?}",
+            resp
         );
     }
 }

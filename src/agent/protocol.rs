@@ -268,4 +268,303 @@ mod tests {
             other => panic!("Expected Closed, got {:?}", other),
         }
     }
+
+    // ---- Edge case tests ----
+
+    #[test]
+    fn test_unknown_type_tag_rejected() {
+        let json = r#"{"type":"explode","robot_id":0}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err(), "unknown type tag should fail to parse");
+    }
+
+    #[test]
+    fn test_missing_required_field_robot_id() {
+        // Connect requires robot_id
+        let json = r#"{"type":"connect"}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(
+            result.is_err(),
+            "connect without robot_id should fail to parse"
+        );
+    }
+
+    #[test]
+    fn test_missing_action_field_in_step() {
+        let json = r#"{"type":"step"}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err(), "step without action should fail to parse");
+    }
+
+    #[test]
+    fn test_extra_unknown_fields_ignored() {
+        // serde by default ignores unknown fields (no deny_unknown_fields)
+        let json = r#"{"type":"connect","robot_id":0,"extra_field":"should_be_ignored"}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(
+            result.is_ok(),
+            "extra unknown fields should be silently ignored"
+        );
+        match result.unwrap() {
+            ClientMessage::Connect { robot_id } => assert_eq!(robot_id, 0),
+            other => panic!("Expected Connect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_empty_string_parse_fails() {
+        let result = serde_json::from_str::<ClientMessage>("");
+        assert!(result.is_err(), "empty string should fail to parse");
+    }
+
+    #[test]
+    fn test_large_robot_id() {
+        let json = format!(r#"{{"type":"connect","robot_id":{}}}"#, usize::MAX);
+        let result = serde_json::from_str::<ClientMessage>(&json);
+        assert!(result.is_ok(), "usize::MAX robot_id should parse");
+        match result.unwrap() {
+            ClientMessage::Connect { robot_id } => assert_eq!(robot_id, usize::MAX),
+            other => panic!("Expected Connect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_nan_in_motor_velocities() {
+        // JSON does not have NaN, so literal NaN should fail parsing
+        let json = r#"{"type":"step","action":{"motor_velocities":[NaN],"gripper_commands":[]}}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err(), "NaN is not valid JSON");
+    }
+
+    #[test]
+    fn test_step_with_empty_motor_velocities() {
+        let json = r#"{"type":"step","action":{"motor_velocities":[],"gripper_commands":[]}}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(
+            result.is_ok(),
+            "empty motor_velocities should parse successfully"
+        );
+        match result.unwrap() {
+            ClientMessage::Step { action } => {
+                assert!(action.motor_velocities.is_empty());
+                assert!(action.gripper_commands.is_empty());
+            }
+            other => panic!("Expected Step, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_server_error_with_empty_message() {
+        let msg = ServerMessage::Error {
+            message: String::new(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: ServerMessage = serde_json::from_str(&json).unwrap();
+        match deser {
+            ServerMessage::Error { message } => {
+                assert!(message.is_empty(), "empty error message should round-trip");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_negative_robot_id_rejected() {
+        // robot_id is usize, so negative values should fail
+        let json = r#"{"type":"connect","robot_id":-1}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(
+            result.is_err(),
+            "negative robot_id should fail for usize field"
+        );
+    }
+
+    #[test]
+    fn test_float_robot_id_rejected() {
+        let json = r#"{"type":"connect","robot_id":1.5}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(
+            result.is_err(),
+            "float robot_id should fail for usize field"
+        );
+    }
+
+    #[test]
+    fn test_server_observation_with_nan_reward_roundtrip() {
+        // f32 NaN serializes to null in serde_json, which then
+        // deserializes back as 0.0 — verify it does not panic.
+        let msg = ServerMessage::Observation {
+            state: GymRobotState {
+                joint_positions: vec![],
+                joint_velocities: vec![],
+                sensor_readings: GymSensorReadings {
+                    distances: vec![],
+                    contacts: vec![],
+                    imu: vec![],
+                    camera_visible: vec![],
+                },
+                gripper_states: vec![],
+            },
+            reward: f32::NAN,
+            done: false,
+            step_count: 0,
+        };
+        let json = serde_json::to_string(&msg).expect("NaN serializes to null");
+        assert!(json.contains("null"), "NaN should serialize as null");
+    }
+
+    #[test]
+    fn test_whitespace_only_json_rejected() {
+        let result = serde_json::from_str::<ClientMessage>("   \t  \n  ");
+        assert!(result.is_err(), "whitespace-only input should fail");
+    }
+
+    #[test]
+    fn test_null_json_rejected() {
+        let result = serde_json::from_str::<ClientMessage>("null");
+        assert!(
+            result.is_err(),
+            "null should fail to parse as ClientMessage"
+        );
+    }
+
+    #[test]
+    fn test_unicode_in_error_message() {
+        let msg = ServerMessage::Error {
+            message: "robot \u{1F916} not found \u{00E9}\u{00F1}".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: ServerMessage = serde_json::from_str(&json).unwrap();
+        match deser {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains('\u{1F916}'),
+                    "unicode emoji should survive roundtrip"
+                );
+                assert!(
+                    message.contains('\u{00E9}'),
+                    "accented chars should survive roundtrip"
+                );
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_json_injection_in_type_field() {
+        // Try to sneak nested JSON in the type discriminator
+        let json = r#"{"type":"connect\",\"robot_id\":999,\"extra\":\"","robot_id":0}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err(), "injected type field should fail to parse");
+    }
+
+    #[test]
+    fn test_duplicate_type_field() {
+        // JSON with duplicate keys -- serde uses last occurrence
+        let json = r#"{"type":"reset","type":"connect","robot_id":0}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        // serde_json takes the last "type" value
+        match result {
+            Ok(ClientMessage::Connect { robot_id }) => assert_eq!(robot_id, 0),
+            Ok(_) => {}  // Either interpretation is fine
+            Err(_) => {} // Rejection is also acceptable
+        }
+    }
+
+    #[test]
+    fn test_infinity_in_motor_velocities() {
+        // JSON Infinity is not valid JSON
+        let json =
+            r#"{"type":"step","action":{"motor_velocities":[Infinity],"gripper_commands":[]}}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err(), "Infinity is not valid JSON");
+    }
+
+    #[test]
+    fn test_server_observation_with_infinity_reward() {
+        let msg = ServerMessage::Observation {
+            state: GymRobotState {
+                joint_positions: vec![],
+                joint_velocities: vec![],
+                sensor_readings: GymSensorReadings {
+                    distances: vec![],
+                    contacts: vec![],
+                    imu: vec![],
+                    camera_visible: vec![],
+                },
+                gripper_states: vec![],
+            },
+            reward: f32::INFINITY,
+            done: false,
+            step_count: 0,
+        };
+        let json = serde_json::to_string(&msg).expect("Infinity serializes to null");
+        assert!(json.contains("null"), "Infinity should serialize as null");
+    }
+
+    #[test]
+    fn test_very_large_step_count() {
+        let json = format!(
+            r#"{{"type":"observation","state":{{"joint_positions":[],"joint_velocities":[],"sensor_readings":{{"distances":[],"contacts":[],"imu":[],"camera_visible":[]}},"gripper_states":[]}},"reward":0.0,"done":false,"step_count":{}}}"#,
+            u64::MAX
+        );
+        let result = serde_json::from_str::<ServerMessage>(&json);
+        assert!(result.is_ok(), "u64::MAX step_count should parse");
+        match result.unwrap() {
+            ServerMessage::Observation { step_count, .. } => {
+                assert_eq!(step_count, u64::MAX);
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_closed_message_roundtrip() {
+        let msg = ServerMessage::Closed;
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deser, ServerMessage::Closed));
+    }
+
+    #[test]
+    fn test_client_reset_roundtrip() {
+        let msg = ClientMessage::Reset;
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deser, ClientMessage::Reset));
+    }
+
+    #[test]
+    fn test_client_observe_roundtrip() {
+        let msg = ClientMessage::Observe;
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deser, ClientMessage::Observe));
+    }
+
+    #[test]
+    fn test_array_json_rejected() {
+        let result = serde_json::from_str::<ClientMessage>(r#"[{"type":"reset"}]"#);
+        assert!(result.is_err(), "array should not parse as ClientMessage");
+    }
+
+    #[test]
+    fn test_robot_id_string_rejected() {
+        let json = r#"{"type":"connect","robot_id":"zero"}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(
+            result.is_err(),
+            "string robot_id should fail for usize field"
+        );
+    }
+
+    #[test]
+    fn test_boolean_motor_velocity_rejected() {
+        let json = r#"{"type":"step","action":{"motor_velocities":[true],"gripper_commands":[]}}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(
+            result.is_err(),
+            "boolean in motor_velocities should fail for f32 field"
+        );
+    }
 }

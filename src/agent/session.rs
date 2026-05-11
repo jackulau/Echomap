@@ -484,4 +484,311 @@ mod tests {
 
         handle.abort();
     }
+
+    // ---- Edge case tests ----
+
+    #[tokio::test]
+    async fn test_session_close_then_step() {
+        let (mut session, handle) = setup_test_env();
+
+        // Connect
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        // Close
+        let resp = session.handle_message(ClientMessage::Close).await;
+        assert!(matches!(resp, ServerMessage::Closed));
+
+        // Step after close should error (not connected)
+        let action = RobotAction {
+            motor_velocities: vec![1.0, -0.5],
+            gripper_commands: vec![],
+        };
+        let resp = session.handle_message(ClientMessage::Step { action }).await;
+        match resp {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("not connected"),
+                    "step after close should say not connected, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for step after close, got {:?}", other),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_close_then_observe() {
+        let (mut session, handle) = setup_test_env();
+
+        // Connect
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        // Close
+        session.handle_message(ClientMessage::Close).await;
+
+        // Observe after close should error
+        let resp = session.handle_message(ClientMessage::Observe).await;
+        match resp {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("not connected"),
+                    "observe after close should say not connected, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for observe after close, got {:?}", other),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_close_then_reset() {
+        let (mut session, handle) = setup_test_env();
+
+        // Connect
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        // Close
+        session.handle_message(ClientMessage::Close).await;
+
+        // Reset after close should error
+        let resp = session.handle_message(ClientMessage::Reset).await;
+        match resp {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("not connected"),
+                    "reset after close should say not connected, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for reset after close, got {:?}", other),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_close_then_reconnect() {
+        let (mut session, handle) = setup_test_env();
+
+        // Connect
+        let resp = session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+        assert!(matches!(resp, ServerMessage::Connected { .. }));
+
+        // Step once
+        let action = RobotAction {
+            motor_velocities: vec![1.0, -0.5],
+            gripper_commands: vec![],
+        };
+        session.handle_message(ClientMessage::Step { action }).await;
+
+        // Close
+        session.handle_message(ClientMessage::Close).await;
+
+        // Reconnect to same robot -- should succeed and reset step_count
+        let resp = session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+        assert!(
+            matches!(resp, ServerMessage::Connected { .. }),
+            "reconnect after close should succeed, got {:?}",
+            resp
+        );
+
+        // Step count should be fresh (0 before step)
+        let action2 = RobotAction {
+            motor_velocities: vec![0.5, 0.5],
+            gripper_commands: vec![],
+        };
+        let resp = session
+            .handle_message(ClientMessage::Step { action: action2 })
+            .await;
+        match resp {
+            ServerMessage::Observation { step_count, .. } => {
+                assert_eq!(
+                    step_count, 1,
+                    "step_count should be 1 after reconnect+step, got {}",
+                    step_count
+                );
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_double_close_idempotent() {
+        let (mut session, handle) = setup_test_env();
+
+        // Connect
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        // Close once
+        let resp = session.handle_message(ClientMessage::Close).await;
+        assert!(matches!(resp, ServerMessage::Closed));
+
+        // Close again -- should still return Closed, not error
+        let resp = session.handle_message(ClientMessage::Close).await;
+        assert!(
+            matches!(resp, ServerMessage::Closed),
+            "double close should be idempotent, got {:?}",
+            resp
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_close_without_connect() {
+        let (mut session, handle) = setup_test_env();
+
+        // Close without ever connecting
+        let resp = session.handle_message(ClientMessage::Close).await;
+        assert!(
+            matches!(resp, ServerMessage::Closed),
+            "close without connect should still return Closed, got {:?}",
+            resp
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_connect_to_different_robot_after_close() {
+        // Setup with 2 robots
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        let (server, mut client) = create_bridge();
+        let mut session = AgentSession::new(server);
+
+        let bg = tokio::spawn(async move {
+            loop {
+                client.process_pending(&mut manager, &[]);
+                tokio::task::yield_now().await;
+            }
+        });
+
+        // Connect to robot 0
+        let resp = session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+        assert!(matches!(resp, ServerMessage::Connected { .. }));
+
+        // Close
+        session.handle_message(ClientMessage::Close).await;
+
+        // Connect to robot 1
+        let resp = session
+            .handle_message(ClientMessage::Connect { robot_id: 1 })
+            .await;
+        assert!(
+            matches!(resp, ServerMessage::Connected { .. }),
+            "should be able to connect to different robot after close, got {:?}",
+            resp
+        );
+
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_step_count_independent_of_bridge_count() {
+        let (mut session, handle) = setup_test_env();
+
+        // Connect
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        // Step 5 times
+        let action = RobotAction {
+            motor_velocities: vec![1.0, 1.0],
+            gripper_commands: vec![],
+        };
+        for _ in 0..5 {
+            session
+                .handle_message(ClientMessage::Step {
+                    action: action.clone(),
+                })
+                .await;
+        }
+
+        // Reset
+        let resp = session.handle_message(ClientMessage::Reset).await;
+        match resp {
+            ServerMessage::Observation {
+                step_count,
+                reward,
+                done,
+                ..
+            } => {
+                assert_eq!(step_count, 0, "step_count should be 0 after reset");
+                assert!((reward - 0.0).abs() < 1e-6, "reward should be 0.0 on reset");
+                assert!(!done, "done should be false on reset");
+            }
+            other => panic!("Expected Observation after reset, got {:?}", other),
+        }
+
+        // Step again -- count should start from 1
+        let resp = session
+            .handle_message(ClientMessage::Step {
+                action: action.clone(),
+            })
+            .await;
+        match resp {
+            ServerMessage::Observation { step_count, .. } => {
+                assert_eq!(step_count, 1, "step after reset should be 1");
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_observe_returns_zero_reward() {
+        let (mut session, handle) = setup_test_env();
+
+        // Connect
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        // Observe should return reward=0.0 and done=false
+        let resp = session.handle_message(ClientMessage::Observe).await;
+        match resp {
+            ServerMessage::Observation {
+                reward,
+                done,
+                step_count,
+                ..
+            } => {
+                assert!((reward - 0.0).abs() < 1e-6, "observe reward should be 0.0");
+                assert!(!done, "observe done should be false");
+                assert_eq!(
+                    step_count, 0,
+                    "observe step_count should be 0 before any steps"
+                );
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        handle.abort();
+    }
 }

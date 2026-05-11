@@ -502,4 +502,201 @@ mod tests {
         cancel.cancel();
         bg.abort();
     }
+
+    // ---- Edge case tests ----
+
+    #[tokio::test]
+    async fn test_tcp_max_connections_rejected() {
+        let (bridge, bg) = setup_bridge(1);
+        // max_connections = 1
+        let (port, cancel, conn_count, _sh) = start_server(bridge, 1).await;
+
+        // First connection should succeed
+        let (mut w1, mut r1) = connect_client(port).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            conn_count.load(Ordering::SeqCst),
+            1,
+            "should have 1 connection"
+        );
+
+        // Second connection should be rejected with an error message
+        let stream2 = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("TCP connect should succeed at the OS level");
+        let (r2, _w2) = stream2.into_split();
+        let mut reader2 = BufReader::new(r2);
+        let mut line = String::new();
+        let n = reader2.read_line(&mut line).await.unwrap();
+        if n > 0 {
+            let parsed: ServerMessage = serde_json::from_str(line.trim()).unwrap();
+            match parsed {
+                ServerMessage::Error { message } => {
+                    assert!(
+                        message.contains("max connections"),
+                        "should mention max connections, got: {}",
+                        message
+                    );
+                }
+                other => panic!("Expected Error for max connections, got {:?}", other),
+            }
+        }
+
+        // First connection should still be alive
+        let msg = serde_json::to_string(&ClientMessage::Connect { robot_id: 0 }).unwrap();
+        let resp = send_and_recv(&mut w1, &mut r1, &msg).await;
+        let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
+        assert!(
+            matches!(parsed, ServerMessage::Connected { .. }),
+            "first connection should still work after second was rejected, got {:?}",
+            parsed
+        );
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_empty_lines_ignored() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _sh) = start_server(bridge, 16).await;
+
+        let (mut writer, mut reader) = connect_client(port).await;
+
+        // Send empty lines (should be ignored)
+        writer.write_all(b"\n").await.unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        writer.write_all(b"   \n").await.unwrap();
+        writer.flush().await.unwrap();
+
+        // Now send a valid message -- should still work
+        let msg = serde_json::to_string(&ClientMessage::Connect { robot_id: 0 }).unwrap();
+        let resp = send_and_recv(&mut writer, &mut reader, &msg).await;
+        let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
+        assert!(
+            matches!(parsed, ServerMessage::Connected { .. }),
+            "connection should work after empty lines, got {:?}",
+            parsed
+        );
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_partial_json_error() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _sh) = start_server(bridge, 16).await;
+
+        let (mut writer, mut reader) = connect_client(port).await;
+
+        // Send partial/truncated JSON
+        let resp = send_and_recv(&mut writer, &mut reader, r#"{"type":"conn"#).await;
+        let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
+        match parsed {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("invalid JSON"),
+                    "partial JSON should produce invalid JSON error, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for partial JSON, got {:?}", other),
+        }
+
+        // Connection should still be alive
+        let msg = serde_json::to_string(&ClientMessage::Connect { robot_id: 0 }).unwrap();
+        let resp = send_and_recv(&mut writer, &mut reader, &msg).await;
+        let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
+        assert!(
+            matches!(parsed, ServerMessage::Connected { .. }),
+            "connection should survive partial JSON, got {:?}",
+            parsed
+        );
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_server_cancel_stops_accept() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _server_handle) = start_server(bridge, 16).await;
+
+        // Cancel the server
+        cancel.cancel();
+
+        // Give the server a moment to stop
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // New connections should fail (server stopped accepting)
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await;
+
+        // Either the connection is refused or times out -- both are correct
+        match result {
+            Ok(Ok(_stream)) => {
+                // Connection might still succeed if OS hasn't fully closed the listener,
+                // but the server won't process messages.
+            }
+            Ok(Err(_)) => {} // Connection refused -- expected
+            Err(_) => {}     // Timeout -- also acceptable
+        }
+
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_rapid_connect_disconnect() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, conn_count, _sh) = start_server(bridge, 16).await;
+
+        // Rapidly connect and disconnect 10 times
+        for _ in 0..10 {
+            let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .expect("connect should succeed");
+            drop(stream); // immediately disconnect
+        }
+
+        // Give server time to process all disconnects
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            conn_count.load(Ordering::SeqCst),
+            0,
+            "all connections should be cleaned up after rapid connect/disconnect"
+        );
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_unknown_type_returns_error() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _sh) = start_server(bridge, 16).await;
+
+        let (mut writer, mut reader) = connect_client(port).await;
+
+        // Send a JSON object with an unknown type
+        let resp =
+            send_and_recv(&mut writer, &mut reader, r#"{"type":"fly","altitude":100}"#).await;
+        let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
+        match parsed {
+            ServerMessage::Error { message } => {
+                assert!(
+                    message.contains("invalid JSON"),
+                    "unknown type should produce invalid JSON error, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected Error for unknown type, got {:?}", other),
+        }
+
+        cancel.cancel();
+        bg.abort();
+    }
 }

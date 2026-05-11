@@ -162,6 +162,43 @@ impl RobotManager {
 }
 
 // ---------------------------------------------------------------------------
+// RobotSimulation — high-level simulation wrapper with fixed timestep
+// ---------------------------------------------------------------------------
+
+/// High-level robot simulation that wraps a `RobotManager` with a fixed
+/// timestep. Provides a `step` method that advances all robots by `dt`.
+#[allow(dead_code)]
+pub struct RobotSimulation {
+    pub manager: RobotManager,
+    pub running: bool,
+    pub dt: f32,
+}
+
+impl Default for RobotSimulation {
+    fn default() -> Self {
+        Self {
+            manager: RobotManager::default(),
+            running: true,
+            dt: 1.0 / 60.0,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl RobotSimulation {
+    /// Step all robots forward by `self.dt` seconds.
+    ///
+    /// For each robot: apply actuator dynamics, compute forward kinematics,
+    /// then simulate sensors against the provided scene meshes.
+    pub fn step(&mut self, scene_meshes: &[SceneObject]) {
+        if !self.running {
+            return;
+        }
+        self.manager.step(self.dt, scene_meshes);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -263,6 +300,90 @@ mod tests {
             "robot 2 should not have moved without a command, pos={}",
             r2_pos
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 7: RobotSimulation tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_robot_simulation_step() {
+        let mut sim = RobotSimulation::default();
+        let def = RobotDefinition::simple_arm(1);
+        let idx = sim.manager.add_robot(def, Mat4::IDENTITY);
+
+        // Set a velocity command so dynamics actually move the joint
+        sim.manager
+            .set_command(idx, 0, ActuatorCommand::Velocity(2.0));
+
+        let pos_before = sim.manager.get_robot(idx).unwrap().state.joint_positions[0];
+
+        // Step several times
+        let meshes: Vec<crate::scene::SceneObject> = vec![];
+        for _ in 0..10 {
+            sim.step(&meshes);
+        }
+
+        let pos_after = sim.manager.get_robot(idx).unwrap().state.joint_positions[0];
+        assert!(
+            (pos_after - pos_before).abs() > 1e-6,
+            "joint position should change after stepping with a velocity command, before={} after={}",
+            pos_before,
+            pos_after
+        );
+    }
+
+    #[test]
+    fn test_robot_simulation_sensors_update() {
+        use crate::robot::definition::{SensorDefinition, SensorMount};
+
+        // Build a robot definition with a distance sensor
+        let def = RobotDefinition {
+            name: "sensor_bot".to_string(),
+            links: vec![crate::robot::definition::LinkDefinition {
+                name: "base".to_string(),
+                mass: 5.0,
+                inertia: 1.0,
+                collision_shape: crate::robot::definition::CollisionShape::Cuboid {
+                    half_extents: glam::Vec3::splat(0.1),
+                },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![SensorMount {
+                link_index: 0,
+                local_offset: glam::Vec3::ZERO,
+                sensor: SensorDefinition::Distance {
+                    direction: glam::Vec3::Z,
+                    max_range: 50.0,
+                },
+            }],
+        };
+
+        let mut sim = RobotSimulation::default();
+        sim.manager.add_robot(def, Mat4::IDENTITY);
+
+        // Step with no scene objects
+        let meshes: Vec<crate::scene::SceneObject> = vec![];
+        sim.step(&meshes);
+
+        // Sensor should have a reading (max_range since no objects)
+        let robot = sim.manager.get_robot(0).unwrap();
+        assert_eq!(
+            robot.state.sensor_readings.len(),
+            1,
+            "should have one sensor reading"
+        );
+        match &robot.state.sensor_readings[0] {
+            crate::robot::state::SensorReading::Distance(d) => {
+                assert!(
+                    (*d - 50.0).abs() < 1e-4,
+                    "distance sensor should read max_range (50.0) with no objects, got {}",
+                    d
+                );
+            }
+            other => panic!("Expected Distance reading, got {:?}", other),
+        }
     }
 
     #[test]

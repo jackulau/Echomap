@@ -8,6 +8,7 @@ pub use mesh::{Mesh, Triangle, Vertex};
 use glam::Vec3;
 
 use crate::gas::grid::GasSpecies;
+use crate::robot::body::Robot;
 
 #[allow(dead_code)]
 pub struct GasVolume {
@@ -63,6 +64,7 @@ pub struct Scene {
     pub background_medium: MediumProperties,
     pub fluid_volumes: Vec<FluidVolume>,
     pub gas_volumes: Vec<GasVolume>,
+    pub robots: Vec<Robot>,
 }
 
 impl Default for Scene {
@@ -74,6 +76,7 @@ impl Default for Scene {
             background_medium: MediumProperties::air(),
             fluid_volumes: Vec::new(),
             gas_volumes: Vec::new(),
+            robots: Vec::new(),
         }
     }
 }
@@ -354,6 +357,52 @@ mod tests {
         );
         assert!(scene.fluid_volumes.is_empty());
         assert!(scene.gas_volumes.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Task 7: Scene robot integration tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_scene_default_no_robots() {
+        let scene = Scene::default();
+        assert!(
+            scene.robots.is_empty(),
+            "Default scene should have no robots"
+        );
+    }
+
+    #[test]
+    fn test_scene_with_robot() {
+        use crate::robot::body::{Link, Robot};
+        use glam::Quat;
+
+        let mut scene = Scene::default();
+        let base = Link::new("base", Vec3::ZERO, Quat::IDENTITY, Vec3::splat(0.1), 5.0);
+        let robot = Robot::new("test_bot", Vec3::ZERO, Quat::IDENTITY, base);
+        scene.robots.push(robot);
+
+        assert_eq!(scene.robots.len(), 1, "Scene should contain one robot");
+        assert_eq!(
+            scene.robots[0].name, "test_bot",
+            "Robot name should persist"
+        );
+    }
+
+    #[test]
+    fn test_existing_scene_unchanged_with_robots() {
+        // Regression: default scene still works and has all expected fields
+        let scene = Scene::default();
+        assert!(scene.meshes.is_empty());
+        assert!(scene.sound_sources.is_empty());
+        assert!(scene.listeners.is_empty());
+        assert!(
+            (scene.background_medium.density - MediumProperties::air().density).abs() < 1e-6,
+            "background_medium should still default to air"
+        );
+        assert!(scene.fluid_volumes.is_empty());
+        assert!(scene.gas_volumes.is_empty());
+        assert!(scene.robots.is_empty());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use glam::Vec3;
 
 use crate::acoustics::SimulationState;
 use crate::renderer::{energy_to_color, project_3d, ray_ground_intersect, screen_to_ray, Camera};
-use crate::scene::{Listener, MaterialLibrary, Scene, SoundSource};
+use crate::scene::{Listener, MaterialLibrary, MediumLibrary, Scene, SoundSource};
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionMode {
@@ -30,6 +30,7 @@ pub struct ViewportState {
     pub dragging: bool,
     pub hover_world: Option<Vec3>,
     pub material_lib: MaterialLibrary,
+    pub medium_lib: MediumLibrary,
 }
 
 impl Default for ViewportState {
@@ -43,6 +44,7 @@ impl Default for ViewportState {
             dragging: false,
             hover_world: None,
             material_lib: MaterialLibrary::with_defaults(),
+            medium_lib: MediumLibrary::with_defaults(),
         }
     }
 }
@@ -190,6 +192,41 @@ pub fn side_panel(
             ui.heading("EchoMap");
             ui.separator();
 
+            // --- Background Medium ---
+            egui::CollapsingHeader::new("Background Medium")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let medium_names: Vec<String> = vp.medium_lib.media.keys().cloned().collect();
+                    egui::ComboBox::from_id_salt("bg_medium_combo")
+                        .selected_text(&scene.background_medium.name)
+                        .show_ui(ui, |ui| {
+                            for name in &medium_names {
+                                if ui
+                                    .selectable_label(scene.background_medium.name == *name, name)
+                                    .clicked()
+                                {
+                                    if let Some(m) = vp.medium_lib.get(name) {
+                                        scene.background_medium = m.clone();
+                                    }
+                                }
+                            }
+                        });
+                    ui.label(format!(
+                        "  Density: {:.3} kg/m\u{b3}",
+                        scene.background_medium.density
+                    ));
+                    ui.label(format!(
+                        "  Speed of sound: {:.1} m/s",
+                        scene.background_medium.speed_of_sound
+                    ));
+                    ui.label(format!(
+                        "  Impedance: {:.1} Pa\u{b7}s/m",
+                        scene.background_medium.impedance
+                    ));
+                });
+
+            ui.separator();
+
             egui::CollapsingHeader::new(format!("Scene Objects ({})", scene.meshes.len()))
                 .default_open(true)
                 .show(ui, |ui| {
@@ -239,6 +276,48 @@ pub fn side_panel(
                                 )
                                 .text("Scatter"),
                             );
+
+                            // --- Interior Medium ---
+                            ui.separator();
+                            ui.label("Interior Medium:");
+                            let int_medium_names: Vec<String> =
+                                vp.medium_lib.media.keys().cloned().collect();
+                            let selected_int_name = scene.meshes[i]
+                                .interior_medium
+                                .as_ref()
+                                .map_or("None".to_string(), |m| m.name.clone());
+                            egui::ComboBox::from_id_salt(format!("int_medium_combo_{i}"))
+                                .selected_text(&selected_int_name)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_label(
+                                            scene.meshes[i].interior_medium.is_none(),
+                                            "None",
+                                        )
+                                        .clicked()
+                                    {
+                                        scene.meshes[i].interior_medium = None;
+                                    }
+                                    for name in &int_medium_names {
+                                        let is_selected = scene.meshes[i]
+                                            .interior_medium
+                                            .as_ref()
+                                            .is_some_and(|m| m.name == *name);
+                                        if ui.selectable_label(is_selected, name).clicked() {
+                                            if let Some(m) = vp.medium_lib.get(name) {
+                                                scene.meshes[i].interior_medium = Some(m.clone());
+                                            }
+                                        }
+                                    }
+                                });
+                            if let Some(ref med) = scene.meshes[i].interior_medium {
+                                ui.label(format!("  Density: {:.3} kg/m\u{b3}", med.density));
+                                ui.label(format!(
+                                    "  Speed of sound: {:.1} m/s",
+                                    med.speed_of_sound
+                                ));
+                                ui.label(format!("  Impedance: {:.1} Pa\u{b7}s/m", med.impedance));
+                            }
 
                             if ui.button("Delete Object").clicked() {
                                 to_remove = Some(i);

@@ -2,7 +2,7 @@ pub mod material;
 mod mesh;
 pub mod primitives;
 
-pub use material::{AcousticMaterial, MaterialLibrary, MediumProperties};
+pub use material::{AcousticMaterial, MaterialLibrary, MediumLibrary, MediumProperties};
 pub use mesh::{Mesh, Triangle, Vertex};
 
 use glam::Vec3;

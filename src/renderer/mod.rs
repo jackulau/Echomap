@@ -1,6 +1,7 @@
 use glam::Vec3;
 
 use crate::fluids::grid::FluidGrid;
+use crate::gas::grid::GasGrid;
 
 /// Visualization mode for fluid slice rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,6 +15,21 @@ pub enum FluidVisualizationMode {
 impl Default for FluidVisualizationMode {
     fn default() -> Self {
         Self::VelocityMagnitude
+    }
+}
+
+/// Visualization mode for gas slice rendering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GasVisualizationMode {
+    Concentration,
+    Temperature,
+    Pressure,
+    VelocityMagnitude,
+}
+
+impl Default for GasVisualizationMode {
+    fn default() -> Self {
+        Self::Concentration
     }
 }
 
@@ -255,6 +271,123 @@ fn sample_field(
         FluidVisualizationMode::Pressure => grid.pressure[idx],
         FluidVisualizationMode::Density => grid.density[idx],
         FluidVisualizationMode::LevelSet => grid.level_set[idx],
+    }
+}
+
+/// Render a horizontal slice through the gas grid as colored rectangles.
+///
+/// Each cell in the y=`y_slice` plane is drawn as a quad projected through
+/// `project_3d`, colored by the selected field value using `energy_to_color`.
+/// When the mode is `Concentration`, the `species_idx` selects which species
+/// concentration array to visualize.
+pub fn render_gas_slice(
+    grid: &GasGrid,
+    y_slice: usize,
+    species_idx: usize,
+    mode: GasVisualizationMode,
+    painter: &egui::Painter,
+    camera: &Camera,
+    screen_center: egui::Pos2,
+    scale: f32,
+    clip_rect: egui::Rect,
+) {
+    let j = y_slice.min(grid.ny.saturating_sub(1));
+
+    // Determine the maximum field value for color normalization (scan the slice).
+    let mut max_val: f32 = 0.0;
+    for k in 0..grid.nz {
+        for i in 0..grid.nx {
+            let val = sample_gas_field(grid, i, j, k, species_idx, mode);
+            let abs = val.abs();
+            if abs > max_val {
+                max_val = abs;
+            }
+        }
+    }
+
+    // Fallback: avoid division by zero in energy_to_color.
+    if max_val < 1e-12 {
+        max_val = 1.0;
+    }
+
+    // Draw each cell as a projected quad.
+    let dx = grid.dx;
+    for k in 0..grid.nz {
+        for i in 0..grid.nx {
+            let val = sample_gas_field(grid, i, j, k, species_idx, mode);
+            let abs = val.abs();
+
+            // Skip negligible cells for performance.
+            if abs < 1e-8 {
+                continue;
+            }
+
+            let color = energy_to_color(abs, max_val);
+
+            // Semi-transparent so underlying geometry is visible.
+            let color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 140);
+
+            // World-space corners of this cell in the y=j plane.
+            let base = grid.origin + Vec3::new(i as f32 * dx, (j as f32 + 0.5) * dx, k as f32 * dx);
+
+            let corners = [
+                base,
+                base + Vec3::new(dx, 0.0, 0.0),
+                base + Vec3::new(dx, 0.0, dx),
+                base + Vec3::new(0.0, 0.0, dx),
+            ];
+
+            let screen: Vec<egui::Pos2> = corners
+                .iter()
+                .map(|&c| project_3d(c, camera, screen_center, scale))
+                .collect();
+
+            // Only draw if at least one vertex is inside the clip rect.
+            if screen.iter().any(|p| clip_rect.contains(*p)) {
+                let mesh = egui::Mesh {
+                    indices: vec![0, 1, 2, 0, 2, 3],
+                    vertices: screen
+                        .iter()
+                        .map(|&p| egui::epaint::Vertex {
+                            pos: p,
+                            uv: egui::Pos2::ZERO,
+                            color,
+                        })
+                        .collect(),
+                    texture_id: egui::TextureId::Managed(0),
+                };
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        }
+    }
+}
+
+/// Sample the appropriate gas field value from a cell based on the visualization mode.
+fn sample_gas_field(
+    grid: &GasGrid,
+    i: usize,
+    j: usize,
+    k: usize,
+    species_idx: usize,
+    mode: GasVisualizationMode,
+) -> f32 {
+    let idx = grid.idx(i, j, k);
+    match mode {
+        GasVisualizationMode::Concentration => {
+            if species_idx < grid.concentrations.len() {
+                grid.concentrations[species_idx][idx]
+            } else {
+                0.0
+            }
+        }
+        GasVisualizationMode::Temperature => grid.temperature[idx],
+        GasVisualizationMode::Pressure => grid.pressure[idx],
+        GasVisualizationMode::VelocityMagnitude => {
+            let vx = grid.vel_x[idx];
+            let vy = grid.vel_y[idx];
+            let vz = grid.vel_z[idx];
+            (vx * vx + vy * vy + vz * vz).sqrt()
+        }
     }
 }
 

@@ -2,9 +2,10 @@ use glam::Vec3;
 
 use crate::acoustics::SimulationState;
 use crate::fluids::FluidSimulation;
+use crate::gas::GasSimulation;
 use crate::renderer::{
-    energy_to_color, project_3d, ray_ground_intersect, render_fluid_slice, screen_to_ray, Camera,
-    FluidVisualizationMode,
+    energy_to_color, project_3d, ray_ground_intersect, render_fluid_slice, render_gas_slice,
+    screen_to_ray, Camera, FluidVisualizationMode, GasVisualizationMode,
 };
 use crate::scene::{Listener, MaterialLibrary, MediumLibrary, Scene, SoundSource};
 
@@ -38,6 +39,10 @@ pub struct ViewportState {
     pub show_fluid: bool,
     pub fluid_viz_mode: FluidVisualizationMode,
     pub fluid_slice_y: usize,
+    pub show_gas: bool,
+    pub gas_viz_mode: GasVisualizationMode,
+    pub gas_slice_y: usize,
+    pub gas_species_idx: usize,
 }
 
 impl Default for ViewportState {
@@ -55,6 +60,10 @@ impl Default for ViewportState {
             show_fluid: false,
             fluid_viz_mode: FluidVisualizationMode::default(),
             fluid_slice_y: 0,
+            show_gas: false,
+            gas_viz_mode: GasVisualizationMode::default(),
+            gas_slice_y: 0,
+            gas_species_idx: 0,
         }
     }
 }
@@ -196,6 +205,7 @@ pub fn side_panel(
     sim: &mut SimulationState,
     vp: &mut ViewportState,
     fluid_sim: &mut FluidSimulation,
+    gas_sim: &mut GasSimulation,
 ) {
     egui::SidePanel::left("side_panel")
         .default_width(280.0)
@@ -546,6 +556,71 @@ pub fn side_panel(
                         egui::Slider::new(&mut vp.fluid_slice_y, 0..=max_y.max(1)).text("Slice Y"),
                     );
                 });
+
+            ui.separator();
+
+            // --- Gas Visualization ---
+            egui::CollapsingHeader::new("Gas Visualization")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut vp.show_gas, "Show Gas");
+
+                    let gas_mode_label = match vp.gas_viz_mode {
+                        GasVisualizationMode::Concentration => "Concentration",
+                        GasVisualizationMode::Temperature => "Temperature",
+                        GasVisualizationMode::Pressure => "Pressure",
+                        GasVisualizationMode::VelocityMagnitude => "Velocity",
+                    };
+                    egui::ComboBox::from_id_salt("gas_viz_mode")
+                        .selected_text(gas_mode_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut vp.gas_viz_mode,
+                                GasVisualizationMode::Concentration,
+                                "Concentration",
+                            );
+                            ui.selectable_value(
+                                &mut vp.gas_viz_mode,
+                                GasVisualizationMode::Temperature,
+                                "Temperature",
+                            );
+                            ui.selectable_value(
+                                &mut vp.gas_viz_mode,
+                                GasVisualizationMode::Pressure,
+                                "Pressure",
+                            );
+                            ui.selectable_value(
+                                &mut vp.gas_viz_mode,
+                                GasVisualizationMode::VelocityMagnitude,
+                                "Velocity",
+                            );
+                        });
+
+                    // Species selector
+                    let species_count = gas_sim.grid.as_ref().map_or(0, |g| g.species.len());
+                    if species_count > 0 {
+                        let species_name = gas_sim
+                            .grid
+                            .as_ref()
+                            .and_then(|g| g.species.get(vp.gas_species_idx))
+                            .map_or("None".to_string(), |s| s.name.clone());
+                        egui::ComboBox::from_id_salt("gas_species_sel")
+                            .selected_text(species_name)
+                            .show_ui(ui, |ui| {
+                                if let Some(ref grid) = gas_sim.grid {
+                                    for (idx, sp) in grid.species.iter().enumerate() {
+                                        ui.selectable_value(&mut vp.gas_species_idx, idx, &sp.name);
+                                    }
+                                }
+                            });
+                    }
+
+                    let gas_max_y = gas_sim.grid.as_ref().map_or(0, |g| g.ny.saturating_sub(1));
+                    ui.add(
+                        egui::Slider::new(&mut vp.gas_slice_y, 0..=gas_max_y.max(1))
+                            .text("Slice Y"),
+                    );
+                });
         });
 }
 
@@ -555,6 +630,7 @@ pub fn viewport_3d(
     sim: &SimulationState,
     vp: &mut ViewportState,
     fluid_sim: &crate::fluids::FluidSimulation,
+    gas_sim: &GasSimulation,
 ) {
     egui::CentralPanel::default().show(ctx, |ui| {
         let (response, painter) =
@@ -789,6 +865,23 @@ pub fn viewport_3d(
                     grid,
                     vp.fluid_slice_y,
                     vp.fluid_viz_mode,
+                    &painter,
+                    cam,
+                    center,
+                    scale,
+                    rect,
+                );
+            }
+        }
+
+        // Gas slice visualization
+        if vp.show_gas {
+            if let Some(ref grid) = gas_sim.grid {
+                render_gas_slice(
+                    grid,
+                    vp.gas_slice_y,
+                    vp.gas_species_idx,
+                    vp.gas_viz_mode,
                     &painter,
                     cam,
                     center,

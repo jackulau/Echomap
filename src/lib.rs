@@ -10,6 +10,8 @@ pub mod scene;
 pub mod surface;
 pub mod ui;
 
+pub mod benchmarks;
+
 #[cfg(test)]
 mod tests {
     use super::fluids::FluidSimulation;

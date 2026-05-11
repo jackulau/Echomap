@@ -7,11 +7,35 @@ pub use mesh::{Mesh, Triangle, Vertex};
 
 use glam::Vec3;
 
+pub struct FluidVolume {
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
+    pub medium: MediumProperties,
+    pub fill_level: f32,
+    pub initial_velocity: Vec3,
+    pub grid_resolution: f32,
+}
+
+impl FluidVolume {
+    #[allow(dead_code)]
+    pub fn new(min: Vec3, max: Vec3, medium: MediumProperties) -> Self {
+        Self {
+            bounds_min: min,
+            bounds_max: max,
+            medium,
+            fill_level: 1.0,
+            initial_velocity: Vec3::ZERO,
+            grid_resolution: 0.1,
+        }
+    }
+}
+
 pub struct Scene {
     pub meshes: Vec<SceneObject>,
     pub sound_sources: Vec<SoundSource>,
     pub listeners: Vec<Listener>,
     pub background_medium: MediumProperties,
+    pub fluid_volumes: Vec<FluidVolume>,
 }
 
 impl Default for Scene {
@@ -21,6 +45,7 @@ impl Default for Scene {
             sound_sources: Vec::new(),
             listeners: Vec::new(),
             background_medium: MediumProperties::air(),
+            fluid_volumes: Vec::new(),
         }
     }
 }
@@ -136,6 +161,83 @@ mod tests {
             (interior.speed_of_sound - 1481.0).abs() < 0.1,
             "Interior speed_of_sound should be water's"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Task 5: Scene FluidVolume integration tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_scene_default_no_fluid_volumes() {
+        let scene = Scene::default();
+        assert!(
+            scene.fluid_volumes.is_empty(),
+            "Default scene should have no fluid volumes"
+        );
+    }
+
+    #[test]
+    fn test_fluid_volume_creation() {
+        let min = glam::Vec3::new(0.0, 0.0, 0.0);
+        let max = glam::Vec3::new(2.0, 3.0, 4.0);
+        let water = MediumLibrary::with_defaults().get("Water").unwrap().clone();
+        let vol = super::FluidVolume::new(min, max, water.clone());
+
+        assert!(
+            (vol.bounds_min - min).length() < 1e-6,
+            "bounds_min should match"
+        );
+        assert!(
+            (vol.bounds_max - max).length() < 1e-6,
+            "bounds_max should match"
+        );
+        assert!(
+            (vol.medium.density - water.density).abs() < 1e-6,
+            "medium should be water"
+        );
+        assert!(
+            (vol.fill_level - 1.0).abs() < 1e-6,
+            "fill_level should default to 1.0"
+        );
+        assert!(
+            vol.initial_velocity.length() < 1e-6,
+            "initial_velocity should default to zero"
+        );
+        assert!(
+            (vol.grid_resolution - 0.1).abs() < 1e-6,
+            "grid_resolution should default to 0.1"
+        );
+    }
+
+    #[test]
+    fn test_scene_with_fluid_volume() {
+        let mut scene = Scene::default();
+        let water = MediumLibrary::with_defaults().get("Water").unwrap().clone();
+        let vol = super::FluidVolume::new(glam::Vec3::ZERO, glam::Vec3::new(5.0, 5.0, 5.0), water);
+        scene.fluid_volumes.push(vol);
+        assert_eq!(
+            scene.fluid_volumes.len(),
+            1,
+            "Scene should contain one fluid volume"
+        );
+        assert!(
+            (scene.fluid_volumes[0].bounds_max.x - 5.0).abs() < 1e-6,
+            "Fluid volume should persist with correct bounds"
+        );
+    }
+
+    #[test]
+    fn test_existing_scene_construction_unchanged() {
+        // Regression: default scene still works and has expected fields
+        let scene = Scene::default();
+        assert!(scene.meshes.is_empty());
+        assert!(scene.sound_sources.is_empty());
+        assert!(scene.listeners.is_empty());
+        assert!(
+            (scene.background_medium.density - MediumProperties::air().density).abs() < 1e-6,
+            "background_medium should still default to air"
+        );
+        assert!(scene.fluid_volumes.is_empty());
     }
 
     #[test]

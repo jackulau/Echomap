@@ -374,6 +374,7 @@ mod tests {
             }],
             listeners: vec![Listener::default()],
             background_medium: MediumProperties::air(),
+            ..Default::default()
         }
     }
 
@@ -614,6 +615,7 @@ mod tests {
             }],
             // Background is water (entire environment is underwater)
             background_medium: water_med.clone(),
+            ..Default::default()
         };
 
         let config = SimulationConfig {
@@ -752,6 +754,7 @@ mod tests {
             }],
             listeners: vec![Listener::default()],
             background_medium: MediumProperties::air(),
+            ..Default::default()
         };
 
         let config = SimulationConfig {
@@ -894,6 +897,7 @@ mod tests {
                 name: "Behind Glass".into(),
             }],
             background_medium: MediumProperties::air(),
+            ..Default::default()
         };
 
         let config = SimulationConfig {
@@ -970,6 +974,7 @@ mod tests {
             }],
             listeners: vec![Listener::default()],
             background_medium: helium.clone(),
+            ..Default::default()
         };
 
         // Same room in air for comparison
@@ -984,6 +989,7 @@ mod tests {
             }],
             listeners: vec![Listener::default()],
             background_medium: air_med,
+            ..Default::default()
         };
 
         let config = SimulationConfig {
@@ -1190,6 +1196,7 @@ mod tests {
             }],
             listeners: vec![Listener::default()],
             background_medium: MediumProperties::air(),
+            ..Default::default()
         };
 
         let config = SimulationConfig {

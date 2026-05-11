@@ -496,4 +496,237 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Edge case tests for SurfaceInteraction facade
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_edge_surface_interaction_from_each_preset() {
+        use crate::scene::material::MaterialLibrary;
+
+        let lib = MaterialLibrary::with_defaults();
+        let expected_names = [
+            "Concrete",
+            "Glass",
+            "Carpet",
+            "Drywall",
+            "Wood Panel",
+            "Acoustic Foam",
+        ];
+
+        for name in &expected_names {
+            let mat = lib
+                .materials
+                .get(*name)
+                .expect(&format!("Missing preset: {name}"));
+            let si = SurfaceInteraction::from_material(mat);
+
+            // Verify all fields transferred correctly
+            assert!(
+                (si.friction_static - mat.friction_static).abs() < EPSILON,
+                "{name}: friction_static mismatch"
+            );
+            assert!(
+                (si.friction_kinetic - mat.friction_kinetic).abs() < EPSILON,
+                "{name}: friction_kinetic mismatch"
+            );
+            assert!(
+                (si.roughness - mat.roughness).abs() < EPSILON,
+                "{name}: roughness mismatch"
+            );
+            assert!(
+                (si.porosity - mat.porosity).abs() < EPSILON,
+                "{name}: porosity mismatch"
+            );
+            assert!(
+                (si.permeability - mat.permeability).abs() < 1e-20,
+                "{name}: permeability mismatch"
+            );
+            assert!(
+                (si.contact_angle - mat.contact_angle).abs() < EPSILON,
+                "{name}: contact_angle mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_surface_interaction_scattering_zero_frequency() {
+        let mat = AcousticMaterial::default();
+        let si = SurfaceInteraction::from_material(&mat);
+        // Zero frequency: clamped to 1.0 in compute_scattering
+        let scat = si.scattering_at_frequency(0.0, 343.0);
+        assert!(
+            scat.specular_weight.is_finite(),
+            "Zero frequency scattering should be finite"
+        );
+        assert!(
+            (scat.specular_weight + scat.diffuse_weight - 1.0).abs() < EPSILON,
+            "Weights should sum to 1.0"
+        );
+    }
+
+    #[test]
+    fn test_edge_surface_interaction_scattering_negative_speed() {
+        let mat = AcousticMaterial::default();
+        let si = SurfaceInteraction::from_material(&mat);
+        let scat = si.scattering_at_frequency(1000.0, -343.0);
+        assert!(
+            scat.specular_weight.is_finite(),
+            "Negative speed_of_sound scattering should be finite"
+        );
+    }
+
+    #[test]
+    fn test_edge_surface_interaction_friction_negative_normal() {
+        let mat = AcousticMaterial::default();
+        let si = SurfaceInteraction::from_material(&mat);
+        let force = si.friction(-10.0, Vec3::new(1.0, 0.0, 0.0));
+        assert!(
+            force.length() < EPSILON,
+            "Negative normal force should give zero friction via facade"
+        );
+    }
+
+    #[test]
+    fn test_edge_surface_interaction_wetting_zero_tension() {
+        let mat = AcousticMaterial::default();
+        let si = SurfaceInteraction::from_material(&mat);
+        let wet = si.wetting(0.0, 1e-3);
+        assert!(
+            wet.surface_energy.abs() < EPSILON,
+            "Zero tension wetting should give zero surface_energy"
+        );
+        assert!(
+            wet.capillary_pressure.abs() < EPSILON,
+            "Zero tension wetting should give zero capillary_pressure"
+        );
+    }
+
+    #[test]
+    fn test_edge_surface_interaction_permeation_zero_dx() {
+        let mat = AcousticMaterial::default();
+        let si = SurfaceInteraction::from_material(&mat);
+        let perm = si.permeation(100.0, 0.0);
+        assert!(
+            perm.flux.is_finite(),
+            "Zero dx permeation should be finite (clamped)"
+        );
+    }
+
+    #[test]
+    fn test_edge_surface_interaction_all_zero_material() {
+        // Construct a material with all surface properties at zero
+        let mat = AcousticMaterial {
+            friction_static: 0.0,
+            friction_kinetic: 0.0,
+            roughness: 0.0,
+            porosity: 0.0,
+            permeability: 0.0,
+            contact_angle: 0.0,
+            ..AcousticMaterial::default()
+        };
+        let si = SurfaceInteraction::from_material(&mat);
+
+        // Scattering: roughness=0 -> specular
+        let scat = si.scattering_at_frequency(1000.0, 343.0);
+        assert!(
+            (scat.specular_weight - 1.0).abs() < EPSILON,
+            "Zero roughness should be fully specular"
+        );
+
+        // Friction: zero coefficients -> zero force
+        let fric = si.friction(10.0, Vec3::new(1.0, 0.0, 0.0));
+        assert!(
+            fric.length() < EPSILON,
+            "Zero friction coefficients should give zero force"
+        );
+
+        // Wetting: angle=0 -> hydrophilic, surface_energy = surface_tension
+        let wet = si.wetting(0.072, 1e-3);
+        assert!(wet.is_hydrophilic, "contact_angle=0 should be hydrophilic");
+
+        // Permeation: porosity=0 and permeability=0 -> zero flux
+        let perm = si.permeation(100.0, 0.01);
+        assert!(
+            perm.flux.abs() < EPSILON,
+            "Zero porosity/permeability should give zero flux"
+        );
+    }
+
+    #[test]
+    fn test_edge_surface_interaction_max_roughness_material() {
+        let mat = AcousticMaterial {
+            roughness: 1.0,
+            porosity: 1.0,
+            permeability: 1.0,
+            friction_static: 1.0,
+            friction_kinetic: 1.0,
+            contact_angle: std::f32::consts::PI,
+            ..AcousticMaterial::default()
+        };
+        let si = SurfaceInteraction::from_material(&mat);
+
+        // All outputs should be finite
+        let scat = si.scattering_at_frequency(1000.0, 343.0);
+        assert!(scat.specular_weight.is_finite());
+        assert!(scat.diffuse_weight.is_finite());
+
+        let fric = si.friction(10.0, Vec3::new(1.0, 0.0, 0.0));
+        assert!(fric.is_finite());
+
+        let wet = si.wetting(0.072, 1e-3);
+        assert!(wet.surface_energy.is_finite());
+        assert!(wet.capillary_pressure.is_finite());
+
+        let perm = si.permeation(100.0, 0.01);
+        assert!(perm.flux.is_finite());
+    }
+
+    #[test]
+    fn test_edge_carpet_high_friction_and_porosity() {
+        use crate::scene::material::MaterialLibrary;
+
+        let lib = MaterialLibrary::with_defaults();
+        let carpet = lib.materials.get("Carpet").unwrap();
+        let si = SurfaceInteraction::from_material(carpet);
+
+        // Carpet has high friction: mu_s=0.8, mu_k=0.6
+        let fric = si.friction(10.0, Vec3::new(1.0, 0.0, 0.0));
+        assert!(
+            (fric.length() - 6.0).abs() < EPSILON,
+            "Carpet kinetic friction should be mu_k*N=6.0, got {}",
+            fric.length()
+        );
+
+        // Carpet has high porosity=0.6 -> significant permeation
+        let perm = si.permeation(100.0, 0.01);
+        assert!(
+            perm.flux > 0.0,
+            "Carpet should have positive permeation flux"
+        );
+
+        // Carpet is hydrophobic (contact_angle=1.92 > pi/2)
+        let wet = si.wetting(0.072, 1e-3);
+        assert!(
+            !wet.is_hydrophilic,
+            "Carpet (synthetic fiber) should be hydrophobic"
+        );
+    }
+
+    #[test]
+    fn test_edge_invariant_friction_static_ge_kinetic_all_presets() {
+        use crate::scene::material::MaterialLibrary;
+
+        let lib = MaterialLibrary::with_defaults();
+        for (name, mat) in &lib.materials {
+            let si = SurfaceInteraction::from_material(mat);
+            assert!(
+                si.friction_static >= si.friction_kinetic,
+                "{name}: friction_static ({}) < friction_kinetic ({}) -- invariant violated",
+                si.friction_static,
+                si.friction_kinetic
+            );
+        }
+    }
 }

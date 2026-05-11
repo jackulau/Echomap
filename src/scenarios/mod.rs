@@ -4,7 +4,10 @@
 //! definitions that exercise multiple subsystems together.
 
 pub mod builders;
+pub mod cross_system;
 pub mod fluid_validation;
+pub mod gas_validation;
+pub mod surface_validation;
 pub mod underwater_acoustics;
 
 use glam::Vec3;

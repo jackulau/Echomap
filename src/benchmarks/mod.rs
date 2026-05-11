@@ -1,4 +1,5 @@
 pub mod analytical;
+pub mod suite;
 
 #[macro_export]
 macro_rules! assert_relative_eq {

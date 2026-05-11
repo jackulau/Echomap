@@ -340,6 +340,58 @@ pub fn side_panel(
                                 ui.label(format!("  Impedance: {:.1} Pa\u{b7}s/m", med.impedance));
                             }
 
+                            // --- Surface Properties ---
+                            ui.separator();
+                            egui::CollapsingHeader::new("Surface Properties")
+                                .id_salt(format!("surface_props_{i}"))
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut scene.meshes[i].material.friction_static,
+                                            0.0..=2.0,
+                                        )
+                                        .text("Static Friction"),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut scene.meshes[i].material.friction_kinetic,
+                                            0.0..=2.0,
+                                        )
+                                        .text("Kinetic Friction"),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut scene.meshes[i].material.roughness,
+                                            0.0..=0.1,
+                                        )
+                                        .text("Roughness (m)"),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut scene.meshes[i].material.porosity,
+                                            0.0..=1.0,
+                                        )
+                                        .text("Porosity"),
+                                    );
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut scene.meshes[i].material.permeability,
+                                            0.0..=1e-10,
+                                        )
+                                        .text("Permeability (m\u{b2})"),
+                                    );
+                                    let degrees =
+                                        scene.meshes[i].material.contact_angle.to_degrees();
+                                    ui.add(
+                                        egui::Slider::new(
+                                            &mut scene.meshes[i].material.contact_angle,
+                                            0.0..=std::f32::consts::PI,
+                                        )
+                                        .text(format!("Contact Angle ({degrees:.1}\u{b0})")),
+                                    );
+                                });
+
                             if ui.button("Delete Object").clicked() {
                                 to_remove = Some(i);
                             }

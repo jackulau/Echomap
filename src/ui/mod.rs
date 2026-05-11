@@ -1,7 +1,10 @@
 use glam::Vec3;
 
 use crate::acoustics::SimulationState;
-use crate::renderer::{energy_to_color, project_3d, ray_ground_intersect, screen_to_ray, Camera};
+use crate::renderer::{
+    energy_to_color, project_3d, ray_ground_intersect, render_fluid_slice, screen_to_ray, Camera,
+    FluidVisualizationMode,
+};
 use crate::scene::{Listener, MaterialLibrary, MediumLibrary, Scene, SoundSource};
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +34,9 @@ pub struct ViewportState {
     pub hover_world: Option<Vec3>,
     pub material_lib: MaterialLibrary,
     pub medium_lib: MediumLibrary,
+    pub show_fluid: bool,
+    pub fluid_viz_mode: FluidVisualizationMode,
+    pub fluid_slice_y: usize,
 }
 
 impl Default for ViewportState {
@@ -45,6 +51,9 @@ impl Default for ViewportState {
             hover_world: None,
             material_lib: MaterialLibrary::with_defaults(),
             medium_lib: MediumLibrary::with_defaults(),
+            show_fluid: false,
+            fluid_viz_mode: FluidVisualizationMode::default(),
+            fluid_slice_y: 0,
         }
     }
 }
@@ -474,6 +483,7 @@ pub fn viewport_3d(
     scene: &mut Scene,
     sim: &SimulationState,
     vp: &mut ViewportState,
+    fluid_sim: &crate::fluids::FluidSimulation,
 ) {
     egui::CentralPanel::default().show(ctx, |ui| {
         let (response, painter) =
@@ -698,6 +708,22 @@ pub fn viewport_3d(
                         }
                     }
                 }
+            }
+        }
+
+        // Fluid slice visualization
+        if vp.show_fluid {
+            if let Some(ref grid) = fluid_sim.grid {
+                render_fluid_slice(
+                    grid,
+                    vp.fluid_slice_y,
+                    vp.fluid_viz_mode,
+                    &painter,
+                    cam,
+                    center,
+                    scale,
+                    rect,
+                );
             }
         }
 

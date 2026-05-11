@@ -1,10 +1,14 @@
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
 use super::body::Robot;
-use super::collision::{aabb_from_link, aabb_overlap, ray_scene_cast, Aabb};
+use super::collision::{
+    aabb_from_link, aabb_overlap, ray_scene_cast, ray_triangle_intersect, Aabb,
+};
+use super::definition::{CollisionShape, RobotDefinition, SensorDefinition, SensorMount};
 use super::kinematics::LinkTransform;
-use crate::scene::Scene;
+use super::state::{RobotState, SensorReading};
+use crate::scene::{Scene, SceneObject};
 
 // ---------------------------------------------------------------------------
 // Distance Sensor
@@ -249,6 +253,238 @@ impl CameraFrustum {
 
         visible
     }
+}
+
+// ---------------------------------------------------------------------------
+// Definition-based sensor simulation (RobotDefinition + RobotState)
+// ---------------------------------------------------------------------------
+
+/// Compute the world-space position and direction for a sensor given its mount
+/// and the current robot state.
+///
+/// Uses `link_poses[mount.link_index]` (stored as `[f32; 16]`) to transform
+/// the sensor's `local_offset` into world position and the sensor's local
+/// direction into world direction.
+#[allow(dead_code)]
+pub fn sensor_world_pose(mount: &SensorMount, state: &RobotState) -> (Vec3, Vec3) {
+    let link_mat = Mat4::from_cols_array(&state.link_poses[mount.link_index]);
+
+    // Transform local_offset to world position
+    let world_pos = link_mat.transform_point3(mount.local_offset);
+
+    // Extract the sensor's local direction from the definition and rotate it
+    // into world frame. The direction depends on the sensor type.
+    let local_dir = match &mount.sensor {
+        SensorDefinition::Distance { direction, .. } => *direction,
+        SensorDefinition::Lidar { .. } => Vec3::Z, // default forward
+        SensorDefinition::Contact => Vec3::Z,
+        SensorDefinition::Imu => Vec3::Z,
+    };
+
+    // Transform direction (rotation only, no translation)
+    let world_dir = link_mat.transform_vector3(local_dir);
+    let world_dir = if world_dir.length_squared() > f32::EPSILON {
+        world_dir.normalize()
+    } else {
+        local_dir
+    };
+
+    (world_pos, world_dir)
+}
+
+/// Simulate all sensors on the robot, updating `state.sensor_readings` in place.
+///
+/// For each sensor mount in the definition:
+/// - **Distance**: cast a single ray from the sensor world position along its
+///   world direction; return the nearest triangle intersection distance, or
+///   `max_range` if nothing is hit.
+/// - **LIDAR**: fan of `num_rays` rays spread over `fov_rad` centered on the
+///   sensor direction (in a plane); return a `Vec<f32>` of distances.
+/// - **Contact**: check whether any scene triangle vertex is within the
+///   collision shape radius of the link.
+/// - **IMU**: `linear_accel` = gravity `(0, -9.81, 0)`, `angular_vel` = sum
+///   of ancestor joint velocities times their axes.
+#[allow(dead_code)]
+pub fn simulate_sensors(
+    definition: &RobotDefinition,
+    state: &mut RobotState,
+    scene_meshes: &[SceneObject],
+) {
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+
+    for (sensor_idx, mount) in definition.sensors.iter().enumerate() {
+        if sensor_idx >= state.sensor_readings.len() {
+            break;
+        }
+
+        let (world_pos, world_dir) = sensor_world_pose(mount, state);
+
+        let reading = match &mount.sensor {
+            // ---- Distance sensor ----
+            SensorDefinition::Distance {
+                max_range,
+                direction: _,
+            } => {
+                let dist = cast_ray_against_scene(world_pos, world_dir, scene_meshes, *max_range);
+                SensorReading::Distance(dist)
+            }
+
+            // ---- LIDAR sensor ----
+            SensorDefinition::Lidar {
+                num_rays,
+                fov_rad,
+                max_range,
+            } => {
+                let distances = simulate_lidar(
+                    world_pos,
+                    world_dir,
+                    *num_rays,
+                    *fov_rad,
+                    *max_range,
+                    scene_meshes,
+                );
+                SensorReading::Lidar(distances)
+            }
+
+            // ---- Contact sensor ----
+            SensorDefinition::Contact => {
+                let contact_radius =
+                    collision_shape_radius(&definition.links[mount.link_index].collision_shape);
+                let in_contact = check_contact(world_pos, contact_radius, scene_meshes);
+                SensorReading::Contact(in_contact)
+            }
+
+            // ---- IMU sensor ----
+            SensorDefinition::Imu => {
+                let angular_vel = compute_imu_angular_vel(definition, state, mount.link_index);
+                SensorReading::Imu {
+                    linear_accel: gravity,
+                    angular_vel,
+                }
+            }
+        };
+
+        state.sensor_readings[sensor_idx] = reading;
+    }
+}
+
+/// Cast a single ray against all scene mesh triangles, returning the nearest
+/// hit distance or `max_range` if nothing is hit.
+fn cast_ray_against_scene(
+    origin: Vec3,
+    direction: Vec3,
+    meshes: &[SceneObject],
+    max_range: f32,
+) -> f32 {
+    let mut best_dist = max_range;
+
+    for obj in meshes {
+        for tri in &obj.mesh.triangles {
+            let v0 = tri.vertices[0].position;
+            let v1 = tri.vertices[1].position;
+            let v2 = tri.vertices[2].position;
+
+            if let Some(hit) = ray_triangle_intersect(origin, direction, v0, v1, v2) {
+                if hit.distance < best_dist {
+                    best_dist = hit.distance;
+                }
+            }
+        }
+    }
+
+    best_dist
+}
+
+/// Simulate a LIDAR sensor: fan of `num_rays` rays spread over `fov_rad`
+/// centered on the sensor direction, in a plane. Returns a Vec of distances.
+fn simulate_lidar(
+    origin: Vec3,
+    center_dir: Vec3,
+    num_rays: usize,
+    fov_rad: f32,
+    max_range: f32,
+    meshes: &[SceneObject],
+) -> Vec<f32> {
+    if num_rays == 0 {
+        return Vec::new();
+    }
+
+    // Find a perpendicular axis to spread rays in a plane.
+    // Pick an "up" vector that isn't parallel to center_dir.
+    let up_candidate = if center_dir.dot(Vec3::Y).abs() < 0.99 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let right = center_dir.cross(up_candidate).normalize();
+
+    let mut distances = Vec::with_capacity(num_rays);
+
+    for i in 0..num_rays {
+        let angle = if num_rays == 1 {
+            0.0
+        } else {
+            -fov_rad * 0.5 + fov_rad * (i as f32) / (num_rays as f32 - 1.0)
+        };
+
+        // Rotate center_dir by `angle` around the perpendicular axis.
+        let ray_dir = Quat::from_axis_angle(right, angle).mul_vec3(center_dir);
+        let dist = cast_ray_against_scene(origin, ray_dir, meshes, max_range);
+        distances.push(dist);
+    }
+
+    distances
+}
+
+/// Extract an effective collision radius from a CollisionShape.
+fn collision_shape_radius(shape: &CollisionShape) -> f32 {
+    match shape {
+        CollisionShape::Sphere { radius } => *radius,
+        CollisionShape::Cuboid { half_extents } => half_extents.length(),
+        CollisionShape::Cylinder { radius, height } => {
+            (radius * radius + (height * 0.5) * (height * 0.5)).sqrt()
+        }
+    }
+}
+
+/// Check if any scene triangle vertex is within `radius` of `position`.
+fn check_contact(position: Vec3, radius: f32, meshes: &[SceneObject]) -> bool {
+    let radius_sq = radius * radius;
+    for obj in meshes {
+        for tri in &obj.mesh.triangles {
+            for vert in &tri.vertices {
+                if (vert.position - position).length_squared() <= radius_sq {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Compute angular velocity for the IMU sensor by summing ancestor joint
+/// velocities times their axes.
+fn compute_imu_angular_vel(
+    definition: &RobotDefinition,
+    state: &RobotState,
+    link_index: usize,
+) -> Vec3 {
+    let mut angular_vel = Vec3::ZERO;
+
+    // Walk up the kinematic chain from the sensor link to the root.
+    let mut current_link = link_index;
+    while let Some(parent_joint_idx) = definition.links[current_link].parent_joint {
+        let joint = &definition.joints[parent_joint_idx];
+        let velocity = state
+            .joint_velocities
+            .get(parent_joint_idx)
+            .copied()
+            .unwrap_or(0.0);
+        angular_vel += joint.axis * velocity;
+        current_link = joint.parent_link;
+    }
+
+    angular_vel
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +819,281 @@ mod tests {
             visible.is_empty(),
             "zero FOV should see nothing, got {:?}",
             visible
+        );
+    }
+
+    // -- Definition-based sensor simulation tests ------------------------------
+
+    use crate::robot::definition::{
+        CollisionShape, JointDefinition, JointType, LinkDefinition, RobotDefinition,
+        SensorDefinition, SensorMount,
+    };
+    use crate::robot::state::{RobotState, SensorReading};
+
+    /// Create a minimal one-link robot with a single sensor.
+    fn one_link_def_with_sensor(sensor: SensorDefinition) -> RobotDefinition {
+        RobotDefinition {
+            name: "sensor_bot".into(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Sphere { radius: 0.2 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![SensorMount {
+                link_index: 0,
+                local_offset: Vec3::ZERO,
+                sensor,
+            }],
+        }
+    }
+
+    /// Create a two-link robot (base + child connected by a revolute joint)
+    /// with a sensor on the specified link.
+    fn two_link_def_with_sensor(sensor: SensorDefinition, sensor_link: usize) -> RobotDefinition {
+        RobotDefinition {
+            name: "two_link_bot".into(),
+            links: vec![
+                LinkDefinition {
+                    name: "base".into(),
+                    mass: 5.0,
+                    inertia: 1.0,
+                    collision_shape: CollisionShape::Cuboid {
+                        half_extents: Vec3::splat(0.1),
+                    },
+                    parent_joint: None,
+                },
+                LinkDefinition {
+                    name: "child".into(),
+                    mass: 1.0,
+                    inertia: 0.1,
+                    collision_shape: CollisionShape::Sphere { radius: 0.3 },
+                    parent_joint: Some(0),
+                },
+            ],
+            joints: vec![JointDefinition {
+                name: "joint_0".into(),
+                joint_type: JointType::Revolute,
+                axis: Vec3::Y,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 10.0,
+                damping: 0.1,
+            }],
+            sensors: vec![SensorMount {
+                link_index: sensor_link,
+                local_offset: Vec3::ZERO,
+                sensor,
+            }],
+        }
+    }
+
+    #[test]
+    fn test_def_distance_sensor_hit() {
+        let def = one_link_def_with_sensor(SensorDefinition::Distance {
+            direction: Vec3::Z,
+            max_range: 100.0,
+        });
+        let mut state = RobotState::new(&def);
+        // Base link at identity -> sensor at origin looking +Z
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        // Place a triangle at z=5
+        let t = tri(
+            Vec3::new(-2.0, -2.0, 5.0),
+            Vec3::new(2.0, -2.0, 5.0),
+            Vec3::new(0.0, 2.0, 5.0),
+        );
+        let meshes = vec![scene_obj("wall", vec![t])];
+
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Distance(d) => {
+                assert!(
+                    (*d - 5.0).abs() < EPSILON,
+                    "Expected distance ~5.0, got {}",
+                    d
+                );
+            }
+            other => panic!("Expected Distance reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_distance_sensor_miss() {
+        let max_range = 50.0;
+        let def = one_link_def_with_sensor(SensorDefinition::Distance {
+            direction: Vec3::Z,
+            max_range,
+        });
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        // No geometry
+        let meshes: Vec<SceneObject> = vec![];
+
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Distance(d) => {
+                assert!(
+                    (*d - max_range).abs() < EPSILON,
+                    "Expected max_range {}, got {}",
+                    max_range,
+                    d
+                );
+            }
+            other => panic!("Expected Distance reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_lidar_fan_count() {
+        let num_rays = 7;
+        let def = one_link_def_with_sensor(SensorDefinition::Lidar {
+            num_rays,
+            fov_rad: std::f32::consts::PI,
+            max_range: 100.0,
+        });
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        let meshes: Vec<SceneObject> = vec![];
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Lidar(dists) => {
+                assert_eq!(
+                    dists.len(),
+                    num_rays,
+                    "LIDAR should return {} distances, got {}",
+                    num_rays,
+                    dists.len()
+                );
+            }
+            other => panic!("Expected Lidar reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_contact_sensor_no_contact() {
+        let def = one_link_def_with_sensor(SensorDefinition::Contact);
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        // Triangle far away
+        let t = tri(
+            Vec3::new(100.0, 100.0, 100.0),
+            Vec3::new(101.0, 100.0, 100.0),
+            Vec3::new(100.0, 101.0, 100.0),
+        );
+        let meshes = vec![scene_obj("far", vec![t])];
+
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Contact(c) => {
+                assert!(!c, "Should not be in contact when geometry is far away");
+            }
+            other => panic!("Expected Contact reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_imu_at_rest() {
+        let def = one_link_def_with_sensor(SensorDefinition::Imu);
+        let mut state = RobotState::new(&def);
+        state.set_link_pose(0, Mat4::IDENTITY);
+
+        let meshes: Vec<SceneObject> = vec![];
+        simulate_sensors(&def, &mut state, &meshes);
+
+        match &state.sensor_readings[0] {
+            SensorReading::Imu {
+                linear_accel,
+                angular_vel,
+            } => {
+                // Gravity is (0, -9.81, 0)
+                assert!(
+                    (linear_accel.x).abs() < EPSILON,
+                    "accel X should be ~0, got {}",
+                    linear_accel.x
+                );
+                assert!(
+                    (linear_accel.y - (-9.81)).abs() < 0.01,
+                    "accel Y should be ~-9.81, got {}",
+                    linear_accel.y
+                );
+                assert!(
+                    (linear_accel.z).abs() < EPSILON,
+                    "accel Z should be ~0, got {}",
+                    linear_accel.z
+                );
+                // No joints => angular vel should be zero
+                assert!(
+                    angular_vel.length() < EPSILON,
+                    "angular_vel should be ~zero, got {:?}",
+                    angular_vel
+                );
+            }
+            other => panic!("Expected Imu reading, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_def_sensor_world_pose() {
+        let mount = SensorMount {
+            link_index: 0,
+            local_offset: Vec3::new(1.0, 0.0, 0.0),
+            sensor: SensorDefinition::Distance {
+                direction: Vec3::Z,
+                max_range: 10.0,
+            },
+        };
+
+        let def = RobotDefinition {
+            name: "test".into(),
+            links: vec![LinkDefinition {
+                name: "base".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                parent_joint: None,
+            }],
+            joints: vec![],
+            sensors: vec![mount.clone()],
+        };
+
+        let mut state = RobotState::new(&def);
+
+        // Place link at (5, 0, 0) with 90-degree rotation around Y.
+        // After rotation around Y by 90 deg: local X -> world -Z, local Z -> world X.
+        let pose = Mat4::from_rotation_translation(
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_2),
+            Vec3::new(5.0, 0.0, 0.0),
+        );
+        state.set_link_pose(0, pose);
+
+        let (pos, dir) = sensor_world_pose(&mount, &state);
+
+        // local_offset (1,0,0) rotated 90 deg around Y -> (0, 0, -1)
+        // world pos = (5, 0, 0) + (0, 0, -1) = (5, 0, -1)
+        assert!(
+            (pos - Vec3::new(5.0, 0.0, -1.0)).length() < EPSILON,
+            "sensor world pos: expected (5,0,-1), got {:?}",
+            pos
+        );
+
+        // direction (0,0,1) rotated 90 deg around Y -> (1,0,0)
+        assert!(
+            (dir - Vec3::new(1.0, 0.0, 0.0)).length() < EPSILON,
+            "sensor world dir: expected (1,0,0), got {:?}",
+            dir
         );
     }
 }

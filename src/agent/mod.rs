@@ -295,4 +295,520 @@ mod tests {
             other => panic!("Expected Observation, got {:?}", other),
         }
     }
+
+    // ------------------------------------------------------------------
+    // Task 8: End-to-end integration tests
+    // ------------------------------------------------------------------
+
+    use crate::agent::protocol::{ClientMessage, ServerMessage};
+    use crate::robot::state::RobotAction;
+
+    /// Helper: start a full agent server with `n` simple_arm(2) robots and a
+    /// background thread that continuously processes bridge commands.
+    /// Returns (AgentServerHandle, bridge_processing_thread_handle).
+    fn start_test_server(n: usize) -> (AgentServerHandle, std::thread::JoinHandle<()>) {
+        let (bridge_server, mut bridge_client) = create_bridge();
+        let mut manager = RobotManager::new();
+        for _ in 0..n {
+            let def = RobotDefinition::simple_arm(2);
+            manager.add_robot(def, Mat4::IDENTITY);
+        }
+
+        let config = AgentServerConfig {
+            tcp_port: 0,
+            ws_port: 0,
+            max_connections: 16,
+            enabled: true,
+        };
+
+        let handle = start_agent_server(config, bridge_server);
+
+        // Spawn a background thread that continuously processes bridge commands.
+        // This simulates the main loop calling process_pending each frame.
+        let bridge_thread = std::thread::Builder::new()
+            .name("test-bridge-processor".to_string())
+            .spawn(move || {
+                loop {
+                    bridge_client.process_pending(&mut manager, &[]);
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+            })
+            .expect("failed to spawn bridge processing thread");
+
+        // Give servers a moment to be fully ready.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        (handle, bridge_thread)
+    }
+
+    /// Helper: send a line-delimited JSON message over TCP and read the response.
+    async fn tcp_send_recv(
+        writer: &mut tokio::io::BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+        reader: &mut tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+        msg: &ClientMessage,
+    ) -> ServerMessage {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let json = serde_json::to_string(msg).unwrap();
+        writer.write_all(json.as_bytes()).await.unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await.unwrap();
+        serde_json::from_str::<ServerMessage>(line.trim()).unwrap()
+    }
+
+    /// Helper: connect a TCP client and return buffered reader/writer.
+    async fn tcp_connect(
+        port: u16,
+    ) -> (
+        tokio::io::BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+        tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
+    ) {
+        let stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("should connect to TCP server");
+        let (r, w) = stream.into_split();
+        (tokio::io::BufWriter::new(w), tokio::io::BufReader::new(r))
+    }
+
+    /// Helper: connect a WebSocket client and return split sink/stream.
+    async fn ws_connect(
+        port: u16,
+    ) -> (
+        futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio_tungstenite::tungstenite::Message,
+        >,
+        futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    ) {
+        use futures_util::StreamExt;
+        let url = format!("ws://127.0.0.1:{}", port);
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&url)
+            .await
+            .expect("should connect to WS server");
+        ws_stream.split()
+    }
+
+    /// Helper: send a ClientMessage and receive a ServerMessage over WebSocket.
+    async fn ws_send_recv(
+        write: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            tokio_tungstenite::tungstenite::Message,
+        >,
+        read: &mut futures_util::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+        msg: &ClientMessage,
+    ) -> ServerMessage {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as WsMsg;
+
+        let json = serde_json::to_string(msg).unwrap();
+        write
+            .send(WsMsg::Text(json.into()))
+            .await
+            .expect("ws send should succeed");
+
+        loop {
+            match read.next().await {
+                Some(Ok(WsMsg::Text(text))) => {
+                    return serde_json::from_str::<ServerMessage>(&text)
+                        .expect("should parse server message");
+                }
+                Some(Ok(WsMsg::Ping(_) | WsMsg::Pong(_))) => continue,
+                other => panic!("Expected Text message, got {:?}", other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_integration_tcp_full_lifecycle() {
+        // Complete connect -> reset -> step 10 times -> observe -> close over TCP.
+        let (handle, bridge_thread) = start_test_server(1);
+        let tcp_port = handle.status().tcp_port;
+
+        let (mut writer, mut reader) = tcp_connect(tcp_port).await;
+
+        // Connect to robot 0.
+        let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Connect { robot_id: 0 }).await;
+        match &resp {
+            ServerMessage::Connected { observation_space, action_space } => {
+                assert_eq!(observation_space.num_joint_positions, 2);
+                assert_eq!(action_space.num_motors, 2);
+            }
+            other => panic!("Expected Connected, got {:?}", other),
+        }
+
+        // Reset.
+        let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Reset).await;
+        match &resp {
+            ServerMessage::Observation { step_count, done, .. } => {
+                assert_eq!(*step_count, 0, "reset should yield step_count=0");
+                assert!(!done, "done should be false after reset");
+            }
+            other => panic!("Expected Observation after reset, got {:?}", other),
+        }
+
+        // Step 10 times.
+        let action = RobotAction {
+            motor_velocities: vec![1.0, -0.5],
+            gripper_commands: vec![],
+        };
+        for i in 1..=10 {
+            let resp = tcp_send_recv(
+                &mut writer,
+                &mut reader,
+                &ClientMessage::Step { action: action.clone() },
+            ).await;
+            match &resp {
+                ServerMessage::Observation { step_count, .. } => {
+                    assert_eq!(*step_count, i, "step_count should be {} after step {}", i, i);
+                }
+                other => panic!("Expected Observation after step {}, got {:?}", i, other),
+            }
+        }
+
+        // Observe — step_count should still be 10.
+        let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Observe).await;
+        match &resp {
+            ServerMessage::Observation { step_count, state, .. } => {
+                assert_eq!(*step_count, 10, "observe should show step_count=10");
+                assert_eq!(state.joint_positions.len(), 2);
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        // Close.
+        let resp = tcp_send_recv(&mut writer, &mut reader, &ClientMessage::Close).await;
+        assert!(matches!(resp, ServerMessage::Closed), "Expected Closed, got {:?}", resp);
+
+        // Clean up.
+        drop(handle);
+        drop(bridge_thread);
+    }
+
+    #[tokio::test]
+    async fn test_integration_ws_full_lifecycle() {
+        // Complete connect -> reset -> step 10 times -> observe -> close over WebSocket.
+        let (handle, bridge_thread) = start_test_server(1);
+        let ws_port = handle.status().ws_port;
+
+        let (mut write, mut read) = ws_connect(ws_port).await;
+
+        // Connect to robot 0.
+        let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Connect { robot_id: 0 }).await;
+        match &resp {
+            ServerMessage::Connected { observation_space, action_space } => {
+                assert_eq!(observation_space.num_joint_positions, 2);
+                assert_eq!(action_space.num_motors, 2);
+            }
+            other => panic!("Expected Connected, got {:?}", other),
+        }
+
+        // Reset.
+        let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Reset).await;
+        match &resp {
+            ServerMessage::Observation { step_count, done, .. } => {
+                assert_eq!(*step_count, 0, "reset should yield step_count=0");
+                assert!(!done, "done should be false after reset");
+            }
+            other => panic!("Expected Observation after reset, got {:?}", other),
+        }
+
+        // Step 10 times.
+        let action = RobotAction {
+            motor_velocities: vec![1.0, -0.5],
+            gripper_commands: vec![],
+        };
+        for i in 1..=10 {
+            let resp = ws_send_recv(
+                &mut write,
+                &mut read,
+                &ClientMessage::Step { action: action.clone() },
+            ).await;
+            match &resp {
+                ServerMessage::Observation { step_count, .. } => {
+                    assert_eq!(*step_count, i, "step_count should be {} after step {}", i, i);
+                }
+                other => panic!("Expected Observation after step {}, got {:?}", i, other),
+            }
+        }
+
+        // Observe — step_count should still be 10.
+        let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Observe).await;
+        match &resp {
+            ServerMessage::Observation { step_count, state, .. } => {
+                assert_eq!(*step_count, 10, "observe should show step_count=10");
+                assert_eq!(state.joint_positions.len(), 2);
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        // Close.
+        let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Close).await;
+        assert!(matches!(resp, ServerMessage::Closed), "Expected Closed, got {:?}", resp);
+
+        // Clean up.
+        drop(handle);
+        drop(bridge_thread);
+    }
+
+    #[tokio::test]
+    async fn test_integration_multi_agent() {
+        // Two agents connect to different robots and step independently.
+        let (handle, bridge_thread) = start_test_server(2);
+        let tcp_port = handle.status().tcp_port;
+
+        // Agent 1: connect to robot 0 via TCP.
+        let (mut w1, mut r1) = tcp_connect(tcp_port).await;
+        let resp = tcp_send_recv(&mut w1, &mut r1, &ClientMessage::Connect { robot_id: 0 }).await;
+        assert!(matches!(resp, ServerMessage::Connected { .. }), "Agent 1 should connect: {:?}", resp);
+
+        // Agent 2: connect to robot 1 via TCP.
+        let (mut w2, mut r2) = tcp_connect(tcp_port).await;
+        let resp = tcp_send_recv(&mut w2, &mut r2, &ClientMessage::Connect { robot_id: 1 }).await;
+        assert!(matches!(resp, ServerMessage::Connected { .. }), "Agent 2 should connect: {:?}", resp);
+
+        // Both agents step with different actions.
+        let action1 = RobotAction {
+            motor_velocities: vec![2.0, 0.0],
+            gripper_commands: vec![],
+        };
+        let action2 = RobotAction {
+            motor_velocities: vec![0.0, -2.0],
+            gripper_commands: vec![],
+        };
+
+        // Step agent 1 three times.
+        for i in 1..=3 {
+            let resp = tcp_send_recv(&mut w1, &mut r1, &ClientMessage::Step { action: action1.clone() }).await;
+            match &resp {
+                ServerMessage::Observation { step_count, .. } => {
+                    assert_eq!(*step_count, i, "Agent 1 step_count should be {}", i);
+                }
+                other => panic!("Agent 1 step {}: expected Observation, got {:?}", i, other),
+            }
+        }
+
+        // Step agent 2 five times.
+        for i in 1..=5 {
+            let resp = tcp_send_recv(&mut w2, &mut r2, &ClientMessage::Step { action: action2.clone() }).await;
+            match &resp {
+                ServerMessage::Observation { step_count, .. } => {
+                    assert_eq!(*step_count, i, "Agent 2 step_count should be {}", i);
+                }
+                other => panic!("Agent 2 step {}: expected Observation, got {:?}", i, other),
+            }
+        }
+
+        // Verify agents have independent observations.
+        let obs1 = tcp_send_recv(&mut w1, &mut r1, &ClientMessage::Observe).await;
+        let obs2 = tcp_send_recv(&mut w2, &mut r2, &ClientMessage::Observe).await;
+
+        match (&obs1, &obs2) {
+            (
+                ServerMessage::Observation { step_count: sc1, .. },
+                ServerMessage::Observation { step_count: sc2, .. },
+            ) => {
+                assert_eq!(*sc1, 3, "Agent 1 should show step_count=3");
+                assert_eq!(*sc2, 5, "Agent 2 should show step_count=5");
+            }
+            _ => panic!("Expected Observations, got {:?} and {:?}", obs1, obs2),
+        }
+
+        // Clean up.
+        drop(handle);
+        drop(bridge_thread);
+    }
+
+    #[tokio::test]
+    async fn test_integration_reconnect() {
+        // Agent connects, does some work, disconnects, then reconnects to the same robot.
+        let (handle, bridge_thread) = start_test_server(1);
+        let tcp_port = handle.status().tcp_port;
+
+        // First connection.
+        {
+            let (mut w, mut r) = tcp_connect(tcp_port).await;
+
+            let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
+            assert!(matches!(resp, ServerMessage::Connected { .. }), "First connect should succeed: {:?}", resp);
+
+            // Step a few times.
+            let action = RobotAction {
+                motor_velocities: vec![1.0, 1.0],
+                gripper_commands: vec![],
+            };
+            for _ in 0..3 {
+                let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: action.clone() }).await;
+                assert!(matches!(resp, ServerMessage::Observation { .. }));
+            }
+
+            // Close the session.
+            let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Close).await;
+            assert!(matches!(resp, ServerMessage::Closed));
+
+            // Drop the TCP connection.
+        }
+
+        // Brief pause so the server cleans up.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Second connection to the same robot.
+        {
+            let (mut w, mut r) = tcp_connect(tcp_port).await;
+
+            let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
+            match &resp {
+                ServerMessage::Connected { observation_space, action_space } => {
+                    assert_eq!(observation_space.num_joint_positions, 2);
+                    assert_eq!(action_space.num_motors, 2);
+                }
+                other => panic!("Reconnect should succeed, got {:?}", other),
+            }
+
+            // Reset to get a clean state.
+            let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
+            match &resp {
+                ServerMessage::Observation { step_count, .. } => {
+                    assert_eq!(*step_count, 0, "step_count should be 0 after reset on reconnect");
+                }
+                other => panic!("Expected Observation after reset, got {:?}", other),
+            }
+
+            // Step once to verify the session works.
+            let action = RobotAction {
+                motor_velocities: vec![0.5, -0.5],
+                gripper_commands: vec![],
+            };
+            let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action }).await;
+            match &resp {
+                ServerMessage::Observation { step_count, .. } => {
+                    assert_eq!(*step_count, 1, "step_count should be 1 after first step on reconnect");
+                }
+                other => panic!("Expected Observation after step, got {:?}", other),
+            }
+        }
+
+        // Clean up.
+        drop(handle);
+        drop(bridge_thread);
+    }
+
+    #[tokio::test]
+    async fn test_integration_rapid_steps() {
+        // 100 rapid step commands should all complete without error.
+        let (handle, bridge_thread) = start_test_server(1);
+        let tcp_port = handle.status().tcp_port;
+
+        let (mut w, mut r) = tcp_connect(tcp_port).await;
+
+        // Connect.
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
+        assert!(matches!(resp, ServerMessage::Connected { .. }));
+
+        // Reset.
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
+        assert!(matches!(resp, ServerMessage::Observation { .. }));
+
+        // Fire 100 steps rapidly.
+        let action = RobotAction {
+            motor_velocities: vec![0.5, -0.3],
+            gripper_commands: vec![],
+        };
+
+        for i in 1..=100u64 {
+            let resp = tcp_send_recv(
+                &mut w,
+                &mut r,
+                &ClientMessage::Step { action: action.clone() },
+            ).await;
+            match &resp {
+                ServerMessage::Observation { step_count, .. } => {
+                    assert_eq!(
+                        *step_count, i,
+                        "step_count should be {} at rapid step {}", i, i
+                    );
+                }
+                other => panic!("Rapid step {}: expected Observation, got {:?}", i, other),
+            }
+        }
+
+        // Final observe to confirm all 100 completed.
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Observe).await;
+        match &resp {
+            ServerMessage::Observation { step_count, .. } => {
+                assert_eq!(*step_count, 100, "final observe should show step_count=100");
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        // Clean up.
+        drop(handle);
+        drop(bridge_thread);
+    }
+
+    #[tokio::test]
+    async fn test_integration_observation_changes() {
+        // Observations should differ after stepping with non-zero actions.
+        let (handle, bridge_thread) = start_test_server(1);
+        let tcp_port = handle.status().tcp_port;
+
+        let (mut w, mut r) = tcp_connect(tcp_port).await;
+
+        // Connect and reset.
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
+        assert!(matches!(resp, ServerMessage::Connected { .. }));
+
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
+        let initial_positions = match &resp {
+            ServerMessage::Observation { state, .. } => state.joint_positions.clone(),
+            other => panic!("Expected Observation after reset, got {:?}", other),
+        };
+
+        // Step multiple times with non-zero velocities.
+        let action = RobotAction {
+            motor_velocities: vec![5.0, -3.0],
+            gripper_commands: vec![],
+        };
+        for _ in 0..10 {
+            tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: action.clone() }).await;
+        }
+
+        // Observe and compare.
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Observe).await;
+        let final_positions = match &resp {
+            ServerMessage::Observation { state, .. } => state.joint_positions.clone(),
+            other => panic!("Expected Observation, got {:?}", other),
+        };
+
+        // At least one joint position should have changed.
+        let any_changed = initial_positions
+            .iter()
+            .zip(final_positions.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
+
+        assert!(
+            any_changed,
+            "joint positions should change after stepping with non-zero actions: initial={:?}, final={:?}",
+            initial_positions,
+            final_positions
+        );
+
+        // Clean up.
+        drop(handle);
+        drop(bridge_thread);
+    }
 }

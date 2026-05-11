@@ -193,4 +193,143 @@ mod tests {
         );
         assert!(!sim.running, "Simulation should not be running after reset");
     }
+
+    // =========================================================================
+    // Edge case tests
+    // =========================================================================
+
+    // --- Default construction ---
+
+    #[test]
+    fn test_fluid_simulation_default() {
+        let sim = FluidSimulation::default();
+        assert!(sim.grid.is_none());
+        assert!(!sim.running);
+        assert_eq!(sim.frame, 0);
+        assert!((sim.elapsed_time - 0.0).abs() < 1e-6);
+    }
+
+    // --- Step without initialize (no grid) is a no-op ---
+
+    #[test]
+    fn test_step_without_grid_is_noop() {
+        let mut sim = FluidSimulation::new(FluidConfig::default());
+        assert!(sim.grid.is_none());
+        sim.step();
+        assert_eq!(sim.frame, 0, "Step with no grid should not advance frame");
+        assert!(
+            (sim.elapsed_time - 0.0).abs() < 1e-6,
+            "Step with no grid should not advance time"
+        );
+    }
+
+    // --- Double reset ---
+
+    #[test]
+    fn test_double_reset() {
+        let mut sim = FluidSimulation::new(FluidConfig::default());
+        sim.initialize((Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)), 0.5, &[]);
+        sim.step();
+        sim.reset();
+        sim.reset(); // second reset should be safe
+        assert!(sim.grid.is_none());
+        assert_eq!(sim.frame, 0);
+    }
+
+    // --- Initialize with very small extent ---
+
+    #[test]
+    fn test_initialize_tiny_extent() {
+        let mut sim = FluidSimulation::new(FluidConfig::default());
+        // Extent = (0.001, 0.001, 0.001), resolution = 0.5
+        // Each axis: ceil(0.001/0.5) = 1 => 1x1x1 grid
+        sim.initialize((Vec3::ZERO, Vec3::new(0.001, 0.001, 0.001)), 0.5, &[]);
+        let grid = sim.grid.as_ref().unwrap();
+        assert_eq!(grid.nx, 1);
+        assert_eq!(grid.ny, 1);
+        assert_eq!(grid.nz, 1);
+    }
+
+    // --- Initialize then step on a 1x1x1 grid ---
+
+    #[test]
+    fn test_initialize_and_step_1x1x1() {
+        let mut sim = FluidSimulation::new(FluidConfig::default());
+        sim.initialize((Vec3::ZERO, Vec3::new(0.5, 0.5, 0.5)), 0.5, &[]);
+        sim.step();
+        assert_eq!(sim.frame, 1);
+        let grid = sim.grid.as_ref().unwrap();
+        assert!(
+            grid.u.iter().all(|v| v.is_finite()),
+            "u should be finite after step on 1x1x1"
+        );
+        assert!(
+            grid.v.iter().all(|v| v.is_finite()),
+            "v should be finite after step on 1x1x1"
+        );
+        assert!(
+            grid.pressure.iter().all(|v| v.is_finite()),
+            "pressure should be finite after step on 1x1x1"
+        );
+    }
+
+    // --- Initialize, step, reset, re-initialize, step ---
+
+    #[test]
+    fn test_reinitialize_after_reset() {
+        let mut sim = FluidSimulation::new(FluidConfig::default());
+        sim.initialize((Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)), 0.5, &[]);
+        sim.step();
+        sim.step();
+        assert_eq!(sim.frame, 2);
+
+        sim.reset();
+        assert!(sim.grid.is_none());
+
+        sim.initialize((Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)), 0.5, &[]);
+        assert_eq!(sim.frame, 0);
+        let grid = sim.grid.as_ref().unwrap();
+        assert_eq!(grid.nx, 4);
+        assert_eq!(grid.ny, 4);
+        assert_eq!(grid.nz, 4);
+
+        sim.step();
+        assert_eq!(sim.frame, 1);
+    }
+
+    // --- Elapsed time accumulation ---
+
+    #[test]
+    fn test_elapsed_time_accumulates() {
+        let mut sim = FluidSimulation::new(FluidConfig::default());
+        sim.initialize((Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)), 0.5, &[]);
+        let dt = sim.config.dt;
+        for i in 1..=10 {
+            sim.step();
+            let expected = dt * i as f32;
+            assert!(
+                (sim.elapsed_time - expected).abs() < 1e-4,
+                "After {i} steps, elapsed_time should be {expected}, got {}",
+                sim.elapsed_time
+            );
+        }
+    }
+
+    // --- Initialize with non-zero origin ---
+
+    #[test]
+    fn test_initialize_with_offset_origin() {
+        let mut sim = FluidSimulation::new(FluidConfig::default());
+        let min = Vec3::new(10.0, 20.0, 30.0);
+        let max = Vec3::new(12.0, 23.0, 34.0);
+        sim.initialize((min, max), 1.0, &[]);
+        let grid = sim.grid.as_ref().unwrap();
+        assert_eq!(grid.nx, 2);
+        assert_eq!(grid.ny, 3);
+        assert_eq!(grid.nz, 4);
+        assert!(
+            (grid.origin - min).length() < 1e-6,
+            "Grid origin should match bounds min"
+        );
+    }
 }

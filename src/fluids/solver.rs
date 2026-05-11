@@ -21,7 +21,6 @@ pub struct FluidConfig {
 }
 
 impl FluidConfig {
-    /// Create a new config, panicking if viscosity is negative.
     pub fn new(
         dt: f32,
         viscosity: f32,
@@ -30,10 +29,12 @@ impl FluidConfig {
         surface_tension: f32,
         jacobi_iterations: u32,
     ) -> Self {
+        assert!(dt > 0.0, "Timestep dt must be positive, got {dt}");
         assert!(
             viscosity >= 0.0,
             "Viscosity must be non-negative, got {viscosity}"
         );
+        assert!(density > 0.0, "Density must be positive, got {density}");
         Self {
             dt,
             viscosity,
@@ -1711,6 +1712,450 @@ mod tests {
         assert!(
             grid.density.iter().all(|v| v.is_finite()),
             "density has NaN/Inf after 1000 steps"
+        );
+    }
+
+    // =========================================================================
+    // Edge case tests
+    // =========================================================================
+
+    // --- FluidConfig edge cases ---
+
+    #[test]
+    fn test_config_zero_viscosity() {
+        let c = FluidConfig::new(0.01, 0.0, 1000.0, Vec3::ZERO, 0.0, 50);
+        assert!((c.viscosity - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    #[should_panic(expected = "Timestep dt must be positive")]
+    fn test_config_zero_dt_panics() {
+        FluidConfig::new(0.0, 0.001, 1000.0, Vec3::ZERO, 0.0, 50);
+    }
+
+    #[test]
+    #[should_panic(expected = "Density must be positive")]
+    fn test_config_zero_density_panics() {
+        FluidConfig::new(0.01, 0.001, 0.0, Vec3::ZERO, 0.0, 50);
+    }
+
+    #[test]
+    fn test_config_zero_jacobi_iterations() {
+        let c = FluidConfig::new(0.01, 0.001, 1000.0, Vec3::ZERO, 0.0, 0);
+        assert_eq!(c.jacobi_iterations, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Timestep dt must be positive")]
+    fn test_config_negative_dt_panics() {
+        FluidConfig::new(-0.01, 0.001, 1000.0, Vec3::ZERO, 0.0, 50);
+    }
+
+    #[test]
+    #[should_panic(expected = "Density must be positive")]
+    fn test_config_negative_density_panics() {
+        FluidConfig::new(0.01, 0.001, -500.0, Vec3::ZERO, 0.0, 50);
+    }
+
+    // --- Diffuse with zero viscosity is a no-op ---
+
+    #[test]
+    fn test_diffuse_zero_viscosity_noop() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        let idx = grid.idx_u(2, 2, 2);
+        grid.u[idx] = 10.0;
+        let u_before = grid.u.clone();
+
+        diffuse(&mut grid, 0.0, 0.01);
+
+        assert_eq!(
+            grid.u, u_before,
+            "Zero viscosity diffusion should be a no-op"
+        );
+    }
+
+    // --- Diffuse with negative viscosity is a no-op (early return) ---
+
+    #[test]
+    fn test_diffuse_negative_viscosity_noop() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        let idx = grid.idx_u(2, 2, 2);
+        grid.u[idx] = 10.0;
+        let u_before = grid.u.clone();
+
+        diffuse(&mut grid, -1.0, 0.01);
+
+        assert_eq!(
+            grid.u, u_before,
+            "Negative viscosity diffusion should be a no-op"
+        );
+    }
+
+    // --- Diffuse with zero dt ---
+
+    #[test]
+    fn test_diffuse_zero_dt_noop() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        let idx = grid.idx_u(2, 2, 2);
+        grid.u[idx] = 10.0;
+        let u_before = grid.u.clone();
+
+        diffuse(&mut grid, 0.1, 0.0);
+
+        assert_eq!(grid.u, u_before, "Zero dt diffusion should be a no-op");
+    }
+
+    // --- Advect with zero dt ---
+
+    #[test]
+    fn test_advect_zero_dt() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for (i, val) in grid.u.iter_mut().enumerate() {
+            *val = (i % 5) as f32 * 0.3;
+        }
+        let u_before = grid.u.clone();
+
+        let (new_u, _new_v, _new_w) = advect(&grid, 0.0);
+
+        for (i, (&before, &after)) in u_before.iter().zip(new_u.iter()).enumerate() {
+            assert!(
+                (before - after).abs() < 1e-4,
+                "advect(dt=0) should preserve u[{i}]: before={before}, after={after}"
+            );
+        }
+    }
+
+    // --- Pressure solve with 0 iterations ---
+
+    #[test]
+    fn test_pressure_solve_zero_iterations() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for k in 0..grid.nz {
+            for j in 0..grid.ny {
+                for i in 0..=grid.nx {
+                    let idx = grid.idx_u(i, j, k);
+                    grid.u[idx] = i as f32 * 0.5;
+                }
+            }
+        }
+
+        pressure_solve(&mut grid, 0.01, 0);
+
+        assert!(
+            grid.pressure.iter().all(|&p| p.abs() < 1e-10),
+            "Pressure should be zero with 0 Jacobi iterations"
+        );
+    }
+
+    // --- apply_forces with zero gravity ---
+
+    #[test]
+    fn test_apply_forces_zero_gravity() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for d in grid.density.iter_mut() {
+            *d = 1000.0;
+        }
+        let v_before = grid.v.clone();
+
+        let config = FluidConfig {
+            dt: 0.01,
+            viscosity: 0.0,
+            density: 1000.0,
+            gravity: Vec3::ZERO,
+            surface_tension: 0.0,
+            jacobi_iterations: 0,
+        };
+
+        apply_forces(&mut grid, &config, config.dt);
+
+        assert_eq!(
+            grid.v, v_before,
+            "Zero gravity should not change velocities"
+        );
+    }
+
+    // --- apply_forces with all Air cells (no fluid) ---
+
+    #[test]
+    fn test_apply_forces_all_air_cells() {
+        let mut grid = FluidGrid::new(4, 4, 4, 0.25, Vec3::ZERO);
+        let v_before = grid.v.clone();
+
+        let config = FluidConfig {
+            dt: 0.01,
+            viscosity: 0.0,
+            density: 1000.0,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            surface_tension: 0.0,
+            jacobi_iterations: 0,
+        };
+
+        apply_forces(&mut grid, &config, config.dt);
+
+        assert_eq!(
+            grid.v, v_before,
+            "Gravity should not affect velocities when all cells are Air"
+        );
+    }
+
+    // --- apply_forces buoyancy with zero reference density ---
+
+    #[test]
+    fn test_apply_forces_zero_reference_density() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for d in grid.density.iter_mut() {
+            *d = 500.0;
+        }
+
+        let config = FluidConfig {
+            dt: 0.01,
+            viscosity: 0.0,
+            density: 0.0,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            surface_tension: 0.0,
+            jacobi_iterations: 0,
+        };
+
+        apply_forces(&mut grid, &config, config.dt);
+
+        assert!(
+            grid.v.iter().all(|v| v.is_finite()),
+            "Zero reference density should not produce NaN/Inf"
+        );
+    }
+
+    // --- Step on a 1x1x1 grid ---
+
+    #[test]
+    fn test_step_1x1x1_grid() {
+        let mut grid = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        grid.cell_types[0] = CellType::Fluid;
+        grid.density[0] = 1000.0;
+
+        let config = FluidConfig {
+            dt: 0.01,
+            viscosity: 0.001,
+            density: 1000.0,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            surface_tension: 0.0,
+            jacobi_iterations: 10,
+        };
+
+        step(&mut grid, &config);
+
+        assert!(
+            grid.u.iter().all(|v| v.is_finite()),
+            "1x1x1 step: u should be finite"
+        );
+        assert!(
+            grid.v.iter().all(|v| v.is_finite()),
+            "1x1x1 step: v should be finite"
+        );
+        assert!(
+            grid.pressure.iter().all(|v| v.is_finite()),
+            "1x1x1 step: pressure should be finite"
+        );
+    }
+
+    // --- Project with zero dt ---
+
+    #[test]
+    fn test_project_zero_dt() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for p in grid.pressure.iter_mut() {
+            *p = 100.0;
+        }
+        for val in grid.u.iter_mut() {
+            *val = 5.0;
+        }
+        let u_interior_before: Vec<f32> =
+            (1..grid.nx).map(|i| grid.u[grid.idx_u(i, 2, 2)]).collect();
+
+        project(&mut grid, 0.0);
+
+        let u_interior_after: Vec<f32> =
+            (1..grid.nx).map(|i| grid.u[grid.idx_u(i, 2, 2)]).collect();
+        assert_eq!(
+            u_interior_before, u_interior_after,
+            "project(dt=0) should not modify interior velocities"
+        );
+    }
+
+    // --- Diffuse stability clamping with very large factor ---
+
+    #[test]
+    fn test_diffuse_large_viscosity_stays_finite() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        let idx = grid.idx_u(2, 2, 2);
+        grid.u[idx] = 100.0;
+
+        diffuse(&mut grid, 1e6, 1.0);
+
+        assert!(
+            grid.u.iter().all(|v| v.is_finite()),
+            "Large viscosity diffusion should remain finite due to clamping"
+        );
+    }
+
+    // --- Pressure solve with single isolated fluid cell ---
+
+    #[test]
+    fn test_pressure_solve_single_fluid_cell() {
+        let mut grid = FluidGrid::new(4, 4, 4, 0.25, Vec3::ZERO);
+        let cidx = grid.idx(2, 2, 2);
+        grid.cell_types[cidx] = CellType::Fluid;
+        let uidx = grid.idx_u(3, 2, 2);
+        grid.u[uidx] = 1.0;
+
+        pressure_solve(&mut grid, 0.01, 50);
+        project(&mut grid, 0.01);
+
+        assert!(
+            grid.pressure.iter().all(|v| v.is_finite()),
+            "Pressure solve with single fluid cell should be finite"
+        );
+    }
+
+    // --- Advect zero velocity preserves zero field ---
+
+    #[test]
+    fn test_advect_zero_velocity_preserves_field() {
+        let grid = make_fluid_grid(4, 0.25);
+        let (new_u, new_v, new_w) = advect(&grid, 0.01);
+        assert!(
+            new_u.iter().all(|&v| v.abs() < 1e-10),
+            "Advecting zero-velocity field should produce zero"
+        );
+        assert!(
+            new_v.iter().all(|&v| v.abs() < 1e-10),
+            "Advecting zero-velocity field should produce zero"
+        );
+        assert!(
+            new_w.iter().all(|&v| v.abs() < 1e-10),
+            "Advecting zero-velocity field should produce zero"
+        );
+    }
+
+    // --- apply_forces with gravity in all three axes ---
+
+    #[test]
+    fn test_apply_forces_xyz_gravity() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for d in grid.density.iter_mut() {
+            *d = 1000.0;
+        }
+
+        let config = FluidConfig {
+            dt: 0.01,
+            viscosity: 0.0,
+            density: 1000.0,
+            gravity: Vec3::new(5.0, -9.81, 3.0),
+            surface_tension: 0.0,
+            jacobi_iterations: 0,
+        };
+
+        apply_forces(&mut grid, &config, config.dt);
+
+        let u_sum: f32 = grid.u.iter().sum();
+        assert!(
+            u_sum > 0.0,
+            "Positive gravity.x should increase total u: got {u_sum}"
+        );
+        let v_sum: f32 = grid.v.iter().sum();
+        assert!(
+            v_sum < 0.0,
+            "Negative gravity.y should decrease total v: got {v_sum}"
+        );
+        let w_sum: f32 = grid.w.iter().sum();
+        assert!(
+            w_sum > 0.0,
+            "Positive gravity.z should increase total w: got {w_sum}"
+        );
+    }
+
+    // --- Diffuse uniform field should remain uniform ---
+
+    #[test]
+    fn test_diffuse_uniform_field_unchanged() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for val in grid.u.iter_mut() {
+            *val = 7.0;
+        }
+        let u_before = grid.u.clone();
+
+        diffuse(&mut grid, 0.1, 0.01);
+
+        for (i, (&before, &after)) in u_before.iter().zip(grid.u.iter()).enumerate() {
+            assert!(
+                (before - after).abs() < 1e-4,
+                "Diffusing uniform field should not change u[{i}]: before={before}, after={after}"
+            );
+        }
+    }
+
+    // --- enforce_boundary_velocities on 1x1x1 grid ---
+
+    #[test]
+    fn test_enforce_boundary_velocities_1x1x1() {
+        let mut grid = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        grid.cell_types[0] = CellType::Fluid;
+        grid.u[0] = 5.0;
+        grid.u[1] = 5.0;
+        grid.v[0] = 5.0;
+        grid.v[1] = 5.0;
+        grid.w[0] = 5.0;
+        grid.w[1] = 5.0;
+
+        project(&mut grid, 0.01);
+
+        assert!(
+            grid.u[0].abs() < 1e-6,
+            "u[0] (boundary) should be zero after enforce"
+        );
+        assert!(
+            grid.u[1].abs() < 1e-6,
+            "u[1] (boundary) should be zero after enforce"
+        );
+        assert!(
+            grid.v[0].abs() < 1e-6,
+            "v[0] (boundary) should be zero after enforce"
+        );
+        assert!(
+            grid.v[1].abs() < 1e-6,
+            "v[1] (boundary) should be zero after enforce"
+        );
+        assert!(
+            grid.w[0].abs() < 1e-6,
+            "w[0] (boundary) should be zero after enforce"
+        );
+        assert!(
+            grid.w[1].abs() < 1e-6,
+            "w[1] (boundary) should be zero after enforce"
+        );
+    }
+
+    // --- Large velocity values in advection ---
+
+    #[test]
+    fn test_advect_large_velocity_stays_finite() {
+        let mut grid = make_fluid_grid(4, 0.25);
+        for val in grid.u.iter_mut() {
+            *val = 1e6;
+        }
+
+        let (new_u, new_v, new_w) = advect(&grid, 0.01);
+
+        assert!(
+            new_u.iter().all(|v| v.is_finite()),
+            "Advection with large velocity should produce finite u"
+        );
+        assert!(
+            new_v.iter().all(|v| v.is_finite()),
+            "Advection with large velocity should produce finite v"
+        );
+        assert!(
+            new_w.iter().all(|v| v.is_finite()),
+            "Advection with large velocity should produce finite w"
         );
     }
 }

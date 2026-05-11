@@ -463,4 +463,291 @@ mod tests {
     fn test_grid_max_size_guard() {
         FluidGrid::new(1025, 4, 4, 0.1, Vec3::ZERO);
     }
+
+    // =========================================================================
+    // Edge case tests
+    // =========================================================================
+
+    // --- Minimum grid (1x1x1) ---
+
+    #[test]
+    fn test_grid_1x1x1_creation() {
+        let g = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        assert_eq!(g.pressure.len(), 1);
+        assert_eq!(g.u.len(), 2); // (1+1)*1*1
+        assert_eq!(g.v.len(), 2); // 1*(1+1)*1
+        assert_eq!(g.w.len(), 2); // 1*1*(1+1)
+    }
+
+    #[test]
+    fn test_grid_1x1x1_idx_roundtrip() {
+        let g = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        let linear = g.idx(0, 0, 0);
+        assert_eq!(linear, 0);
+        let (ri, rj, rk) = g.idx_to_ijk(linear);
+        assert_eq!((ri, rj, rk), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_grid_1x1x1_velocity_at() {
+        let mut g = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        g.u[0] = 2.0;
+        g.u[1] = 4.0;
+        // velocity_at at cell center (0.5, 0.5, 0.5) should interpolate u
+        let vel = g.velocity_at(g.cell_center(0, 0, 0));
+        assert!(vel.x.is_finite(), "1x1x1 velocity_at.x should be finite");
+        assert!(vel.y.is_finite(), "1x1x1 velocity_at.y should be finite");
+        assert!(vel.z.is_finite(), "1x1x1 velocity_at.z should be finite");
+    }
+
+    #[test]
+    fn test_grid_1x1x1_in_bounds() {
+        let g = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        assert!(g.in_bounds(0, 0, 0));
+        assert!(!g.in_bounds(1, 0, 0));
+        assert!(!g.in_bounds(0, 1, 0));
+        assert!(!g.in_bounds(0, 0, 1));
+        assert!(!g.in_bounds(-1, 0, 0));
+    }
+
+    // --- Zero/panic dimension tests for y and z axes ---
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be > 0")]
+    fn test_grid_zero_ny() {
+        FluidGrid::new(4, 0, 4, 0.1, Vec3::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be > 0")]
+    fn test_grid_zero_nz() {
+        FluidGrid::new(4, 4, 0, 0.1, Vec3::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be <= 1024")]
+    fn test_grid_max_size_ny() {
+        FluidGrid::new(4, 1025, 4, 0.1, Vec3::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "Grid dimensions must be <= 1024")]
+    fn test_grid_max_size_nz() {
+        FluidGrid::new(4, 4, 1025, 0.1, Vec3::ZERO);
+    }
+
+    // --- Asymmetric grid dimensions ---
+
+    #[test]
+    fn test_grid_asymmetric_dimensions() {
+        // nx=1, ny=2, nz=3 -- very non-cubic
+        let g = FluidGrid::new(1, 2, 3, 0.5, Vec3::ZERO);
+        assert_eq!(g.u.len(), 2 * 2 * 3); // (1+1)*2*3
+        assert_eq!(g.v.len(), 1 * 3 * 3); // 1*(2+1)*3
+        assert_eq!(g.w.len(), 1 * 2 * 4); // 1*2*(3+1)
+        assert_eq!(g.pressure.len(), 1 * 2 * 3);
+    }
+
+    #[test]
+    fn test_idx_roundtrip_asymmetric() {
+        let g = FluidGrid::new(3, 5, 7, 0.1, Vec3::ZERO);
+        for k in 0..g.nz {
+            for j in 0..g.ny {
+                for i in 0..g.nx {
+                    let linear = g.idx(i, j, k);
+                    assert!(
+                        linear < g.pressure.len(),
+                        "idx out of bounds at ({i},{j},{k})"
+                    );
+                    let (ri, rj, rk) = g.idx_to_ijk(linear);
+                    assert_eq!((ri, rj, rk), (i, j, k));
+                }
+            }
+        }
+    }
+
+    // --- Face index boundary checks ---
+
+    #[test]
+    fn test_face_indices_within_bounds() {
+        let g = FluidGrid::new(3, 4, 5, 0.1, Vec3::ZERO);
+        // u-faces: (nx+1) x ny x nz
+        for k in 0..g.nz {
+            for j in 0..g.ny {
+                for i in 0..=g.nx {
+                    let idx = g.idx_u(i, j, k);
+                    assert!(
+                        idx < g.u.len(),
+                        "idx_u({i},{j},{k})={idx} out of bounds (len={})",
+                        g.u.len()
+                    );
+                }
+            }
+        }
+        // v-faces: nx x (ny+1) x nz
+        for k in 0..g.nz {
+            for j in 0..=g.ny {
+                for i in 0..g.nx {
+                    let idx = g.idx_v(i, j, k);
+                    assert!(
+                        idx < g.v.len(),
+                        "idx_v({i},{j},{k})={idx} out of bounds (len={})",
+                        g.v.len()
+                    );
+                }
+            }
+        }
+        // w-faces: nx x ny x (nz+1)
+        for k in 0..=g.nz {
+            for j in 0..g.ny {
+                for i in 0..g.nx {
+                    let idx = g.idx_w(i, j, k);
+                    assert!(
+                        idx < g.w.len(),
+                        "idx_w({i},{j},{k})={idx} out of bounds (len={})",
+                        g.w.len()
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Velocity interpolation at domain boundaries ---
+
+    #[test]
+    fn test_velocity_at_origin() {
+        let g = FluidGrid::new(4, 4, 4, 0.25, Vec3::ZERO);
+        let vel = g.velocity_at(Vec3::ZERO);
+        assert!(vel.x.is_finite(), "velocity at origin x should be finite");
+        assert!(vel.y.is_finite(), "velocity at origin y should be finite");
+        assert!(vel.z.is_finite(), "velocity at origin z should be finite");
+    }
+
+    #[test]
+    fn test_velocity_at_far_corner() {
+        let g = FluidGrid::new(4, 4, 4, 0.25, Vec3::ZERO);
+        // Far corner of domain: (4*0.25, 4*0.25, 4*0.25) = (1.0, 1.0, 1.0)
+        let vel = g.velocity_at(Vec3::new(1.0, 1.0, 1.0));
+        assert!(
+            vel.x.is_finite(),
+            "velocity at far corner x should be finite"
+        );
+        assert!(
+            vel.y.is_finite(),
+            "velocity at far corner y should be finite"
+        );
+        assert!(
+            vel.z.is_finite(),
+            "velocity at far corner z should be finite"
+        );
+    }
+
+    #[test]
+    fn test_velocity_at_outside_domain() {
+        // Position well outside the grid -- clamping should keep it finite
+        let g = FluidGrid::new(4, 4, 4, 0.25, Vec3::ZERO);
+        let vel = g.velocity_at(Vec3::new(-10.0, -10.0, -10.0));
+        assert!(
+            vel.x.is_finite(),
+            "velocity far outside should clamp, not crash"
+        );
+        let vel2 = g.velocity_at(Vec3::new(100.0, 100.0, 100.0));
+        assert!(
+            vel2.x.is_finite(),
+            "velocity far outside should clamp, not crash"
+        );
+    }
+
+    // --- Negative origin ---
+
+    #[test]
+    fn test_grid_negative_origin() {
+        let origin = Vec3::new(-5.0, -5.0, -5.0);
+        let g = FluidGrid::new(4, 4, 4, 1.0, origin);
+        let c = g.cell_center(0, 0, 0);
+        let expected = origin + Vec3::splat(0.5);
+        assert!(
+            (c - expected).length() < 1e-6,
+            "cell_center with negative origin: got {c:?} expected {expected:?}"
+        );
+    }
+
+    // --- Very small dx ---
+
+    #[test]
+    fn test_grid_tiny_dx() {
+        let g = FluidGrid::new(2, 2, 2, 1e-6, Vec3::ZERO);
+        let c = g.cell_center(0, 0, 0);
+        assert!(c.x.is_finite() && c.y.is_finite() && c.z.is_finite());
+        let vel = g.velocity_at(c);
+        assert!(vel.x.is_finite());
+    }
+
+    // --- Very large dx ---
+
+    #[test]
+    fn test_grid_large_dx() {
+        let g = FluidGrid::new(2, 2, 2, 1e6, Vec3::ZERO);
+        let c = g.cell_center(1, 1, 1);
+        assert!(c.x.is_finite() && c.y.is_finite() && c.z.is_finite());
+    }
+
+    // --- dx = 0.0 (division by zero in interpolation) ---
+
+    #[test]
+    fn test_grid_zero_dx_velocity_at() {
+        // dx=0 is degenerate; velocity_at divides by dx.
+        // Verify it produces NaN/Inf but does not panic.
+        let g = FluidGrid::new(2, 2, 2, 0.0, Vec3::ZERO);
+        let vel = g.velocity_at(Vec3::new(0.5, 0.5, 0.5));
+        // With dx=0, division produces NaN. We just confirm no panic.
+        let _ = vel;
+    }
+
+    // --- in_bounds extreme negative values ---
+
+    #[test]
+    fn test_in_bounds_i32_min() {
+        let g = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        assert!(!g.in_bounds(i32::MIN, 0, 0));
+        assert!(!g.in_bounds(0, i32::MIN, 0));
+        assert!(!g.in_bounds(0, 0, i32::MIN));
+        assert!(!g.in_bounds(i32::MAX, 0, 0));
+        assert!(!g.in_bounds(0, i32::MAX, 0));
+        assert!(!g.in_bounds(0, 0, i32::MAX));
+    }
+
+    // --- cell_center at maximum valid indices ---
+
+    #[test]
+    fn test_cell_center_max_indices() {
+        let g = FluidGrid::new(4, 5, 6, 0.1, Vec3::ZERO);
+        // Last cell: (3, 4, 5)
+        let c = g.cell_center(3, 4, 5);
+        let expected = Vec3::new(3.5 * 0.1, 4.5 * 0.1, 5.5 * 0.1);
+        assert!(
+            (c - expected).length() < 1e-5,
+            "cell_center at max indices: got {c:?} expected {expected:?}"
+        );
+    }
+
+    // --- NaN position in velocity_at ---
+
+    #[test]
+    fn test_velocity_at_nan_position() {
+        let g = FluidGrid::new(4, 4, 4, 0.25, Vec3::ZERO);
+        let vel = g.velocity_at(Vec3::new(f32::NAN, 0.5, 0.5));
+        // NaN input should propagate through but not panic
+        let _ = vel;
+    }
+
+    // --- Infinity position in velocity_at ---
+
+    #[test]
+    fn test_velocity_at_inf_position() {
+        let g = FluidGrid::new(4, 4, 4, 0.25, Vec3::ZERO);
+        let vel = g.velocity_at(Vec3::new(f32::INFINITY, 0.5, 0.5));
+        // Should clamp or produce some finite result, not panic
+        let _ = vel;
+    }
 }

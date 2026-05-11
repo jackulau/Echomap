@@ -692,4 +692,445 @@ mod tests {
             );
         }
     }
+
+    // =========================================================================
+    // Edge case tests
+    // =========================================================================
+
+    // --- voxelize_scene with empty mesh list ---
+
+    #[test]
+    fn test_voxelize_empty_meshes() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        voxelize_scene(&mut grid, &[]);
+        // All cells should remain Air
+        assert!(
+            grid.cell_types.iter().all(|&ct| ct == CellType::Air),
+            "Empty mesh list should leave all cells as Air"
+        );
+    }
+
+    // --- voxelize_scene with mesh that has zero triangles ---
+
+    #[test]
+    fn test_voxelize_empty_triangle_mesh() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        let mesh = Mesh {
+            triangles: Vec::new(),
+        };
+        let obj = make_scene_object(mesh);
+        voxelize_scene(&mut grid, &[obj]);
+        assert!(
+            grid.cell_types.iter().all(|&ct| ct == CellType::Air),
+            "Mesh with no triangles should leave all cells as Air"
+        );
+    }
+
+    // --- voxelize_scene with mesh entirely outside grid ---
+
+    #[test]
+    fn test_voxelize_mesh_outside_grid() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        // Grid spans [0,4]^3. Place mesh at [10,13]^3.
+        let mesh = box_mesh(Vec3::new(10.0, 10.0, 10.0), Vec3::new(13.0, 13.0, 13.0));
+        let obj = make_scene_object(mesh);
+        voxelize_scene(&mut grid, &[obj]);
+        assert!(
+            grid.cell_types.iter().all(|&ct| ct == CellType::Air),
+            "Mesh outside grid should leave all cells as Air"
+        );
+    }
+
+    // --- voxelize_scene with mesh at negative coordinates outside grid ---
+
+    #[test]
+    fn test_voxelize_mesh_negative_outside_grid() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        let mesh = box_mesh(Vec3::new(-10.0, -10.0, -10.0), Vec3::new(-5.0, -5.0, -5.0));
+        let obj = make_scene_object(mesh);
+        voxelize_scene(&mut grid, &[obj]);
+        assert!(
+            grid.cell_types.iter().all(|&ct| ct == CellType::Air),
+            "Mesh in negative space should leave all cells as Air"
+        );
+    }
+
+    // --- voxelize_scene with mesh covering entire grid ---
+
+    #[test]
+    fn test_voxelize_mesh_covers_entire_grid() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        // Mesh from (-1,-1,-1) to (5,5,5) covers entire grid [0,4]^3
+        let mesh = box_mesh(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(5.0, 5.0, 5.0));
+        let obj = make_scene_object(mesh);
+        voxelize_scene(&mut grid, &[obj]);
+        assert!(
+            grid.cell_types.iter().all(|&ct| ct == CellType::Solid),
+            "Mesh covering entire grid should mark all cells as Solid"
+        );
+    }
+
+    // --- classify_cells with all-zero level set (boundary case, ls=0 => Air) ---
+
+    #[test]
+    fn test_classify_cells_zero_level_set() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        // All level_set values are 0.0 (default)
+        // level_set >= 0 should be Air
+        classify_cells(&mut grid);
+        for idx in 0..grid.cell_types.len() {
+            assert_eq!(
+                grid.cell_types[idx],
+                CellType::Air,
+                "level_set=0 should classify as Air"
+            );
+        }
+    }
+
+    // --- classify_cells preserves all Solid cells ---
+
+    #[test]
+    fn test_classify_cells_preserves_all_solid() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        // Mark all cells as Solid
+        for ct in grid.cell_types.iter_mut() {
+            *ct = CellType::Solid;
+        }
+        // Set level_set to negative (would be Fluid if not Solid)
+        for ls in grid.level_set.iter_mut() {
+            *ls = -1.0;
+        }
+        classify_cells(&mut grid);
+        assert!(
+            grid.cell_types.iter().all(|&ct| ct == CellType::Solid),
+            "classify_cells should preserve all Solid cells"
+        );
+    }
+
+    // --- enforce_boundary_conditions on all-Air grid (no-op) ---
+
+    #[test]
+    fn test_enforce_bc_all_air() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        for val in grid.u.iter_mut() {
+            *val = 3.0;
+        }
+        let u_before = grid.u.clone();
+        enforce_boundary_conditions(&mut grid);
+        // No solid cells, so no faces should be zeroed
+        assert_eq!(
+            grid.u, u_before,
+            "All-Air grid should not have any faces zeroed"
+        );
+    }
+
+    // --- enforce_boundary_conditions on all-Solid grid ---
+
+    #[test]
+    fn test_enforce_bc_all_solid() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        for ct in grid.cell_types.iter_mut() {
+            *ct = CellType::Solid;
+        }
+        for val in grid.u.iter_mut() {
+            *val = 5.0;
+        }
+        for val in grid.v.iter_mut() {
+            *val = 5.0;
+        }
+        for val in grid.w.iter_mut() {
+            *val = 5.0;
+        }
+        enforce_boundary_conditions(&mut grid);
+        // All faces touch solid cells so all should be zeroed
+        assert!(
+            grid.u.iter().all(|&v| v.abs() < 1e-6),
+            "All-Solid grid: all u-faces should be zero"
+        );
+        assert!(
+            grid.v.iter().all(|&v| v.abs() < 1e-6),
+            "All-Solid grid: all v-faces should be zero"
+        );
+        assert!(
+            grid.w.iter().all(|&v| v.abs() < 1e-6),
+            "All-Solid grid: all w-faces should be zero"
+        );
+    }
+
+    // --- enforce_boundary_conditions Neumann BC with no fluid neighbours ---
+
+    #[test]
+    fn test_enforce_bc_neumann_no_fluid_neighbours() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        // All Solid, set pressure
+        for ct in grid.cell_types.iter_mut() {
+            *ct = CellType::Solid;
+        }
+        for (i, p) in grid.pressure.iter_mut().enumerate() {
+            *p = i as f32 * 10.0;
+        }
+        let p_before = grid.pressure.clone();
+        enforce_boundary_conditions(&mut grid);
+        // With no fluid neighbours, Solid cell pressures should remain unchanged
+        // (the count == 0 guard prevents division by zero)
+        assert_eq!(
+            grid.pressure, p_before,
+            "Solid cells with no fluid neighbours should keep their pressure"
+        );
+    }
+
+    // --- advect_level_set with zero velocity ---
+
+    #[test]
+    fn test_advect_level_set_zero_velocity() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        // Set a gradient level set
+        for k in 0..4 {
+            for j in 0..4 {
+                for i in 0..4 {
+                    let idx = grid.idx(i, j, k);
+                    grid.level_set[idx] = i as f32 - 1.5;
+                }
+            }
+        }
+        let ls_before = grid.level_set.clone();
+
+        advect_level_set(&mut grid, 0.01);
+
+        // Zero velocity means backtracing stays at the same position
+        for (i, (&before, &after)) in ls_before.iter().zip(grid.level_set.iter()).enumerate() {
+            assert!(
+                (before - after).abs() < 1e-3,
+                "advect_level_set with zero velocity should preserve level_set[{i}]: before={before}, after={after}"
+            );
+        }
+    }
+
+    // --- advect_level_set with zero dt ---
+
+    #[test]
+    fn test_advect_level_set_zero_dt() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        for val in grid.u.iter_mut() {
+            *val = 10.0;
+        }
+        for k in 0..4 {
+            for j in 0..4 {
+                for i in 0..4 {
+                    let idx = grid.idx(i, j, k);
+                    grid.level_set[idx] = i as f32 - 1.5;
+                }
+            }
+        }
+        let ls_before = grid.level_set.clone();
+
+        advect_level_set(&mut grid, 0.0);
+
+        for (i, (&before, &after)) in ls_before.iter().zip(grid.level_set.iter()).enumerate() {
+            assert!(
+                (before - after).abs() < 1e-3,
+                "advect_level_set(dt=0) should preserve level_set[{i}]"
+            );
+        }
+    }
+
+    // --- reinitialize_level_set with zero iterations ---
+
+    #[test]
+    fn test_reinitialize_level_set_zero_iterations() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        for k in 0..4 {
+            for j in 0..4 {
+                for i in 0..4 {
+                    let idx = grid.idx(i, j, k);
+                    grid.level_set[idx] = (i as f32 - 1.5) * 3.0; // non-SDF
+                }
+            }
+        }
+        let ls_before = grid.level_set.clone();
+
+        reinitialize_level_set(&mut grid, 0);
+
+        assert_eq!(
+            grid.level_set, ls_before,
+            "reinitialize with 0 iterations should be a no-op"
+        );
+    }
+
+    // --- reinitialize_level_set with uniform positive level set ---
+
+    #[test]
+    fn test_reinitialize_uniform_positive() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        for ls in grid.level_set.iter_mut() {
+            *ls = 5.0;
+        }
+
+        reinitialize_level_set(&mut grid, 10);
+
+        assert!(
+            grid.level_set.iter().all(|v| v.is_finite()),
+            "Reinitialize uniform positive level_set should stay finite"
+        );
+    }
+
+    // --- reinitialize_level_set with uniform negative level set ---
+
+    #[test]
+    fn test_reinitialize_uniform_negative() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        for ls in grid.level_set.iter_mut() {
+            *ls = -5.0;
+        }
+
+        reinitialize_level_set(&mut grid, 10);
+
+        assert!(
+            grid.level_set.iter().all(|v| v.is_finite()),
+            "Reinitialize uniform negative level_set should stay finite"
+        );
+    }
+
+    // --- reinitialize_level_set with all-zero level set ---
+
+    #[test]
+    fn test_reinitialize_all_zero() {
+        let mut grid = FluidGrid::new(4, 4, 4, 1.0, Vec3::ZERO);
+        // level_set is all 0.0 by default
+        reinitialize_level_set(&mut grid, 10);
+
+        assert!(
+            grid.level_set.iter().all(|v| v.is_finite()),
+            "Reinitialize all-zero level_set should stay finite"
+        );
+    }
+
+    // --- enforce_boundary_conditions on 1x1x1 grid ---
+
+    #[test]
+    fn test_enforce_bc_1x1x1_single_solid() {
+        let mut grid = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        grid.cell_types[0] = CellType::Solid;
+        grid.u[0] = 10.0;
+        grid.u[1] = 10.0;
+        grid.v[0] = 10.0;
+        grid.v[1] = 10.0;
+        grid.w[0] = 10.0;
+        grid.w[1] = 10.0;
+        grid.pressure[0] = 50.0;
+
+        enforce_boundary_conditions(&mut grid);
+
+        assert!(
+            grid.u.iter().all(|&v| v.abs() < 1e-6),
+            "1x1x1 solid: all u should be zero"
+        );
+        assert!(
+            grid.v.iter().all(|&v| v.abs() < 1e-6),
+            "1x1x1 solid: all v should be zero"
+        );
+        assert!(
+            grid.w.iter().all(|&v| v.abs() < 1e-6),
+            "1x1x1 solid: all w should be zero"
+        );
+    }
+
+    // --- voxelize_scene on 1x1x1 grid ---
+
+    #[test]
+    fn test_voxelize_1x1x1() {
+        let mut grid = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        let mesh = box_mesh(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(1.5, 1.5, 1.5));
+        let obj = make_scene_object(mesh);
+        voxelize_scene(&mut grid, &[obj]);
+        assert_eq!(
+            grid.cell_types[0],
+            CellType::Solid,
+            "1x1x1 grid fully covered by mesh should be Solid"
+        );
+    }
+
+    // --- classify_cells on 1x1x1 grid ---
+
+    #[test]
+    fn test_classify_cells_1x1x1() {
+        let mut grid = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        grid.level_set[0] = -0.5;
+        classify_cells(&mut grid);
+        assert_eq!(grid.cell_types[0], CellType::Fluid);
+
+        grid.level_set[0] = 0.5;
+        classify_cells(&mut grid);
+        assert_eq!(grid.cell_types[0], CellType::Air);
+    }
+
+    // --- advect_level_set on 1x1x1 grid ---
+
+    #[test]
+    fn test_advect_level_set_1x1x1() {
+        let mut grid = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        grid.level_set[0] = -1.0;
+        grid.u[0] = 1.0;
+        grid.u[1] = 1.0;
+
+        advect_level_set(&mut grid, 0.01);
+
+        assert!(
+            grid.level_set[0].is_finite(),
+            "advect_level_set on 1x1x1 should produce finite result"
+        );
+    }
+
+    // --- reinitialize_level_set on 1x1x1 grid ---
+
+    #[test]
+    fn test_reinitialize_level_set_1x1x1() {
+        let mut grid = FluidGrid::new(1, 1, 1, 1.0, Vec3::ZERO);
+        grid.level_set[0] = -3.0;
+
+        reinitialize_level_set(&mut grid, 5);
+
+        assert!(
+            grid.level_set[0].is_finite(),
+            "reinitialize on 1x1x1 should produce finite result"
+        );
+    }
+
+    // --- Multiple overlapping meshes in voxelize_scene ---
+
+    #[test]
+    fn test_voxelize_overlapping_meshes() {
+        let mut grid = FluidGrid::new(8, 8, 8, 1.0, Vec3::ZERO);
+        let mesh1 = box_mesh(Vec3::new(1.0, 1.0, 1.0), Vec3::new(4.0, 4.0, 4.0));
+        let mesh2 = box_mesh(Vec3::new(3.0, 3.0, 3.0), Vec3::new(6.0, 6.0, 6.0));
+        let obj1 = make_scene_object(mesh1);
+        let obj2 = make_scene_object(mesh2);
+
+        voxelize_scene(&mut grid, &[obj1, obj2]);
+
+        // Cell (2,2,2) should be Solid from mesh1
+        assert_eq!(
+            grid.cell_types[grid.idx(2, 2, 2)],
+            CellType::Solid,
+            "Cell covered by mesh1 should be Solid"
+        );
+        // Cell (5,5,5) should be Solid from mesh2
+        assert_eq!(
+            grid.cell_types[grid.idx(5, 5, 5)],
+            CellType::Solid,
+            "Cell covered by mesh2 should be Solid"
+        );
+        // Cell (3,3,3) should be Solid from both
+        assert_eq!(
+            grid.cell_types[grid.idx(3, 3, 3)],
+            CellType::Solid,
+            "Overlapping cell should be Solid"
+        );
+        // Cell (0,0,0) should remain Air
+        assert_eq!(
+            grid.cell_types[grid.idx(0, 0, 0)],
+            CellType::Air,
+            "Cell outside both meshes should be Air"
+        );
+    }
 }

@@ -1,6 +1,8 @@
 use glam::Vec3;
 
 use crate::acoustics::SimulationState;
+use crate::agent::bridge::{create_bridge, SimBridgeClient};
+use crate::agent::{AgentServerConfig, AgentServerHandle};
 use crate::fluids::FluidSimulation;
 use crate::gas::GasSimulation;
 use crate::renderer::{
@@ -204,6 +206,7 @@ pub fn toolbar(ctx: &egui::Context, vp: &mut ViewportState) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn side_panel(
     ctx: &egui::Context,
     scene: &mut Scene,
@@ -212,6 +215,9 @@ pub fn side_panel(
     fluid_sim: &mut FluidSimulation,
     gas_sim: &mut GasSimulation,
     robot_manager: &mut RobotManager,
+    agent_config: &mut AgentServerConfig,
+    agent_handle: &mut Option<AgentServerHandle>,
+    bridge_client: &mut SimBridgeClient,
 ) {
     egui::SidePanel::left("side_panel")
         .default_width(280.0)
@@ -986,6 +992,78 @@ pub fn side_panel(
                                 }
                             }
                         }
+                    }
+                });
+
+            ui.separator();
+
+            // --- Agent Server Control ---
+            egui::CollapsingHeader::new("Agent Server")
+                .id_salt("agent_server_control")
+                .default_open(false)
+                .show(ui, |ui| {
+                    let is_running = agent_handle.as_ref().is_some_and(|h| h.status().running);
+
+                    // Enabled toggle
+                    let mut enabled = is_running;
+                    if ui.checkbox(&mut enabled, "Server Enabled").changed() {
+                        if enabled && !is_running {
+                            // Start the server: create a new bridge and start.
+                            let (bridge_server, new_client) = create_bridge();
+                            *bridge_client = new_client;
+                            let handle = crate::agent::start_agent_server(
+                                agent_config.clone(),
+                                bridge_server,
+                            );
+                            log::info!("Agent server started via UI toggle");
+                            *agent_handle = Some(handle);
+                        } else if !enabled && is_running {
+                            // Stop the server.
+                            if let Some(ref mut h) = agent_handle {
+                                h.stop();
+                            }
+                            *agent_handle = None;
+                            log::info!("Agent server stopped via UI toggle");
+                        }
+                    }
+
+                    // Port configuration (only editable when stopped)
+                    ui.add_enabled_ui(!is_running, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("TCP Port:");
+                            let mut port = agent_config.tcp_port as u32;
+                            if ui
+                                .add(egui::DragValue::new(&mut port).range(1024..=65535))
+                                .changed()
+                            {
+                                agent_config.tcp_port = port as u16;
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("WS Port:");
+                            let mut port = agent_config.ws_port as u32;
+                            if ui
+                                .add(egui::DragValue::new(&mut port).range(1024..=65535))
+                                .changed()
+                            {
+                                agent_config.ws_port = port as u16;
+                            }
+                        });
+                    });
+
+                    // Status display
+                    if let Some(ref h) = agent_handle {
+                        let status = h.status();
+                        if status.running {
+                            ui.label(format!("TCP: port {}", status.tcp_port));
+                            ui.label(format!("WS:  port {}", status.ws_port));
+                            ui.label(format!(
+                                "Connections: {} TCP, {} WS",
+                                status.tcp_connections, status.ws_connections
+                            ));
+                        }
+                    } else {
+                        ui.label("Server stopped");
                     }
                 });
         });

@@ -31,6 +31,8 @@ fn main() -> eframe::Result<()> {
 
 mod app {
     use crate::acoustics::SimulationState;
+    use crate::agent::bridge::{create_bridge, SimBridgeClient};
+    use crate::agent::{AgentServerConfig, AgentServerHandle};
     use crate::fluids::FluidSimulation;
     use crate::gas::GasSimulation;
     use crate::robot::RobotManager;
@@ -46,10 +48,31 @@ mod app {
         robot_manager: RobotManager,
         viewport: ViewportState,
         show_settings: bool,
+        bridge_client: SimBridgeClient,
+        agent_server_config: AgentServerConfig,
+        agent_server_handle: Option<AgentServerHandle>,
     }
 
     impl EchoMapApp {
         pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+            let (bridge_server, bridge_client) = create_bridge();
+
+            let agent_server_config = AgentServerConfig::default();
+            let agent_server_handle = if agent_server_config.enabled {
+                log::info!("Starting agent server (enabled by default config)");
+                Some(crate::agent::start_agent_server(
+                    agent_server_config.clone(),
+                    bridge_server,
+                ))
+            } else {
+                // Store the bridge server for later use when toggled on.
+                // We need to keep it alive; store via Option dance.
+                // Since bridge_server is Clone, we just drop it here — a new
+                // bridge will be created when the server is toggled on.
+                drop(bridge_server);
+                None
+            };
+
             Self {
                 scene: Scene::default(),
                 simulation: SimulationState::default(),
@@ -58,12 +81,19 @@ mod app {
                 robot_manager: RobotManager::default(),
                 viewport: ViewportState::default(),
                 show_settings: false,
+                bridge_client,
+                agent_server_config,
+                agent_server_handle,
             }
         }
     }
 
     impl eframe::App for EchoMapApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            // Process pending agent bridge commands each frame.
+            self.bridge_client
+                .process_pending(&mut self.robot_manager, &self.scene.meshes);
+
             crate::ui::menu_bar(
                 ctx,
                 &mut self.show_settings,
@@ -79,6 +109,9 @@ mod app {
                 &mut self.fluid_sim,
                 &mut self.gas_sim,
                 &mut self.robot_manager,
+                &mut self.agent_server_config,
+                &mut self.agent_server_handle,
+                &mut self.bridge_client,
             );
             crate::ui::viewport_3d(
                 ctx,

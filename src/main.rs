@@ -27,6 +27,7 @@ fn main() -> eframe::Result<()> {
 
 mod app {
     use crate::acoustics::SimulationState;
+    use crate::fluids::FluidSimulation;
     use crate::scene::Scene;
     use crate::ui::ViewportState;
     use eframe::egui;
@@ -34,6 +35,7 @@ mod app {
     pub struct EchoMapApp {
         scene: Scene,
         simulation: SimulationState,
+        fluid_sim: FluidSimulation,
         viewport: ViewportState,
         show_settings: bool,
     }
@@ -43,6 +45,7 @@ mod app {
             Self {
                 scene: Scene::default(),
                 simulation: SimulationState::default(),
+                fluid_sim: FluidSimulation::default(),
                 viewport: ViewportState::default(),
                 show_settings: false,
             }

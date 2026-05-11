@@ -7,6 +7,29 @@ pub use mesh::{Mesh, Triangle, Vertex};
 
 use glam::Vec3;
 
+use crate::gas::grid::GasSpecies;
+
+pub struct GasVolume {
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
+    pub species: Vec<GasSpecies>,
+    pub ambient_temperature: f32,
+    pub grid_resolution: f32,
+}
+
+impl GasVolume {
+    #[allow(dead_code)]
+    pub fn new(min: Vec3, max: Vec3, species: Vec<GasSpecies>) -> Self {
+        Self {
+            bounds_min: min,
+            bounds_max: max,
+            species,
+            ambient_temperature: 293.15,
+            grid_resolution: 0.1,
+        }
+    }
+}
+
 pub struct FluidVolume {
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
@@ -36,6 +59,7 @@ pub struct Scene {
     pub listeners: Vec<Listener>,
     pub background_medium: MediumProperties,
     pub fluid_volumes: Vec<FluidVolume>,
+    pub gas_volumes: Vec<GasVolume>,
 }
 
 impl Default for Scene {
@@ -46,6 +70,7 @@ impl Default for Scene {
             listeners: Vec::new(),
             background_medium: MediumProperties::air(),
             fluid_volumes: Vec::new(),
+            gas_volumes: Vec::new(),
         }
     }
 }
@@ -238,6 +263,94 @@ mod tests {
             "background_medium should still default to air"
         );
         assert!(scene.fluid_volumes.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // Task 5 (gas): Scene GasVolume integration tests
+    // ------------------------------------------------------------------
+
+    fn make_gas_species(name: &str) -> crate::gas::grid::GasSpecies {
+        crate::gas::grid::GasSpecies {
+            name: name.to_string(),
+            diffusion_coefficient: 0.2,
+            molecular_weight: 28.0,
+            density_at_stp: 1.225,
+            color: [1.0, 0.0, 0.0],
+        }
+    }
+
+    #[test]
+    fn test_scene_default_no_gas_volumes() {
+        let scene = Scene::default();
+        assert!(
+            scene.gas_volumes.is_empty(),
+            "Default scene should have no gas volumes"
+        );
+    }
+
+    #[test]
+    fn test_gas_volume_creation() {
+        let min = glam::Vec3::new(0.0, 0.0, 0.0);
+        let max = glam::Vec3::new(2.0, 3.0, 4.0);
+        let species = vec![make_gas_species("CO2"), make_gas_species("CH4")];
+        let vol = super::GasVolume::new(min, max, species);
+
+        assert!(
+            (vol.bounds_min - min).length() < 1e-6,
+            "bounds_min should match"
+        );
+        assert!(
+            (vol.bounds_max - max).length() < 1e-6,
+            "bounds_max should match"
+        );
+        assert_eq!(vol.species.len(), 2, "should have 2 species");
+        assert_eq!(vol.species[0].name, "CO2");
+        assert_eq!(vol.species[1].name, "CH4");
+        assert!(
+            (vol.ambient_temperature - 293.15).abs() < 1e-6,
+            "ambient_temperature should default to 293.15 K"
+        );
+        assert!(
+            (vol.grid_resolution - 0.1).abs() < 1e-6,
+            "grid_resolution should default to 0.1"
+        );
+    }
+
+    #[test]
+    fn test_scene_with_gas_volume() {
+        let mut scene = Scene::default();
+        let species = vec![make_gas_species("CO2")];
+        let vol = super::GasVolume::new(glam::Vec3::ZERO, glam::Vec3::new(5.0, 5.0, 5.0), species);
+        scene.gas_volumes.push(vol);
+        assert_eq!(
+            scene.gas_volumes.len(),
+            1,
+            "Scene should contain one gas volume"
+        );
+        assert!(
+            (scene.gas_volumes[0].bounds_max.x - 5.0).abs() < 1e-6,
+            "Gas volume should persist with correct bounds"
+        );
+        assert_eq!(
+            scene.gas_volumes[0].species.len(),
+            1,
+            "Gas volume should retain its species"
+        );
+    }
+
+    #[test]
+    fn test_existing_scene_unchanged_with_gas() {
+        // Regression: default scene still works and has all expected fields
+        let scene = Scene::default();
+        assert!(scene.meshes.is_empty());
+        assert!(scene.sound_sources.is_empty());
+        assert!(scene.listeners.is_empty());
+        assert!(
+            (scene.background_medium.density - MediumProperties::air().density).abs() < 1e-6,
+            "background_medium should still default to air"
+        );
+        assert!(scene.fluid_volumes.is_empty());
+        assert!(scene.gas_volumes.is_empty());
     }
 
     #[test]

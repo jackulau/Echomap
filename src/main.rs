@@ -66,6 +66,7 @@ mod app {
                 &mut self.scene,
                 &mut self.simulation,
                 &mut self.viewport,
+                &mut self.fluid_sim,
             );
             crate::ui::viewport_3d(
                 ctx,
@@ -77,7 +78,12 @@ mod app {
             crate::ui::status_bar(ctx, &self.viewport, &self.scene);
 
             if self.show_settings {
-                crate::ui::settings_window(ctx, &mut self.show_settings, &mut self.simulation);
+                crate::ui::settings_window(
+                    ctx,
+                    &mut self.show_settings,
+                    &mut self.simulation,
+                    &mut self.fluid_sim,
+                );
             }
         }
     }

@@ -1,6 +1,7 @@
 use glam::Vec3;
 
 use crate::acoustics::SimulationState;
+use crate::fluids::FluidSimulation;
 use crate::renderer::{
     energy_to_color, project_3d, ray_ground_intersect, render_fluid_slice, screen_to_ray, Camera,
     FluidVisualizationMode,
@@ -194,6 +195,7 @@ pub fn side_panel(
     scene: &mut Scene,
     sim: &mut SimulationState,
     vp: &mut ViewportState,
+    fluid_sim: &mut FluidSimulation,
 ) {
     egui::SidePanel::left("side_panel")
         .default_width(280.0)
@@ -475,6 +477,75 @@ pub fn side_panel(
                     result.energy_grid.len()
                 ));
             }
+
+            ui.separator();
+
+            // --- Fluid Simulation Controls ---
+            egui::CollapsingHeader::new("Fluid Simulation")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let label = if fluid_sim.running { "Stop" } else { "Start" };
+                        if ui.button(label).clicked() {
+                            fluid_sim.running = !fluid_sim.running;
+                        }
+                        if ui.button("Step").clicked() {
+                            fluid_sim.step();
+                        }
+                        if ui.button("Reset").clicked() {
+                            fluid_sim.reset();
+                        }
+                    });
+                    ui.label(format!("Frame: {}", fluid_sim.frame));
+                });
+
+            ui.separator();
+
+            // --- Fluid Visualization ---
+            egui::CollapsingHeader::new("Fluid Visualization")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut vp.show_fluid, "Show Fluid");
+
+                    let mode_label = match vp.fluid_viz_mode {
+                        FluidVisualizationMode::VelocityMagnitude => "Velocity",
+                        FluidVisualizationMode::Pressure => "Pressure",
+                        FluidVisualizationMode::Density => "Density",
+                        FluidVisualizationMode::LevelSet => "LevelSet",
+                    };
+                    egui::ComboBox::from_id_salt("fluid_viz_mode")
+                        .selected_text(mode_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut vp.fluid_viz_mode,
+                                FluidVisualizationMode::VelocityMagnitude,
+                                "Velocity",
+                            );
+                            ui.selectable_value(
+                                &mut vp.fluid_viz_mode,
+                                FluidVisualizationMode::Pressure,
+                                "Pressure",
+                            );
+                            ui.selectable_value(
+                                &mut vp.fluid_viz_mode,
+                                FluidVisualizationMode::Density,
+                                "Density",
+                            );
+                            ui.selectable_value(
+                                &mut vp.fluid_viz_mode,
+                                FluidVisualizationMode::LevelSet,
+                                "LevelSet",
+                            );
+                        });
+
+                    let max_y = fluid_sim
+                        .grid
+                        .as_ref()
+                        .map_or(0, |g| g.ny.saturating_sub(1));
+                    ui.add(
+                        egui::Slider::new(&mut vp.fluid_slice_y, 0..=max_y.max(1)).text("Slice Y"),
+                    );
+                });
         });
 }
 
@@ -835,11 +906,17 @@ pub fn status_bar(ctx: &egui::Context, vp: &ViewportState, scene: &Scene) {
     });
 }
 
-pub fn settings_window(ctx: &egui::Context, open: &mut bool, sim: &mut SimulationState) {
+pub fn settings_window(
+    ctx: &egui::Context,
+    open: &mut bool,
+    sim: &mut SimulationState,
+    fluid_sim: &mut FluidSimulation,
+) {
     egui::Window::new("Simulation Settings")
         .open(open)
         .resizable(false)
         .show(ctx, |ui| {
+            ui.heading("Acoustics");
             ui.add(
                 egui::Slider::new(&mut sim.config.grid_resolution, 0.05..=2.0)
                     .text("Grid Resolution (m)")
@@ -850,6 +927,60 @@ pub fn settings_window(ctx: &egui::Context, open: &mut bool, sim: &mut Simulatio
                     .text("Energy Threshold")
                     .logarithmic(true),
             );
+
+            ui.separator();
+            ui.heading("Fluid");
+
+            let old_resolution = fluid_sim.grid.as_ref().map(|g| g.dx);
+
+            let mut grid_res = fluid_sim.grid.as_ref().map_or(0.1_f32, |g| g.dx);
+            let res_changed = ui
+                .add(egui::Slider::new(&mut grid_res, 0.05..=1.0).text("Grid Resolution (m)"))
+                .changed();
+
+            ui.add(egui::Slider::new(&mut fluid_sim.config.dt, 0.001..=0.1).text("Timestep (s)"));
+            ui.add(egui::Slider::new(&mut fluid_sim.config.viscosity, 0.0..=1.0).text("Viscosity"));
+
+            ui.label("Gravity:");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut fluid_sim.config.gravity.x)
+                        .prefix("x: ")
+                        .speed(0.1),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut fluid_sim.config.gravity.y)
+                        .prefix("y: ")
+                        .speed(0.1),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut fluid_sim.config.gravity.z)
+                        .prefix("z: ")
+                        .speed(0.1),
+                );
+            });
+
+            let mut iters = fluid_sim.config.jacobi_iterations as i32;
+            ui.add(egui::Slider::new(&mut iters, 10..=200).text("Jacobi Iterations"));
+            fluid_sim.config.jacobi_iterations = iters as u32;
+
+            // If grid resolution changed and a grid exists, trigger re-init
+            if res_changed {
+                if let Some(old_dx) = old_resolution {
+                    if (grid_res - old_dx).abs() > 1e-6 {
+                        if let Some(ref grid) = fluid_sim.grid {
+                            let origin = grid.origin;
+                            let extent = Vec3::new(
+                                grid.nx as f32 * old_dx,
+                                grid.ny as f32 * old_dx,
+                                grid.nz as f32 * old_dx,
+                            );
+                            let bounds = (origin, origin + extent);
+                            fluid_sim.initialize(bounds, grid_res, &[]);
+                        }
+                    }
+                }
+            }
         });
 }
 

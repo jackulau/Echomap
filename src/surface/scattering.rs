@@ -503,4 +503,98 @@ mod tests {
             result.diffuse_weight
         );
     }
+
+    #[test]
+    fn test_edge_beckmann_pdf_theta_beyond_pi_over_2() {
+        // theta > pi/2: cos(theta) < 0, guard returns 0.0
+        let pdf = beckmann_pdf(2.0, 0.5); // ~114 degrees
+        assert!(
+            pdf.abs() < EPSILON,
+            "Beckmann PDF for theta > pi/2 should return 0, got {pdf}"
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_theta_exactly_zero() {
+        // theta = 0 exactly: tan(0)=0, cos(0)=1, exp(0)=1
+        // P(0) = 1 / (pi * sigma^2)
+        let roughness = 0.3;
+        let pdf = beckmann_pdf(0.0, roughness);
+        let expected = 1.0 / (std::f32::consts::PI * roughness * roughness);
+        assert!(
+            (pdf - expected).abs() < 0.01,
+            "PDF(0) should be 1/(pi*sigma^2)={expected}, got {pdf}"
+        );
+    }
+
+    #[test]
+    fn test_edge_beckmann_pdf_very_large_roughness() {
+        // Very large roughness: distribution becomes very flat
+        let pdf_center = beckmann_pdf(0.01, 100.0);
+        let pdf_off = beckmann_pdf(1.0, 100.0);
+        assert!(
+            pdf_center.is_finite(),
+            "Large roughness center PDF should be finite"
+        );
+        assert!(
+            pdf_off.is_finite(),
+            "Large roughness off-axis PDF should be finite"
+        );
+        // With roughness=100, distribution is very flat so ratio should be near 1
+        if pdf_center > EPSILON && pdf_off > EPSILON {
+            let ratio = pdf_center / pdf_off;
+            assert!(
+                ratio < 2.0,
+                "Large roughness should have flat distribution, ratio={ratio}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_edge_sample_beckmann_high_roughness_spread() {
+        // High roughness should produce more off-axis samples
+        let roughness = 2.0;
+        let dir = sample_beckmann(roughness, 0.9, 0.25);
+        assert!(dir.is_finite(), "High roughness sample should be finite");
+        assert!(
+            dir.z >= 0.0,
+            "High roughness sample must still be in upper hemisphere"
+        );
+        // With high roughness and u1=0.9, theta should be far from normal
+        assert!(
+            dir.z < 0.9,
+            "High roughness + high u1 should produce off-axis direction, z={}",
+            dir.z
+        );
+    }
+
+    #[test]
+    fn test_edge_scattering_nan_frequency() {
+        let result = compute_scattering(0.01, f32::NAN, 343.0);
+        // NaN.max(1.0) = 1.0 in Rust => proceeds with freq=1.0
+        assert!(
+            result.specular_weight.is_finite() || result.specular_weight.is_nan(),
+            "NaN frequency should not panic"
+        );
+    }
+
+    #[test]
+    fn test_edge_scattering_nan_speed_of_sound() {
+        let result = compute_scattering(0.01, 1000.0, f32::NAN);
+        // NaN.max(1e-6) = 1e-6 in Rust
+        assert!(
+            result.specular_weight.is_finite() || result.specular_weight.is_nan(),
+            "NaN speed_of_sound should not panic"
+        );
+    }
+
+    #[test]
+    fn test_edge_sample_beckmann_nan_roughness() {
+        let dir = sample_beckmann(f32::NAN, 0.5, 0.5);
+        // NaN.max(0.0) = 0.0 in Rust => returns surface normal
+        assert!(
+            (dir.z - 1.0).abs() < 1e-4 || dir.z.is_nan(),
+            "NaN roughness should clamp to 0 or propagate NaN"
+        );
+    }
 }

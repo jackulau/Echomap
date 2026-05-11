@@ -199,6 +199,7 @@ pub fn partition_wall(position: Vec3, width: f32, height: f32, thickness: f32) -
             },
             scattering: 0.2,
             color: [0.9, 0.9, 0.85],
+            ..Default::default()
         },
         visible: true,
         interior_medium: None,
@@ -243,6 +244,7 @@ pub fn platform(position: Vec3, width: f32, depth: f32, height: f32) -> SceneObj
             },
             scattering: 0.3,
             color: [0.6, 0.4, 0.2],
+            ..Default::default()
         },
         visible: true,
         interior_medium: None,

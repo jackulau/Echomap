@@ -7,6 +7,37 @@ pub struct AcousticMaterial {
     pub absorption: FrequencyBands,
     pub scattering: f32,
     pub color: [f32; 3],
+    /// Static friction coefficient (dimensionless, typically 0.1-1.0)
+    #[serde(default = "default_friction_static")]
+    pub friction_static: f32,
+    /// Kinetic friction coefficient (dimensionless, <= friction_static)
+    #[serde(default = "default_friction_kinetic")]
+    pub friction_kinetic: f32,
+    /// Surface roughness in meters RMS
+    #[serde(default = "default_roughness")]
+    pub roughness: f32,
+    /// Volume fraction of void space (0-1)
+    #[serde(default)]
+    pub porosity: f32,
+    /// Darcy permeability in m²
+    #[serde(default)]
+    pub permeability: f32,
+    /// Contact angle in radians (0=hydrophilic, pi=hydrophobic)
+    #[serde(default = "default_contact_angle")]
+    pub contact_angle: f32,
+}
+
+fn default_friction_static() -> f32 {
+    0.6
+}
+fn default_friction_kinetic() -> f32 {
+    0.5
+}
+fn default_roughness() -> f32 {
+    0.002
+}
+fn default_contact_angle() -> f32 {
+    std::f32::consts::FRAC_PI_2
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +111,12 @@ impl Default for AcousticMaterial {
             },
             scattering: 0.1,
             color: [0.7, 0.7, 0.7],
+            friction_static: 0.6,
+            friction_kinetic: 0.5,
+            roughness: 0.002,
+            porosity: 0.15,
+            permeability: 1e-15,
+            contact_angle: std::f32::consts::FRAC_PI_4, // ~45 degrees, moderately hydrophilic
         }
     }
 }
@@ -107,6 +144,12 @@ impl MaterialLibrary {
             },
             scattering: 0.05,
             color: [0.6, 0.8, 0.9],
+            friction_static: 0.4,
+            friction_kinetic: 0.3,
+            roughness: 0.0001,
+            porosity: 0.0,
+            permeability: 0.0,
+            contact_angle: 0.52, // ~30 degrees, hydrophilic
         });
 
         lib.add(AcousticMaterial {
@@ -121,6 +164,12 @@ impl MaterialLibrary {
             },
             scattering: 0.7,
             color: [0.4, 0.3, 0.2],
+            friction_static: 0.8,
+            friction_kinetic: 0.6,
+            roughness: 0.005,
+            porosity: 0.6,
+            permeability: 1e-10,
+            contact_angle: 1.92, // ~110 degrees, hydrophobic (synthetic fibers)
         });
 
         lib.add(AcousticMaterial {
@@ -135,6 +184,12 @@ impl MaterialLibrary {
             },
             scattering: 0.2,
             color: [0.9, 0.9, 0.85],
+            friction_static: 0.5,
+            friction_kinetic: 0.4,
+            roughness: 0.001,
+            porosity: 0.3,
+            permeability: 1e-13,
+            contact_angle: 1.22, // ~70 degrees
         });
 
         lib.add(AcousticMaterial {
@@ -149,6 +204,12 @@ impl MaterialLibrary {
             },
             scattering: 0.3,
             color: [0.6, 0.4, 0.2],
+            friction_static: 0.5,
+            friction_kinetic: 0.35,
+            roughness: 0.0005,
+            porosity: 0.05,
+            permeability: 1e-16,
+            contact_angle: 1.31, // ~75 degrees (finished wood)
         });
 
         lib.add(AcousticMaterial {
@@ -163,6 +224,12 @@ impl MaterialLibrary {
             },
             scattering: 0.8,
             color: [0.2, 0.2, 0.25],
+            friction_static: 0.7,
+            friction_kinetic: 0.55,
+            roughness: 0.003,
+            porosity: 0.95,
+            permeability: 1e-9,
+            contact_angle: 1.75, // ~100 degrees, hydrophobic foam
         });
 
         lib
@@ -581,6 +648,96 @@ mod tests {
             (at_8000 - 0.04).abs() < 1e-6,
             "at_frequency(8000) should clamp to 0.04, got {at_8000}"
         );
+    }
+
+    #[test]
+    fn test_material_physical_properties() {
+        let lib = MaterialLibrary::with_defaults();
+        let concrete = lib.materials.get("Concrete").unwrap();
+        assert!((concrete.friction_static - 0.6).abs() < 0.01);
+        assert!((concrete.roughness - 0.002).abs() < 0.001);
+        assert!((concrete.porosity - 0.15).abs() < 0.01);
+        assert!((concrete.permeability - 1e-15).abs() < 1e-16);
+
+        let glass = lib.materials.get("Glass").unwrap();
+        assert!((glass.friction_static - 0.4).abs() < 0.01);
+        assert!((glass.roughness - 0.0001).abs() < 0.00005);
+        assert!((glass.porosity - 0.0).abs() < 1e-6);
+        assert!((glass.permeability - 0.0).abs() < 1e-20);
+    }
+
+    #[test]
+    fn test_material_default_values() {
+        let mat = AcousticMaterial::default();
+        assert!(mat.friction_static >= 0.0);
+        assert!(mat.friction_kinetic >= 0.0);
+        assert!(mat.friction_static >= mat.friction_kinetic);
+        assert!(mat.roughness >= 0.0);
+        assert!(mat.porosity >= 0.0 && mat.porosity <= 1.0);
+        assert!(mat.permeability >= 0.0);
+        assert!(mat.contact_angle >= 0.0 && mat.contact_angle <= std::f32::consts::PI);
+    }
+
+    #[test]
+    fn test_material_library_presets_physical() {
+        let lib = MaterialLibrary::with_defaults();
+        for (name, mat) in &lib.materials {
+            assert!(
+                mat.friction_static.is_finite(),
+                "{name} friction_static not finite"
+            );
+            assert!(
+                mat.friction_kinetic.is_finite(),
+                "{name} friction_kinetic not finite"
+            );
+            assert!(mat.roughness.is_finite(), "{name} roughness not finite");
+            assert!(mat.porosity.is_finite(), "{name} porosity not finite");
+            assert!(
+                mat.permeability.is_finite(),
+                "{name} permeability not finite"
+            );
+            assert!(
+                mat.contact_angle.is_finite(),
+                "{name} contact_angle not finite"
+            );
+        }
+    }
+
+    #[test]
+    fn test_friction_static_ge_kinetic() {
+        let lib = MaterialLibrary::with_defaults();
+        for (name, mat) in &lib.materials {
+            assert!(
+                mat.friction_static >= mat.friction_kinetic,
+                "{name}: friction_static ({}) < friction_kinetic ({})",
+                mat.friction_static,
+                mat.friction_kinetic
+            );
+        }
+    }
+
+    #[test]
+    fn test_porosity_range() {
+        let lib = MaterialLibrary::with_defaults();
+        for (name, mat) in &lib.materials {
+            assert!(
+                mat.porosity >= 0.0 && mat.porosity <= 1.0,
+                "{name}: porosity {} not in [0, 1]",
+                mat.porosity
+            );
+        }
+    }
+
+    #[test]
+    fn test_contact_angle_range() {
+        let lib = MaterialLibrary::with_defaults();
+        for (name, mat) in &lib.materials {
+            assert!(
+                mat.contact_angle >= 0.0 && mat.contact_angle <= std::f32::consts::PI,
+                "{name}: contact_angle {} not in [0, pi]",
+                mat.contact_angle
+            );
+        }
     }
 
     #[test]

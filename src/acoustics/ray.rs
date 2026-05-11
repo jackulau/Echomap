@@ -661,6 +661,7 @@ mod tests {
             },
             scattering: 0.0,
             color: [1.0, 1.0, 1.0],
+            ..Default::default()
         };
 
         ray.reflect(&hit, &material);

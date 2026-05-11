@@ -1,5 +1,13 @@
+use crate::scene::material::MediumProperties;
 use crate::scene::{AcousticMaterial, Triangle};
 use glam::Vec3;
+
+pub struct RefractionResult {
+    pub reflected_direction: Vec3,
+    pub reflected_energy: f32,
+    pub transmitted_direction: Option<Vec3>,
+    pub transmitted_energy: f32,
+}
 
 pub struct AcousticRay {
     pub origin: Vec3,
@@ -7,6 +15,8 @@ pub struct AcousticRay {
     pub energy: f32,
     pub bounces: u32,
     pub path: Vec<Vec3>,
+    pub current_medium: MediumProperties,
+    pub frequency_hz: f32,
 }
 
 pub struct RayHit {
@@ -17,13 +27,15 @@ pub struct RayHit {
 }
 
 impl AcousticRay {
-    pub fn new(origin: Vec3, direction: Vec3, energy: f32) -> Self {
+    pub fn new(origin: Vec3, direction: Vec3, energy: f32, medium: MediumProperties) -> Self {
         Self {
             origin,
             direction: direction.normalize(),
             energy,
             bounces: 0,
             path: vec![origin],
+            current_medium: medium,
+            frequency_hz: 1000.0,
         }
     }
 
@@ -70,5 +82,605 @@ impl AcousticRay {
         self.direction = self.direction.normalize();
         self.bounces += 1;
         self.path.push(hit.point);
+    }
+
+    /// Compute refraction at a medium boundary using Snell's law and Fresnel
+    /// equations for acoustic impedance.
+    ///
+    /// Returns `None` only when the computation is degenerate (e.g. zero-length
+    /// direction). Total internal reflection is represented by
+    /// `transmitted_direction = None` inside the returned `RefractionResult`.
+    pub fn refract(
+        &self,
+        hit_normal: Vec3,
+        new_medium: &MediumProperties,
+    ) -> Option<RefractionResult> {
+        let z1 = self.current_medium.impedance;
+        let z2 = new_medium.impedance;
+
+        // Guard: if both impedances are near-zero, treat as no boundary
+        if (z1 + z2).abs() < 1e-10 {
+            return Some(RefractionResult {
+                reflected_direction: self.direction,
+                reflected_energy: 0.0,
+                transmitted_direction: Some(self.direction),
+                transmitted_energy: self.energy,
+            });
+        }
+
+        let c1 = self.current_medium.speed_of_sound;
+        let c2 = new_medium.speed_of_sound;
+
+        // Ensure normal points against the ray direction (toward the incoming ray)
+        let n = if self.direction.dot(hit_normal) < 0.0 {
+            hit_normal
+        } else {
+            -hit_normal
+        };
+
+        let cos_theta1 = (-self.direction.dot(n)).clamp(0.0, 1.0);
+        let sin_theta1 = (1.0 - cos_theta1 * cos_theta1).max(0.0).sqrt();
+
+        // Snell's law: sin(theta2) = (c2/c1) * sin(theta1)
+        let sin_theta2 = (c2 / c1) * sin_theta1;
+
+        // Total internal reflection
+        if sin_theta2 >= 1.0 - f32::EPSILON {
+            let reflected_dir = self.direction - 2.0 * self.direction.dot(n) * n;
+            return Some(RefractionResult {
+                reflected_direction: reflected_dir.normalize(),
+                reflected_energy: self.energy,
+                transmitted_direction: None,
+                transmitted_energy: 0.0,
+            });
+        }
+
+        let cos_theta2 = (1.0 - sin_theta2 * sin_theta2).max(0.0).sqrt();
+
+        // Fresnel reflection coefficient for acoustic impedance:
+        // R = ((Z2*cos_theta1 - Z1*cos_theta2) / (Z2*cos_theta1 + Z1*cos_theta2))^2
+        let numerator = z2 * cos_theta1 - z1 * cos_theta2;
+        let denominator = z2 * cos_theta1 + z1 * cos_theta2;
+
+        let r = if denominator.abs() < 1e-10 {
+            0.0
+        } else {
+            (numerator / denominator).powi(2)
+        };
+        let t = 1.0 - r;
+
+        // Reflected direction
+        let reflected_dir = self.direction - 2.0 * self.direction.dot(n) * n;
+
+        // Transmitted (refracted) direction via Snell's law
+        // t_dir = (c2/c1)*d + ((c2/c1)*cos_theta1 - cos_theta2)*n
+        let ratio = c2 / c1;
+        let transmitted_dir = ratio * self.direction + (ratio * cos_theta1 - cos_theta2) * n;
+
+        Some(RefractionResult {
+            reflected_direction: reflected_dir.normalize(),
+            reflected_energy: self.energy * r,
+            transmitted_direction: Some(transmitted_dir.normalize()),
+            transmitted_energy: self.energy * t,
+        })
+    }
+
+    /// Apply volumetric attenuation based on distance traveled in the current
+    /// medium. Uses the frequency-dependent attenuation coefficient from
+    /// `current_medium.attenuation`.
+    pub fn apply_volumetric_attenuation(&mut self, distance: f32) {
+        let atten_db_per_m = self
+            .current_medium
+            .attenuation
+            .at_frequency(self.frequency_hz);
+        // Convert dB attenuation to linear factor: factor = 10^(-atten*distance/10)
+        let total_atten_db = atten_db_per_m * distance;
+        let factor = 10.0_f32.powf(-total_atten_db / 10.0);
+        self.energy *= factor;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scene::material::{MediumLibrary, MediumProperties};
+
+    fn air() -> MediumProperties {
+        MediumProperties::air()
+    }
+
+    fn water() -> MediumProperties {
+        let lib = MediumLibrary::with_defaults();
+        lib.get("Water").unwrap().clone()
+    }
+
+    #[test]
+    fn test_refraction_air_to_water_normal_incidence() {
+        // At normal incidence (theta1=0), theta2 should also be 0
+        // Direction straight down, normal pointing up
+        let ray = AcousticRay {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            energy: 1.0,
+            bounces: 0,
+            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            current_medium: air(),
+            frequency_hz: 1000.0,
+        };
+
+        let water_med = water();
+        let normal = Vec3::new(0.0, 1.0, 0.0); // surface normal pointing up
+
+        let result = ray.refract(normal, &water_med).unwrap();
+
+        // Transmitted direction should be straight down (same as incident at normal)
+        let transmitted = result.transmitted_direction.unwrap();
+        assert!(
+            (transmitted.y - (-1.0)).abs() < 0.01,
+            "At normal incidence, transmitted dir should be (0,-1,0), got {:?}",
+            transmitted
+        );
+
+        // Energy should split by impedance ratio
+        // Z_air = 1.225*343 = 420.175, Z_water = 998*1481 = 1478038
+        // R = ((Z2-Z1)/(Z2+Z1))^2 at normal incidence
+        let z_air = air().impedance;
+        let z_water = water_med.impedance;
+        let expected_r = ((z_water - z_air) / (z_water + z_air)).powi(2);
+        let expected_t = 1.0 - expected_r;
+
+        assert!(
+            (result.reflected_energy - expected_r).abs() < 0.001,
+            "Reflected energy: expected {expected_r}, got {}",
+            result.reflected_energy
+        );
+        assert!(
+            (result.transmitted_energy - expected_t).abs() < 0.001,
+            "Transmitted energy: expected {expected_t}, got {}",
+            result.transmitted_energy
+        );
+    }
+
+    #[test]
+    fn test_refraction_air_to_water_45_degrees() {
+        // Air→Water at 45 deg: sin(theta2) = (1481/343)*sin(45) ≈ 3.05 > 1
+        // This exceeds the critical angle (~13.4 deg), so total reflection occurs.
+        // Verify the implementation correctly detects TIR at this angle.
+        let dir = Vec3::new(1.0, -1.0, 0.0).normalize();
+        let ray = AcousticRay {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: dir,
+            energy: 1.0,
+            bounces: 0,
+            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            current_medium: air(),
+            frequency_hz: 1000.0,
+        };
+
+        let water_med = water();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        let result = ray.refract(normal, &water_med).unwrap();
+
+        // At 45 deg air->water: sin_theta2 > 1 → total reflection
+        assert!(
+            result.transmitted_direction.is_none(),
+            "Air-to-water at 45 deg should be total reflection (sin_theta2 > 1)"
+        );
+        assert!(
+            (result.reflected_energy - 1.0).abs() < 0.001,
+            "All energy should be reflected in TIR"
+        );
+    }
+
+    #[test]
+    fn test_refraction_air_to_water_small_angle() {
+        // Use 5 degrees (well below critical angle of ~13.4 deg for air->water)
+        let angle = 5.0_f32.to_radians();
+        let dir = Vec3::new(angle.sin(), -angle.cos(), 0.0).normalize();
+        let ray = AcousticRay {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: dir,
+            energy: 1.0,
+            bounces: 0,
+            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            current_medium: air(),
+            frequency_hz: 1000.0,
+        };
+
+        let water_med = water();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        let result = ray.refract(normal, &water_med).unwrap();
+        let transmitted = result.transmitted_direction.unwrap();
+
+        // Snell: sin(theta2) = (1481/343)*sin(5deg) = 4.316*0.08716 = 0.3762
+        // theta2 = arcsin(0.3762) ≈ 22.09 deg
+        let expected_sin_theta2 = (1481.0 / 343.0) * (5.0_f32.to_radians().sin());
+        let expected_theta2 = expected_sin_theta2.asin();
+
+        // The transmitted direction should have sin(angle) ≈ expected
+        // transmitted is normalized, so its x component = sin(angle_from_normal)
+        let actual_sin = transmitted.x.abs(); // x component = sin of angle from y-axis normal
+        assert!(
+            (actual_sin - expected_sin_theta2).abs() < 0.02,
+            "Snell angle mismatch: expected sin(theta2)={expected_sin_theta2:.4}, got {actual_sin:.4}, expected theta2={:.1}deg",
+            expected_theta2.to_degrees()
+        );
+    }
+
+    #[test]
+    fn test_total_internal_reflection_water_to_air() {
+        // Water to air: critical angle ≈ 13.4 deg
+        // Use 20 degrees (above critical) → should get TIR
+        let angle = 20.0_f32.to_radians();
+        let dir = Vec3::new(angle.sin(), -angle.cos(), 0.0).normalize();
+        let ray = AcousticRay {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: dir,
+            energy: 1.0,
+            bounces: 0,
+            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            current_medium: water(),
+            frequency_hz: 1000.0,
+        };
+
+        let air_med = air();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        let result = ray.refract(normal, &air_med).unwrap();
+
+        // sin(theta2) = (c_air/c_water)*sin(20deg) = (343/1481)*0.342 = 0.0792
+        // Hmm that's < 1. Let me recalculate.
+        // Water to air: c1=1481, c2=343
+        // sin(theta2) = (343/1481)*sin(20) = 0.2316*0.342 = 0.0792
+        // That's NOT TIR. For TIR water→air we need sin(theta2) >= 1
+        // sin(theta2) = (c2/c1)*sin(theta1) = (343/1481)*sin(theta1) = 0.2316*sin(theta1)
+        // For TIR: 0.2316*sin(theta1) >= 1 → sin(theta1) >= 4.32 → impossible!
+        //
+        // Wait, I got confused. Water→air is c1=1481 (fast), c2=343 (slow).
+        // sin(theta2) = (c2/c1)*sin(theta1) = (343/1481)*sin(theta1) < sin(theta1)
+        // So the refracted ray bends TOWARD normal. TIR never happens going
+        // from fast to slow!
+        //
+        // TIR happens going from SLOW to FAST:
+        // Air→water: c1=343, c2=1481. sin(theta2) = (1481/343)*sin(theta1)
+        // Critical angle: sin(theta_c) = c1/c2 = 343/1481 = 0.2316 → 13.4 deg
+        //
+        // So the spec's "water to air" test for TIR is about rays IN water
+        // hitting a boundary where the OTHER side is air. In that case:
+        // c1=1481 (water, current), c2=343 (air, new). sin_theta2 < sin_theta1.
+        // NO TIR possible.
+        //
+        // But the spec says "test_total_internal_reflection_water_to_air"
+        // with "angle beyond critical → transmitted_direction is None".
+        // The critical angle test in Task 1 computes c_air/c_water = 343/1481
+        // for water→air. That's the Snell ratio which is < 1. sin(theta2) < sin(theta1).
+        // So NO TIR for water→air.
+        //
+        // Hmm, the spec's test_snells_law_critical_angle says:
+        // "sin(θ_c) = c2/c1 = 343/1481" for water→air: c1=1481, c2=343.
+        // Critical when sin(theta2)=1: (c2/c1)*sin(theta_c)=1 → sin(theta_c)=c1/c2=1481/343=4.32
+        // That's impossible! So no TIR from water→air with our Snell convention.
+        //
+        // The Task 1 test actually says "sin(θ_c) = c_air / c_water = 343/1481 ≈ 0.2316 → 13.39°"
+        // But this isn't the critical angle for water→air in the sense of TIR.
+        // It's really the critical angle for air→water (where c2/c1 > 1).
+        //
+        // For TIR to occur: sin_theta2 = (c2/c1)*sin_theta1 >= 1.
+        // Requires c2 > c1. So for air→water boundary (c1=343, c2=1481):
+        // critical angle = arcsin(c1/c2) = arcsin(343/1481) = 13.4 deg
+        // Beyond 13.4 deg from air into water → TIR.
+        //
+        // The test name "water_to_air" likely means: a ray traveling in FAST medium
+        // (water) hitting boundary to SLOW medium (air). Actually no, with our
+        // formula: c1=water, c2=air → c2/c1 < 1 → sin_theta2 < sin_theta1 → never TIR.
+        //
+        // I think the spec means it the other way: when approaching water/air boundary
+        // from the water side at a steep angle. Let me re-interpret:
+        // The spec references the Task 1 critical angle test which calculates 13.4°.
+        // That means for a ray in water hitting an air boundary at > 13.4° → TIR.
+        // But with our Snell formula sin_theta2 = (c_air/c_water)*sin_theta1,
+        // this is always < 1. No TIR.
+        //
+        // The confusion is which convention. Let me use the standard physics:
+        // For a ray going from medium 1 to medium 2 at an interface,
+        // n1*sin(theta1) = n2*sin(theta2) where n = c_ref/c (refractive index).
+        // Or equivalently: sin(theta1)/c1 = sin(theta2)/c2
+        // → sin(theta2) = (c2/c1)*sin(theta1)
+        //
+        // With c2 > c1: sin(theta2) > sin(theta1). TIR when sin(theta2) >= 1.
+        // Critical: sin(theta_c) = c1/c2.
+        //
+        // So TIR only occurs when going from slow (c1) to fast (c2).
+        // Air(343) → Water(1481): slow to fast → TIR possible. Critical angle = arcsin(343/1481) = 13.4°
+        // Water(1481) → Air(343): fast to slow → no TIR ever.
+        //
+        // The spec test name says "water_to_air" but the physics says TIR is
+        // for air→water. I'll test TIR with an air→water ray beyond 13.4°
+        // to match the actual physics.
+
+        // This test should NOT be TIR since water→air has c2 < c1
+        assert!(
+            result.transmitted_direction.is_some(),
+            "Water to air should transmit (no TIR possible)"
+        );
+    }
+
+    #[test]
+    fn test_total_internal_reflection_slow_to_fast() {
+        // Air → Water at 20 degrees (beyond critical angle of ~13.4 deg)
+        let angle = 20.0_f32.to_radians();
+        let dir = Vec3::new(angle.sin(), -angle.cos(), 0.0).normalize();
+        let ray = AcousticRay {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: dir,
+            energy: 1.0,
+            bounces: 0,
+            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            current_medium: air(),
+            frequency_hz: 1000.0,
+        };
+
+        let water_med = water();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        let result = ray.refract(normal, &water_med).unwrap();
+
+        // sin(theta2) = (1481/343)*sin(20deg) = 4.316*0.342 = 1.476 > 1 → TIR
+        assert!(
+            result.transmitted_direction.is_none(),
+            "Air to water at 20 deg (beyond critical) should be total internal reflection"
+        );
+        assert!(
+            (result.reflected_energy - 1.0).abs() < 0.001,
+            "All energy should be reflected in TIR, got {}",
+            result.reflected_energy
+        );
+        assert!(
+            result.transmitted_energy.abs() < 0.001,
+            "No energy should be transmitted in TIR, got {}",
+            result.transmitted_energy
+        );
+    }
+
+    #[test]
+    fn test_fresnel_normal_incidence_air_water() {
+        // At normal incidence: R = ((Z2-Z1)/(Z2+Z1))^2
+        // Z_air = 1.225*343 = 420.175
+        // Z_water = 998*1481 = 1,478,038
+        // R = ((1478038-420.175)/(1478038+420.175))^2 ≈ 0.99943
+        // So most energy is REFLECTED, very little transmitted.
+        // T ≈ 0.00057
+
+        let ray = AcousticRay {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            energy: 1.0,
+            bounces: 0,
+            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            current_medium: air(),
+            frequency_hz: 1000.0,
+        };
+
+        let water_med = water();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        let result = ray.refract(normal, &water_med).unwrap();
+
+        let z_air = air().impedance;
+        let z_water = water_med.impedance;
+        let expected_r = ((z_water - z_air) / (z_water + z_air)).powi(2);
+
+        // R should be very close to 1 (massive impedance mismatch)
+        assert!(
+            (result.reflected_energy - expected_r).abs() < 0.001,
+            "Fresnel R at normal incidence: expected {expected_r:.6}, got {:.6}",
+            result.reflected_energy
+        );
+
+        // T = 1 - R should be very small
+        let expected_t = 1.0 - expected_r;
+        assert!(
+            (result.transmitted_energy - expected_t).abs() < 0.001,
+            "Fresnel T at normal incidence: expected {expected_t:.6}, got {:.6}",
+            result.transmitted_energy
+        );
+
+        // Verify R + T = 1.0
+        assert!(
+            (result.reflected_energy + result.transmitted_energy - 1.0).abs() < 1e-5,
+            "Energy not conserved: R={} + T={} = {}",
+            result.reflected_energy,
+            result.transmitted_energy,
+            result.reflected_energy + result.transmitted_energy
+        );
+    }
+
+    #[test]
+    fn test_fresnel_energy_conservation() {
+        // Test that R + T = 1.0 for multiple angles below the critical angle
+        // Air → Water critical angle ≈ 13.4 deg. Test at 2, 5, 8, 10, 12 deg.
+        let water_med = water();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        for angle_deg in [2.0_f32, 5.0, 8.0, 10.0, 12.0] {
+            let angle = angle_deg.to_radians();
+            let dir = Vec3::new(angle.sin(), -angle.cos(), 0.0).normalize();
+            let ray = AcousticRay {
+                origin: Vec3::new(0.0, 1.0, 0.0),
+                direction: dir,
+                energy: 1.0,
+                bounces: 0,
+                path: vec![Vec3::new(0.0, 1.0, 0.0)],
+                current_medium: air(),
+                frequency_hz: 1000.0,
+            };
+
+            let result = ray.refract(normal, &water_med).unwrap();
+            let total = result.reflected_energy + result.transmitted_energy;
+            assert!(
+                (total - 1.0).abs() < 1e-4,
+                "Energy not conserved at {angle_deg} deg: R={} + T={} = {total}",
+                result.reflected_energy,
+                result.transmitted_energy
+            );
+        }
+    }
+
+    #[test]
+    fn test_volumetric_attenuation_reduces_energy() {
+        let mut ray = AcousticRay::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            water(),
+        );
+        ray.frequency_hz = 1000.0;
+
+        let initial_energy = ray.energy;
+        ray.apply_volumetric_attenuation(10.0); // 10m in water
+
+        assert!(
+            ray.energy < initial_energy,
+            "Energy should decrease after attenuation: {} >= {}",
+            ray.energy,
+            initial_energy
+        );
+        assert!(
+            ray.energy > 0.0,
+            "Energy should remain positive, got {}",
+            ray.energy
+        );
+    }
+
+    #[test]
+    fn test_volumetric_attenuation_frequency_dependent() {
+        // High frequency should attenuate more than low frequency
+        let mut ray_low = AcousticRay::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            water(),
+        );
+        ray_low.frequency_hz = 125.0;
+
+        let mut ray_high = AcousticRay::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            water(),
+        );
+        ray_high.frequency_hz = 4000.0;
+
+        ray_low.apply_volumetric_attenuation(100.0);
+        ray_high.apply_volumetric_attenuation(100.0);
+
+        assert!(
+            ray_high.energy < ray_low.energy,
+            "High freq ({}) should attenuate more than low freq ({}) in water",
+            ray_high.energy,
+            ray_low.energy
+        );
+    }
+
+    #[test]
+    fn test_refraction_same_medium_no_change() {
+        // Air-to-air boundary: same medium, should be R≈0, T≈1, direction unchanged
+        let dir = Vec3::new(0.3, -0.9, 0.1).normalize();
+        let ray = AcousticRay {
+            origin: Vec3::new(0.0, 1.0, 0.0),
+            direction: dir,
+            energy: 1.0,
+            bounces: 0,
+            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            current_medium: air(),
+            frequency_hz: 1000.0,
+        };
+
+        let air_med = air();
+        let normal = Vec3::new(0.0, 1.0, 0.0);
+
+        let result = ray.refract(normal, &air_med).unwrap();
+
+        // R should be ~0 (same impedance)
+        assert!(
+            result.reflected_energy.abs() < 1e-4,
+            "Same medium: R should be ~0, got {}",
+            result.reflected_energy
+        );
+
+        // T should be ~1
+        assert!(
+            (result.transmitted_energy - 1.0).abs() < 1e-4,
+            "Same medium: T should be ~1, got {}",
+            result.transmitted_energy
+        );
+
+        // Transmitted direction should match incident direction
+        let transmitted = result.transmitted_direction.unwrap();
+        assert!(
+            (transmitted.x - dir.x).abs() < 0.01
+                && (transmitted.y - dir.y).abs() < 0.01
+                && (transmitted.z - dir.z).abs() < 0.01,
+            "Same medium: direction should be unchanged. Expected {:?}, got {:?}",
+            dir,
+            transmitted
+        );
+    }
+
+    #[test]
+    fn test_existing_reflect_still_works() {
+        use crate::scene::material::FrequencyBands;
+
+        let mut ray = AcousticRay::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            air(),
+        );
+
+        let hit = RayHit {
+            point: Vec3::new(5.0, 0.0, 0.0),
+            normal: Vec3::new(-1.0, 0.0, 0.0),
+            distance: 5.0,
+            triangle_index: 0,
+        };
+
+        let material = AcousticMaterial {
+            name: "Test".into(),
+            absorption: FrequencyBands {
+                hz_125: 0.1,
+                hz_250: 0.1,
+                hz_500: 0.1,
+                hz_1000: 0.1,
+                hz_2000: 0.1,
+                hz_4000: 0.1,
+            },
+            scattering: 0.0,
+            color: [1.0, 1.0, 1.0],
+        };
+
+        ray.reflect(&hit, &material);
+
+        // Energy should be reduced by absorption (0.1 average)
+        assert!(
+            (ray.energy - 0.9).abs() < 0.01,
+            "Energy after reflect: expected 0.9, got {}",
+            ray.energy
+        );
+
+        // Direction should be reflected (x was +1, normal is -x, reflected should be -x)
+        assert!(
+            (ray.direction.x - (-1.0)).abs() < 0.01,
+            "Reflected direction x: expected -1.0, got {}",
+            ray.direction.x
+        );
+
+        // Bounce count incremented
+        assert_eq!(ray.bounces, 1, "Bounce count should be 1");
+
+        // Path updated
+        assert_eq!(ray.path.len(), 2, "Path should have 2 points");
     }
 }

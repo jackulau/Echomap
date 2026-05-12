@@ -9,4 +9,12 @@ setup(
     install_requires=[
         "websocket-client",
     ],
+    extras_require={
+        "llm": ["anthropic"],
+    },
+    entry_points={
+        "console_scripts": [
+            "echomap-boxing=echomap_client.cli:main",
+        ],
+    },
 )

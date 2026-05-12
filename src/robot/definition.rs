@@ -19,6 +19,27 @@ pub enum CollisionShape {
     Cylinder { radius: f32, height: f32 },
 }
 
+/// Body zone for damage calculation in combat.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum BodyZone {
+    Head,
+    Body,
+    LeftArm,
+    RightArm,
+}
+
+impl BodyZone {
+    /// Returns the damage multiplier for this body zone.
+    pub fn damage_multiplier(&self) -> f32 {
+        match self {
+            BodyZone::Head => 3.0,
+            BodyZone::Body => 1.0,
+            BodyZone::LeftArm => 0.5,
+            BodyZone::RightArm => 0.5,
+        }
+    }
+}
+
 /// Sensor type definition.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum SensorDefinition {
@@ -45,6 +66,8 @@ pub struct LinkDefinition {
     pub inertia: f32,
     pub collision_shape: CollisionShape,
     pub parent_joint: Option<usize>,
+    #[serde(default)]
+    pub body_zone: Option<BodyZone>,
 }
 
 /// A joint connecting a parent link to a child link.
@@ -96,6 +119,7 @@ impl RobotDefinition {
                 half_extents: Vec3::new(0.1, 0.1, 0.1),
             },
             parent_joint: None,
+            body_zone: Some(BodyZone::Body),
         });
 
         for i in 0..num_joints {
@@ -123,6 +147,7 @@ impl RobotDefinition {
                     height: 0.5,
                 },
                 parent_joint: Some(i),
+                body_zone: None,
             });
         }
 
@@ -272,6 +297,42 @@ mod tests {
                 "Link '{}' has non-positive mass: {}",
                 link.name,
                 link.mass
+            );
+        }
+    }
+
+    #[test]
+    fn test_body_zone_multipliers() {
+        assert!((BodyZone::Head.damage_multiplier() - 3.0).abs() < 1e-6);
+        assert!((BodyZone::Body.damage_multiplier() - 1.0).abs() < 1e-6);
+        assert!((BodyZone::LeftArm.damage_multiplier() - 0.5).abs() < 1e-6);
+        assert!((BodyZone::RightArm.damage_multiplier() - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_link_definition_default_zone() {
+        let json = r#"{
+            "name": "test",
+            "mass": 1.0,
+            "inertia": 0.1,
+            "collision_shape": {"Sphere": {"radius": 0.5}},
+            "parent_joint": null
+        }"#;
+        let link: LinkDefinition = serde_json::from_str(json).expect("deserialization failed");
+        assert!(link.body_zone.is_none(), "body_zone should default to None");
+    }
+
+    #[test]
+    fn test_simple_arm_has_zones() {
+        let arm = RobotDefinition::simple_arm(3);
+        // Base link should have Body zone
+        assert_eq!(arm.links[0].body_zone, Some(BodyZone::Body));
+        // Non-base arm links should have None (generic arm segments)
+        for link in &arm.links[1..] {
+            assert!(
+                link.body_zone.is_none(),
+                "Arm segment '{}' should have no zone",
+                link.name
             );
         }
     }

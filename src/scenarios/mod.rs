@@ -149,6 +149,7 @@ pub fn make_simple_robot() -> RobotDefinition {
                     half_extents: Vec3::splat(0.1),
                 },
                 parent_joint: None,
+                    body_zone: None,
             },
             LinkDefinition {
                 name: "arm".to_string(),
@@ -159,6 +160,7 @@ pub fn make_simple_robot() -> RobotDefinition {
                     height: 0.5,
                 },
                 parent_joint: Some(0),
+                    body_zone: None,
             },
             LinkDefinition {
                 name: "end_effector".to_string(),
@@ -166,6 +168,7 @@ pub fn make_simple_robot() -> RobotDefinition {
                 inertia: 0.05,
                 collision_shape: CollisionShape::Sphere { radius: 0.03 },
                 parent_joint: Some(1),
+                    body_zone: None,
             },
         ],
         joints: vec![

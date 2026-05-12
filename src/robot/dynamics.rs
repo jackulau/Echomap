@@ -87,6 +87,7 @@ mod tests {
                         half_extents: Vec3::splat(0.1),
                     },
                     parent_joint: None,
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "link_1".to_string(),
@@ -97,6 +98,7 @@ mod tests {
                         height: 0.5,
                     },
                     parent_joint: Some(0),
+                    body_zone: None,
                 },
             ],
             joints: vec![JointDefinition {
@@ -403,6 +405,7 @@ mod tests {
                 inertia: 1.0,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: Vec::new(),

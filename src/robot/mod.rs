@@ -389,6 +389,7 @@ mod tests {
                     half_extents: glam::Vec3::splat(0.1),
                 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![SensorMount {
@@ -720,6 +721,7 @@ mod tests {
                     half_extents: glam::Vec3::splat(0.1),
                 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![SensorMount {
@@ -957,6 +959,7 @@ mod tests {
                         half_extents: Vec3::splat(0.1),
                     },
                     parent_joint: None,
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "sensor_arm".into(),
@@ -964,6 +967,7 @@ mod tests {
                     inertia: 0.1,
                     collision_shape: CollisionShape::Sphere { radius: 0.05 },
                     parent_joint: Some(0),
+                    body_zone: None,
                 },
             ],
             joints: vec![JointDefinition {
@@ -1263,6 +1267,7 @@ mod tests {
                         half_extents: Vec3::splat(0.1),
                     },
                     parent_joint: None,
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "link_1".into(),
@@ -1273,6 +1278,7 @@ mod tests {
                         height: 0.5,
                     },
                     parent_joint: Some(0),
+                    body_zone: None,
                 },
             ],
             joints: vec![JointDefinition {
@@ -1638,6 +1644,7 @@ mod tests {
                     half_extents: glam::Vec3::splat(0.1),
                 },
                 parent_joint: None,
+                    body_zone: None,
             },
             LinkDefinition {
                 name: "link1".into(),
@@ -1648,6 +1655,7 @@ mod tests {
                     height: 0.5,
                 },
                 parent_joint: Some(0),
+                    body_zone: None,
             },
             LinkDefinition {
                 name: "link2".into(),
@@ -1658,6 +1666,7 @@ mod tests {
                     height: 0.4,
                 },
                 parent_joint: Some(1),
+                    body_zone: None,
             },
             LinkDefinition {
                 name: "link3".into(),
@@ -1665,6 +1674,7 @@ mod tests {
                 inertia: 0.05,
                 collision_shape: CollisionShape::Sphere { radius: 0.08 },
                 parent_joint: Some(2),
+                    body_zone: None,
             },
         ];
         let joints = vec![

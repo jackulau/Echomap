@@ -938,6 +938,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.2 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![SensorMount {
@@ -962,6 +963,7 @@ mod tests {
                         half_extents: Vec3::splat(0.1),
                     },
                     parent_joint: None,
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "child".into(),
@@ -969,6 +971,7 @@ mod tests {
                     inertia: 0.1,
                     collision_shape: CollisionShape::Sphere { radius: 0.3 },
                     parent_joint: Some(0),
+                    body_zone: None,
                 },
             ],
             joints: vec![JointDefinition {
@@ -1162,6 +1165,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![mount.clone()],
@@ -1309,6 +1313,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![],
@@ -1358,6 +1363,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.2 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![

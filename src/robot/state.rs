@@ -333,6 +333,7 @@ mod tests {
                         half_extents: Vec3::new(0.1, 0.1, 0.1),
                     },
                     parent_joint: None,
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "link_1".to_string(),
@@ -343,6 +344,7 @@ mod tests {
                         height: 0.5,
                     },
                     parent_joint: Some(0),
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "link_2".to_string(),
@@ -350,6 +352,7 @@ mod tests {
                     inertia: 0.1,
                     collision_shape: CollisionShape::Sphere { radius: 0.1 },
                     parent_joint: Some(1),
+                    body_zone: None,
                 },
             ],
             joints: vec![
@@ -677,6 +680,7 @@ mod tests {
                         half_extents: Vec3::splat(0.1),
                     },
                     parent_joint: None,
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "link_1".to_string(),
@@ -684,6 +688,7 @@ mod tests {
                     inertia: 0.1,
                     collision_shape: CollisionShape::Sphere { radius: 0.1 },
                     parent_joint: Some(0),
+                    body_zone: None,
                 },
                 LinkDefinition {
                     name: "link_2".to_string(),
@@ -691,6 +696,7 @@ mod tests {
                     inertia: 0.1,
                     collision_shape: CollisionShape::Sphere { radius: 0.1 },
                     parent_joint: Some(1),
+                    body_zone: None,
                 },
             ],
             joints: vec![
@@ -897,6 +903,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![],
@@ -1064,6 +1071,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![],
@@ -1086,6 +1094,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
+                    body_zone: None,
             }],
             joints: vec![],
             sensors: vec![],

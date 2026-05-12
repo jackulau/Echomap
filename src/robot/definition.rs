@@ -158,6 +158,77 @@ impl RobotDefinition {
             sensors: Vec::new(),
         }
     }
+
+    /// Factory method for a 3-link boxing test robot (torso + 2 arms).
+    ///
+    /// Creates a robot suitable for combat integration tests with body zones
+    /// assigned to all links: Body (torso), LeftArm, and RightArm.
+    pub fn boxing_test_robot() -> Self {
+        let links = vec![
+            LinkDefinition {
+                name: "torso".to_string(),
+                mass: 10.0,
+                inertia: 2.0,
+                collision_shape: CollisionShape::Cuboid {
+                    half_extents: Vec3::new(0.2, 0.3, 0.15),
+                },
+                parent_joint: None,
+                body_zone: Some(BodyZone::Body),
+            },
+            LinkDefinition {
+                name: "left_arm".to_string(),
+                mass: 2.0,
+                inertia: 0.3,
+                collision_shape: CollisionShape::Cylinder {
+                    radius: 0.05,
+                    height: 0.4,
+                },
+                parent_joint: Some(0),
+                body_zone: Some(BodyZone::LeftArm),
+            },
+            LinkDefinition {
+                name: "right_arm".to_string(),
+                mass: 2.0,
+                inertia: 0.3,
+                collision_shape: CollisionShape::Cylinder {
+                    radius: 0.05,
+                    height: 0.4,
+                },
+                parent_joint: Some(1),
+                body_zone: Some(BodyZone::RightArm),
+            },
+        ];
+        let joints = vec![
+            JointDefinition {
+                name: "left_shoulder".to_string(),
+                joint_type: JointType::Revolute,
+                axis: Vec3::Y,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 20.0,
+                damping: 0.1,
+            },
+            JointDefinition {
+                name: "right_shoulder".to_string(),
+                joint_type: JointType::Revolute,
+                axis: Vec3::Y,
+                parent_link: 0,
+                child_link: 2,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 20.0,
+                damping: 0.1,
+            },
+        ];
+        Self {
+            name: "boxing_test_robot".to_string(),
+            links,
+            joints,
+            sensors: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -2372,4 +2372,264 @@ mod tests {
             "combat state should remain None for non-combat robot"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Task 7: Boxing scenario integration tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_boxing_scenario_full() {
+        // Create 2 boxing_test_robots at the same position, enable combat,
+        // simulate a high-velocity arm via manual pose manipulation, and
+        // verify hits are produced with damage and stamina effects.
+        let def = RobotDefinition::boxing_test_robot();
+        let dt = 0.01_f32;
+
+        let mut robots = vec![
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        // Enable combat on both
+        robots[0].state.combat = Some(CombatState::new(100.0, 100.0));
+        robots[1].state.combat = Some(CombatState::new(100.0, 100.0));
+
+        // Set prev_link_poses to current (all identity = overlapping at origin)
+        robots[0].state.prev_link_poses = robots[0].state.link_poses.clone();
+        robots[1].state.prev_link_poses = robots[1].state.link_poses.clone();
+
+        // Simulate high velocity on robot 0's right_arm (link index 2):
+        // Shift prev pose translation by -5.0 on X so velocity = 5.0 / 0.01 = 500 m/s
+        robots[0].state.prev_link_poses[2][12] -= 5.0;
+
+        let health_before_1 = robots[1].state.combat.as_ref().unwrap().health;
+        let stamina_before_0 = robots[0].state.combat.as_ref().unwrap().stamina;
+
+        let hits = step_combat(&mut robots, dt);
+
+        // Verify hit events were produced
+        assert!(
+            !hits.is_empty(),
+            "boxing scenario should produce hit events"
+        );
+
+        // Verify target (robot 1) took damage
+        let health_after_1 = robots[1].state.combat.as_ref().unwrap().health;
+        assert!(
+            health_after_1 < health_before_1,
+            "target health should decrease: before={}, after={}",
+            health_before_1,
+            health_after_1
+        );
+
+        // Verify attacker (robot 0) consumed stamina (minus regen)
+        let stamina_after_0 = robots[0].state.combat.as_ref().unwrap().stamina;
+        let hits_from_0 = hits.iter().filter(|h| h.attacker_robot == 0).count();
+        let expected_consumption = hits_from_0 as f32 * PUNCH_STAMINA_COST;
+        let regen = 5.0 * dt;
+        let expected_stamina = stamina_before_0 - expected_consumption + regen;
+        assert!(
+            (stamina_after_0 - expected_stamina).abs() < 1.0,
+            "attacker stamina should decrease: before={}, after={}, expected~={}",
+            stamina_before_0,
+            stamina_after_0,
+            expected_stamina
+        );
+
+        // Verify damage tracking
+        assert!(
+            robots[0].state.combat.as_ref().unwrap().total_damage_dealt > 0.0,
+            "attacker should have non-zero total_damage_dealt"
+        );
+        assert!(
+            robots[1]
+                .state
+                .combat
+                .as_ref()
+                .unwrap()
+                .total_damage_received
+                > 0.0,
+            "target should have non-zero total_damage_received"
+        );
+    }
+
+    #[test]
+    fn test_two_robots_mutual_hits() {
+        // Both robots punching simultaneously: both have high-velocity arms,
+        // verify both take damage.
+        let def = RobotDefinition::boxing_test_robot();
+        let dt = 0.01_f32;
+
+        let mut robots = vec![
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        robots[0].state.combat = Some(CombatState::new(100.0, 100.0));
+        robots[1].state.combat = Some(CombatState::new(100.0, 100.0));
+
+        robots[0].state.prev_link_poses = robots[0].state.link_poses.clone();
+        robots[1].state.prev_link_poses = robots[1].state.link_poses.clone();
+
+        // Both robots have high-velocity arms
+        robots[0].state.prev_link_poses[2][12] -= 5.0; // robot 0 right arm
+        robots[1].state.prev_link_poses[1][12] -= 5.0; // robot 1 left arm
+
+        let hits = step_combat(&mut robots, dt);
+
+        // Both robots should have been hit
+        let hits_on_0 = hits.iter().any(|h| h.target_robot == 0);
+        let hits_on_1 = hits.iter().any(|h| h.target_robot == 1);
+
+        assert!(
+            hits_on_0 && hits_on_1,
+            "both robots should take hits in mutual exchange: hits_on_0={}, hits_on_1={}, total_hits={}",
+            hits_on_0,
+            hits_on_1,
+            hits.len()
+        );
+
+        // Both should have reduced health
+        let health_0 = robots[0].state.combat.as_ref().unwrap().health;
+        let health_1 = robots[1].state.combat.as_ref().unwrap().health;
+        assert!(
+            health_0 < 100.0,
+            "robot 0 health should decrease from mutual hits, got {}",
+            health_0
+        );
+        assert!(
+            health_1 < 100.0,
+            "robot 1 health should decrease from mutual hits, got {}",
+            health_1
+        );
+    }
+
+    #[test]
+    fn test_knockdown_stops_combat() {
+        // Start with very low health so one hit causes knockdown, then
+        // verify knockdown flag is set.
+        let def = RobotDefinition::boxing_test_robot();
+        let dt = 0.01_f32;
+
+        let mut robots = vec![
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        robots[0].state.combat = Some(CombatState::new(100.0, 100.0));
+        // Robot 1 starts with very low health so a single hit knocks it down
+        robots[1].state.combat = Some(CombatState::new(1.0, 100.0));
+
+        robots[0].state.prev_link_poses = robots[0].state.link_poses.clone();
+        robots[1].state.prev_link_poses = robots[1].state.link_poses.clone();
+
+        // High-velocity arm on robot 0
+        robots[0].state.prev_link_poses[2][12] -= 5.0;
+
+        let hits = step_combat(&mut robots, dt);
+
+        assert!(
+            !hits.is_empty(),
+            "should produce hit events against low-health target"
+        );
+
+        let combat_1 = robots[1].state.combat.as_ref().unwrap();
+        assert!(
+            combat_1.knockdown,
+            "target with 1.0 HP should be knocked down after taking a hit"
+        );
+        assert!(
+            combat_1.health <= 0.0 + 1e-6,
+            "target health should be 0 after knockdown, got {}",
+            combat_1.health
+        );
+    }
+
+    #[test]
+    fn test_stamina_depletion_weakens_punch() {
+        // Start with low stamina, verify it is consumed per punch and
+        // tracks correctly across hits.
+        let def = RobotDefinition::boxing_test_robot();
+        let dt = 0.01_f32;
+
+        let mut robots = vec![
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        // Robot 0 starts with low stamina (just above one PUNCH_STAMINA_COST).
+        // consume_stamina only deducts when stamina >= cost, so with multiple
+        // overlapping hits only the first consume succeeds.
+        robots[0].state.combat = Some(CombatState::new(100.0, 100.0));
+        robots[0].state.combat.as_mut().unwrap().stamina = PUNCH_STAMINA_COST + 1.0;
+        robots[1].state.combat = Some(CombatState::new(100.0, 100.0));
+
+        let initial_stamina = robots[0].state.combat.as_ref().unwrap().stamina;
+
+        robots[0].state.prev_link_poses = robots[0].state.link_poses.clone();
+        robots[1].state.prev_link_poses = robots[1].state.link_poses.clone();
+
+        // High-velocity arm on robot 0
+        robots[0].state.prev_link_poses[2][12] -= 5.0;
+
+        let hits = step_combat(&mut robots, dt);
+
+        let hits_from_0 = hits.iter().filter(|h| h.attacker_robot == 0).count();
+        assert!(hits_from_0 > 0, "should have landed at least one punch");
+
+        let stamina_after = robots[0].state.combat.as_ref().unwrap().stamina;
+
+        // At least one PUNCH_STAMINA_COST was consumed (subsequent consumes
+        // may fail if stamina dropped below the cost). Regen adds a small
+        // amount (5.0 * dt). Net stamina should be less than initial.
+        assert!(
+            stamina_after < initial_stamina,
+            "stamina should decrease after punching: before={}, after={}",
+            initial_stamina,
+            stamina_after
+        );
+
+        // Verify the exact accounting: one successful consume of PUNCH_STAMINA_COST,
+        // remaining consumes fail (stamina < cost), then regen adds 5.0 * dt.
+        let regen = 5.0 * dt;
+        let expected_after_one_consume = initial_stamina - PUNCH_STAMINA_COST + regen;
+        assert!(
+            (stamina_after - expected_after_one_consume).abs() < 0.5,
+            "should have consumed exactly one PUNCH_STAMINA_COST: expected~={}, got={}",
+            expected_after_one_consume,
+            stamina_after
+        );
+    }
 }

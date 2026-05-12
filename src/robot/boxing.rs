@@ -334,6 +334,7 @@ impl BoxingScenario {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::robot::definition::BodyZone;
 
     fn make_config() -> BoxingMatchConfig {
         BoxingMatchConfig {

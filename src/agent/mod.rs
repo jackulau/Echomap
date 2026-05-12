@@ -1967,6 +1967,7 @@ mod tests {
             step_count: 1,
             messages: vec![],
             hit_events: vec![],
+            match_state: None,
         };
 
         // serde_json succeeds in serializing but produces `null` for NaN/Inf.

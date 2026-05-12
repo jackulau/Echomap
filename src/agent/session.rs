@@ -112,6 +112,7 @@ impl AgentSession {
                     step_count: 0,
                     messages,
                     hit_events,
+                    match_state: None,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -153,6 +154,7 @@ impl AgentSession {
                     step_count: self.step_count,
                     messages,
                     hit_events,
+                    match_state: None,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -191,6 +193,7 @@ impl AgentSession {
                     step_count: self.step_count,
                     messages,
                     hit_events,
+                    match_state: None,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },

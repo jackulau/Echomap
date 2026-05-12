@@ -25,6 +25,7 @@ pub enum ClientMessage {
 /// Messages sent from the server to the client (agent).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ServerMessage {
     Connected {
         observation_space: ObservationSpace,
@@ -39,6 +40,8 @@ pub enum ServerMessage {
         messages: Vec<AgentMessage>,
         #[serde(default)]
         hit_events: Vec<crate::robot::collision::HitEvent>,
+        #[serde(default)]
+        match_state: Option<crate::robot::boxing::BoxingMatchState>,
     },
     MessageSent,
     Error {
@@ -155,6 +158,7 @@ mod tests {
             step_count: 42,
             messages: vec![],
             hit_events: vec![],
+            match_state: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -430,6 +434,7 @@ mod tests {
             step_count: 0,
             messages: vec![],
             hit_events: vec![],
+            match_state: None,
         };
         let json = serde_json::to_string(&msg).expect("NaN serializes to null");
         assert!(json.contains("null"), "NaN should serialize as null");
@@ -522,6 +527,7 @@ mod tests {
             step_count: 0,
             messages: vec![],
             hit_events: vec![],
+            match_state: None,
         };
         let json = serde_json::to_string(&msg).expect("Infinity serializes to null");
         assert!(json.contains("null"), "Infinity should serialize as null");
@@ -646,6 +652,7 @@ mod tests {
                 content: "hey".to_string(),
                 timestamp: 100,
             }],
+            match_state: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ServerMessage = serde_json::from_str(&json).unwrap();

@@ -1,6 +1,7 @@
 use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
+use super::collision::HitEvent;
 use super::definition::RobotDefinition;
 use super::sensors::ImuReading;
 
@@ -28,6 +29,58 @@ pub enum ActuatorCommand {
 
 // ---- Structs ----
 
+/// Combat state tracking health, stamina, and damage statistics for a robot.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CombatState {
+    pub health: f32,
+    pub max_health: f32,
+    pub stamina: f32,
+    pub max_stamina: f32,
+    pub recent_hits: Vec<HitEvent>,
+    pub total_damage_dealt: f32,
+    pub total_damage_received: f32,
+    pub knockdown: bool,
+}
+
+impl CombatState {
+    /// Create a new CombatState with the given max health and stamina.
+    pub fn new(max_health: f32, max_stamina: f32) -> Self {
+        Self {
+            health: max_health,
+            max_health,
+            stamina: max_stamina,
+            max_stamina,
+            recent_hits: Vec::new(),
+            total_damage_dealt: 0.0,
+            total_damage_received: 0.0,
+            knockdown: false,
+        }
+    }
+
+    /// Apply damage, reducing health and setting knockdown if health reaches 0.
+    pub fn apply_damage(&mut self, amount: f32) {
+        self.health = (self.health - amount).max(0.0);
+        if self.health <= 0.0 {
+            self.knockdown = true;
+        }
+    }
+
+    /// Consume stamina for an action. Returns true if enough stamina was available.
+    pub fn consume_stamina(&mut self, amount: f32) -> bool {
+        if self.stamina >= amount {
+            self.stamina -= amount;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Regenerate stamina over time at a rate of 5.0 per second.
+    pub fn regenerate_stamina(&mut self, dt: f32) {
+        self.stamina = (self.stamina + 5.0 * dt).min(self.max_stamina);
+    }
+}
+
 /// Serializable snapshot of the full robot state at a point in time.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RobotState {
@@ -37,6 +90,8 @@ pub struct RobotState {
     pub sensor_readings: Vec<SensorReading>,
     pub actuator_commands: Vec<ActuatorCommand>,
     pub timestamp: f32,
+    #[serde(default)]
+    pub combat: Option<CombatState>,
 }
 
 impl RobotState {
@@ -73,6 +128,7 @@ impl RobotState {
             sensor_readings,
             actuator_commands: Vec::with_capacity(num_sensors),
             timestamp: 0.0,
+            combat: None,
         }
     }
 
@@ -903,7 +959,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             }],
             joints: vec![],
             sensors: vec![],
@@ -1071,7 +1127,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             }],
             joints: vec![],
             sensors: vec![],
@@ -1094,7 +1150,7 @@ mod tests {
                 inertia: 0.1,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             }],
             joints: vec![],
             sensors: vec![],
@@ -1104,6 +1160,97 @@ mod tests {
         assert_eq!(action.num_motors, 0);
         assert!(action.motor_limits.is_empty());
         assert_eq!(action.num_grippers, 0);
+    }
+
+    // ---- Task 2: CombatState tests ----
+
+    #[test]
+    fn test_combat_state_new() {
+        let cs = CombatState::new(100.0, 100.0);
+        assert!((cs.health - 100.0).abs() < 1e-6);
+        assert!((cs.max_health - 100.0).abs() < 1e-6);
+        assert!((cs.stamina - 100.0).abs() < 1e-6);
+        assert!((cs.max_stamina - 100.0).abs() < 1e-6);
+        assert!(cs.recent_hits.is_empty());
+        assert!((cs.total_damage_dealt - 0.0).abs() < 1e-6);
+        assert!((cs.total_damage_received - 0.0).abs() < 1e-6);
+        assert!(!cs.knockdown);
+    }
+
+    #[test]
+    fn test_apply_damage_reduces_health() {
+        let mut cs = CombatState::new(100.0, 100.0);
+        cs.apply_damage(30.0);
+        assert!(
+            (cs.health - 70.0).abs() < 1e-6,
+            "health should be 70 after 30 damage"
+        );
+        // Damage should not go below 0
+        cs.apply_damage(200.0);
+        assert!((cs.health - 0.0).abs() < 1e-6, "health should floor at 0");
+    }
+
+    #[test]
+    fn test_knockdown_on_zero_health() {
+        let mut cs = CombatState::new(50.0, 100.0);
+        assert!(!cs.knockdown);
+        cs.apply_damage(50.0);
+        assert!(
+            cs.knockdown,
+            "knockdown should be true when health reaches 0"
+        );
+    }
+
+    #[test]
+    fn test_consume_stamina_success() {
+        let mut cs = CombatState::new(100.0, 100.0);
+        let ok = cs.consume_stamina(30.0);
+        assert!(ok, "should return true when enough stamina");
+        assert!(
+            (cs.stamina - 70.0).abs() < 1e-6,
+            "stamina should be 70 after consuming 30"
+        );
+    }
+
+    #[test]
+    fn test_consume_stamina_insufficient() {
+        let mut cs = CombatState::new(100.0, 20.0);
+        let ok = cs.consume_stamina(30.0);
+        assert!(!ok, "should return false when insufficient stamina");
+        assert!(
+            (cs.stamina - 20.0).abs() < 1e-6,
+            "stamina should be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_regenerate_stamina() {
+        let mut cs = CombatState::new(100.0, 100.0);
+        cs.consume_stamina(50.0);
+        assert!((cs.stamina - 50.0).abs() < 1e-6);
+        // Regen at 5.0/sec for 2 seconds = +10
+        cs.regenerate_stamina(2.0);
+        assert!(
+            (cs.stamina - 60.0).abs() < 1e-6,
+            "stamina should be 60 after 2s regen"
+        );
+        // Should not exceed max
+        cs.regenerate_stamina(100.0);
+        assert!(
+            (cs.stamina - 100.0).abs() < 1e-6,
+            "stamina should cap at max"
+        );
+    }
+
+    #[test]
+    fn test_robot_state_combat_default_none() {
+        // Deserialize a RobotState JSON that does not include a "combat" field.
+        // The serde default should make it None.
+        let def = test_definition();
+        let state = RobotState::new(&def);
+        let json = serde_json::to_string(&state).expect("serialize");
+        let deser: RobotState = serde_json::from_str(&json).expect("deserialize");
+        assert!(deser.combat.is_none(), "combat should default to None");
     }
 
     #[test]

@@ -1,6 +1,22 @@
 use glam::{Mat3, Quat, Vec3};
+use serde::{Deserialize, Serialize};
 
+use super::definition::BodyZone;
 use crate::scene::SceneObject;
+
+/// A combat hit event capturing the full details of a strike between two robots.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HitEvent {
+    pub attacker_robot: usize,
+    pub target_robot: usize,
+    pub attacker_link: usize,
+    pub target_link: usize,
+    pub zone: BodyZone,
+    pub impact_force: f32,
+    pub damage: f32,
+    pub contact_point: Vec3,
+    pub contact_normal: Vec3,
+}
 
 /// Result of a ray intersection test.
 #[derive(Clone, Debug)]
@@ -748,5 +764,37 @@ mod tests {
             result.is_none(),
             "hit at distance 5 should be beyond max_distance 1"
         );
+    }
+
+    // ---- Task 2: HitEvent serialization test ----
+
+    #[test]
+    fn test_hit_event_serialization() {
+        use crate::robot::definition::BodyZone;
+
+        let hit = HitEvent {
+            attacker_robot: 0,
+            target_robot: 1,
+            attacker_link: 2,
+            target_link: 3,
+            zone: BodyZone::Head,
+            impact_force: 15.0,
+            damage: 45.0,
+            contact_point: Vec3::new(1.0, 2.0, 3.0),
+            contact_normal: Vec3::new(0.0, 1.0, 0.0),
+        };
+
+        let json = serde_json::to_string(&hit).expect("serialize HitEvent");
+        let deser: HitEvent = serde_json::from_str(&json).expect("deserialize HitEvent");
+
+        assert_eq!(deser.attacker_robot, 0);
+        assert_eq!(deser.target_robot, 1);
+        assert_eq!(deser.attacker_link, 2);
+        assert_eq!(deser.target_link, 3);
+        assert_eq!(deser.zone, BodyZone::Head);
+        assert!((deser.impact_force - 15.0).abs() < 1e-6);
+        assert!((deser.damage - 45.0).abs() < 1e-6);
+        assert!((deser.contact_point - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
+        assert!((deser.contact_normal - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6);
     }
 }

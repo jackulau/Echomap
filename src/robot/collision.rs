@@ -1,7 +1,8 @@
-use glam::{Mat3, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 
-use super::definition::BodyZone;
+use super::definition::{BodyZone, CollisionShape, RobotDefinition};
+use super::state::RobotState;
 use crate::scene::SceneObject;
 
 /// A combat hit event capturing the full details of a strike between two robots.
@@ -165,6 +166,111 @@ pub fn aabb_from_link(link_world_pos: Vec3, link_world_rot: Quat, half_extents: 
         center: link_world_pos,
         half_extents: world_half,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Robot-robot collision detection
+// ---------------------------------------------------------------------------
+
+/// Convert a CollisionShape to AABB half-extents.
+#[allow(dead_code)]
+pub fn collision_shape_to_half_extents(shape: &CollisionShape) -> Vec3 {
+    match shape {
+        CollisionShape::Sphere { radius } => Vec3::splat(*radius),
+        CollisionShape::Cuboid { half_extents } => *half_extents,
+        CollisionShape::Cylinder { radius, height } => Vec3::new(*radius, *height / 2.0, *radius),
+    }
+}
+
+/// A collision contact between two links on different robots.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct LinkCollision {
+    pub robot_a: usize,
+    pub link_a: usize,
+    pub robot_b: usize,
+    pub link_b: usize,
+    pub contact_point: Vec3,
+    pub contact_normal: Vec3,
+    pub penetration: f32,
+}
+
+/// Collect world-space AABBs for every link in a robot.
+///
+/// Returns a Vec of `(link_index, Aabb)` pairs.
+#[allow(dead_code)]
+pub fn collect_link_aabbs(definition: &RobotDefinition, state: &RobotState) -> Vec<(usize, Aabb)> {
+    definition
+        .links
+        .iter()
+        .enumerate()
+        .map(|(i, link)| {
+            let mat = Mat4::from_cols_array(&state.link_poses[i]);
+            let pos = mat.w_axis.truncate();
+            let rot = Quat::from_mat4(&mat);
+            let half_extents = collision_shape_to_half_extents(&link.collision_shape);
+            let aabb = aabb_from_link(pos, rot, half_extents);
+            (i, aabb)
+        })
+        .collect()
+}
+
+/// Detect collisions between all pairs of distinct robots.
+///
+/// For each pair of robots (i < j), checks every link-link pair for AABB
+/// overlap and produces a `LinkCollision` for each overlapping pair.
+#[allow(dead_code)]
+pub fn detect_robot_collisions(
+    robots: &[(usize, &RobotDefinition, &RobotState)],
+) -> Vec<LinkCollision> {
+    let mut collisions = Vec::new();
+
+    for i in 0..robots.len() {
+        let (id_a, def_a, state_a) = &robots[i];
+        let aabbs_a = collect_link_aabbs(def_a, state_a);
+
+        for j in (i + 1)..robots.len() {
+            let (id_b, def_b, state_b) = &robots[j];
+            let aabbs_b = collect_link_aabbs(def_b, state_b);
+
+            for &(link_a_idx, ref aabb_a) in &aabbs_a {
+                for &(link_b_idx, ref aabb_b) in &aabbs_b {
+                    if aabb_overlap(aabb_a, aabb_b) {
+                        let contact_point = (aabb_a.center + aabb_b.center) * 0.5;
+
+                        let diff = aabb_b.center - aabb_a.center;
+                        let contact_normal = if diff.length_squared() < f32::EPSILON {
+                            Vec3::X
+                        } else {
+                            diff.normalize()
+                        };
+
+                        // Penetration: min positive overlap across all axes
+                        let mut penetration = f32::MAX;
+                        for axis in 0..3 {
+                            let overlap = (aabb_a.half_extents[axis] + aabb_b.half_extents[axis])
+                                - (aabb_a.center[axis] - aabb_b.center[axis]).abs();
+                            if overlap < penetration {
+                                penetration = overlap;
+                            }
+                        }
+
+                        collisions.push(LinkCollision {
+                            robot_a: *id_a,
+                            link_a: link_a_idx,
+                            robot_b: *id_b,
+                            link_b: link_b_idx,
+                            contact_point,
+                            contact_normal,
+                            penetration,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    collisions
 }
 
 // ---------------------------------------------------------------------------
@@ -796,5 +902,284 @@ mod tests {
         assert!((deser.damage - 45.0).abs() < 1e-6);
         assert!((deser.contact_point - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-6);
         assert!((deser.contact_normal - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3: Robot-robot collision detection tests
+    // -----------------------------------------------------------------------
+
+    use crate::robot::definition::{CollisionShape, LinkDefinition, RobotDefinition};
+    use crate::robot::state::RobotState;
+    use glam::Mat4;
+
+    fn test_robot_def(num_links: usize, shape: CollisionShape) -> RobotDefinition {
+        let links = (0..num_links)
+            .map(|i| LinkDefinition {
+                name: format!("link_{}", i),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: shape.clone(),
+                parent_joint: if i == 0 { None } else { Some(i - 1) },
+                body_zone: None,
+            })
+            .collect();
+        RobotDefinition {
+            name: "test_robot".to_string(),
+            links,
+            joints: vec![],
+            sensors: vec![],
+        }
+    }
+
+    fn test_robot_state(_num_links: usize, link_poses: Vec<Mat4>) -> RobotState {
+        RobotState {
+            joint_positions: vec![],
+            joint_velocities: vec![],
+            link_poses: link_poses.iter().map(|m| m.to_cols_array()).collect(),
+            sensor_readings: vec![],
+            actuator_commands: vec![],
+            timestamp: 0.0,
+            combat: None,
+        }
+    }
+
+    #[test]
+    fn test_collision_shape_to_half_extents() {
+        let sphere = CollisionShape::Sphere { radius: 0.5 };
+        assert!((collision_shape_to_half_extents(&sphere) - Vec3::splat(0.5)).length() < EPSILON);
+
+        let cuboid = CollisionShape::Cuboid {
+            half_extents: Vec3::new(1.0, 2.0, 3.0),
+        };
+        assert!(
+            (collision_shape_to_half_extents(&cuboid) - Vec3::new(1.0, 2.0, 3.0)).length()
+                < EPSILON
+        );
+
+        let cylinder = CollisionShape::Cylinder {
+            radius: 0.3,
+            height: 1.0,
+        };
+        assert!(
+            (collision_shape_to_half_extents(&cylinder) - Vec3::new(0.3, 0.5, 0.3)).length()
+                < EPSILON
+        );
+    }
+
+    #[test]
+    fn test_collect_link_aabbs_simple() {
+        let def = test_robot_def(
+            1,
+            CollisionShape::Cuboid {
+                half_extents: Vec3::splat(0.5),
+            },
+        );
+        let state = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let aabbs = collect_link_aabbs(&def, &state);
+
+        assert_eq!(aabbs.len(), 1);
+        assert_eq!(aabbs[0].0, 0);
+        assert!(
+            aabbs[0].1.center.length() < EPSILON,
+            "center should be at origin"
+        );
+        assert!(
+            (aabbs[0].1.half_extents - Vec3::splat(0.5)).length() < EPSILON,
+            "half_extents should be (0.5, 0.5, 0.5)"
+        );
+    }
+
+    #[test]
+    fn test_collect_link_aabbs_rotated() {
+        let def = test_robot_def(
+            1,
+            CollisionShape::Cuboid {
+                half_extents: Vec3::new(1.0, 0.5, 0.1),
+            },
+        );
+        let rot_mat = Mat4::from_rotation_y(FRAC_PI_4);
+        let state = test_robot_state(1, vec![rot_mat]);
+        let aabbs = collect_link_aabbs(&def, &state);
+
+        assert_eq!(aabbs.len(), 1);
+        // After 45-degree rotation, the AABB should expand on X and Z
+        let identity_def = test_robot_def(
+            1,
+            CollisionShape::Cuboid {
+                half_extents: Vec3::new(1.0, 0.5, 0.1),
+            },
+        );
+        let identity_state = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let identity_aabbs = collect_link_aabbs(&identity_def, &identity_state);
+
+        assert!(
+            aabbs[0].1.half_extents.x > identity_aabbs[0].1.half_extents.x
+                || aabbs[0].1.half_extents.z > identity_aabbs[0].1.half_extents.z,
+            "rotated AABB should expand on at least one axis"
+        );
+    }
+
+    #[test]
+    fn test_detect_no_collision() {
+        let shape = CollisionShape::Cuboid {
+            half_extents: Vec3::splat(0.5),
+        };
+        let def_a = test_robot_def(1, shape.clone());
+        let def_b = test_robot_def(1, shape);
+
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0))]);
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> =
+            vec![(0, &def_a, &state_a), (1, &def_b, &state_b)];
+        let collisions = detect_robot_collisions(&robots);
+
+        assert!(collisions.is_empty(), "far-apart robots should not collide");
+    }
+
+    #[test]
+    fn test_detect_overlapping_robots() {
+        let shape = CollisionShape::Cuboid {
+            half_extents: Vec3::splat(0.5),
+        };
+        let def_a = test_robot_def(1, shape.clone());
+        let def_b = test_robot_def(1, shape);
+
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> =
+            vec![(0, &def_a, &state_a), (1, &def_b, &state_b)];
+        let collisions = detect_robot_collisions(&robots);
+
+        assert!(
+            !collisions.is_empty(),
+            "overlapping robots should produce collisions"
+        );
+        assert_eq!(collisions[0].robot_a, 0);
+        assert_eq!(collisions[0].robot_b, 1);
+    }
+
+    #[test]
+    fn test_same_robot_links_skipped() {
+        let shape = CollisionShape::Cuboid {
+            half_extents: Vec3::splat(0.5),
+        };
+        let def = test_robot_def(3, shape);
+        let state = test_robot_state(3, vec![Mat4::IDENTITY, Mat4::IDENTITY, Mat4::IDENTITY]);
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> = vec![(0, &def, &state)];
+        let collisions = detect_robot_collisions(&robots);
+
+        assert!(
+            collisions.is_empty(),
+            "single robot should have no collisions (no self-collision)"
+        );
+    }
+
+    #[test]
+    fn test_contact_normal_direction() {
+        let shape = CollisionShape::Cuboid {
+            half_extents: Vec3::splat(1.0),
+        };
+        let def_a = test_robot_def(1, shape.clone());
+        let def_b = test_robot_def(1, shape);
+
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0))]);
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> =
+            vec![(0, &def_a, &state_a), (1, &def_b, &state_b)];
+        let collisions = detect_robot_collisions(&robots);
+
+        assert!(!collisions.is_empty(), "should detect collision");
+        // Normal should point from A toward B, i.e. in +X direction
+        assert!(
+            collisions[0].contact_normal.x > 0.9,
+            "normal should point in +X, got {:?}",
+            collisions[0].contact_normal
+        );
+    }
+
+    #[test]
+    fn test_penetration_depth_positive() {
+        let shape = CollisionShape::Cuboid {
+            half_extents: Vec3::splat(1.0),
+        };
+        let def_a = test_robot_def(1, shape.clone());
+        let def_b = test_robot_def(1, shape);
+
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::from_translation(Vec3::new(0.5, 0.0, 0.0))]);
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> =
+            vec![(0, &def_a, &state_a), (1, &def_b, &state_b)];
+        let collisions = detect_robot_collisions(&robots);
+
+        assert!(!collisions.is_empty(), "should detect collision");
+        assert!(
+            collisions[0].penetration > 0.0,
+            "penetration should be positive, got {}",
+            collisions[0].penetration
+        );
+        // With half_extents 1.0 each, centers 0.5 apart, overlap on X = 1.0+1.0-0.5 = 1.5
+        // overlap on Y = 1.0+1.0-0.0 = 2.0, overlap on Z = 2.0
+        // min = 1.5
+        assert!(
+            (collisions[0].penetration - 1.5).abs() < EPSILON,
+            "penetration should be 1.5, got {}",
+            collisions[0].penetration
+        );
+    }
+
+    #[test]
+    fn test_multiple_link_collisions() {
+        let shape = CollisionShape::Cuboid {
+            half_extents: Vec3::splat(0.5),
+        };
+        let def_a = test_robot_def(2, shape.clone());
+        let def_b = test_robot_def(2, shape);
+
+        // Both robots have 2 links at the same position => all 4 pairs overlap
+        let state_a = test_robot_state(2, vec![Mat4::IDENTITY, Mat4::IDENTITY]);
+        let state_b = test_robot_state(2, vec![Mat4::IDENTITY, Mat4::IDENTITY]);
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> =
+            vec![(0, &def_a, &state_a), (1, &def_b, &state_b)];
+        let collisions = detect_robot_collisions(&robots);
+
+        assert_eq!(
+            collisions.len(),
+            4,
+            "2 links x 2 links = 4 collisions, got {}",
+            collisions.len()
+        );
+    }
+
+    #[test]
+    fn test_empty_robots_no_panic() {
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> = vec![];
+        let collisions = detect_robot_collisions(&robots);
+        assert!(
+            collisions.is_empty(),
+            "empty input should produce empty output"
+        );
+    }
+
+    #[test]
+    fn test_single_robot_no_collisions() {
+        let shape = CollisionShape::Cuboid {
+            half_extents: Vec3::splat(0.5),
+        };
+        let def = test_robot_def(1, shape);
+        let state = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState)> = vec![(0, &def, &state)];
+        let collisions = detect_robot_collisions(&robots);
+
+        assert!(
+            collisions.is_empty(),
+            "single robot should produce no collisions"
+        );
     }
 }

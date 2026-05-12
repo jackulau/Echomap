@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use rayon::prelude::*;
 
 use crate::scene::SceneObject;
-use collision::SceneBvh;
+use collision::{detect_punches, detect_robot_collisions, HitEvent, SceneBvh, PUNCH_STAMINA_COST};
 use definition::RobotDefinition;
 use dynamics::step_dynamics;
 use kinematics::forward_kinematics;
@@ -59,6 +59,7 @@ pub struct RobotManager {
     pub running: bool,
     cached_bvh: Option<SceneBvh>,
     bvh_mesh_count: usize,
+    pub last_hit_events: Vec<HitEvent>,
 }
 
 impl Default for RobotManager {
@@ -76,6 +77,7 @@ impl RobotManager {
             running: true,
             cached_bvh: None,
             bvh_mesh_count: 0,
+            last_hit_events: Vec::new(),
         }
     }
 
@@ -109,6 +111,13 @@ impl RobotManager {
             self.bvh_mesh_count = mesh_count;
         }
 
+        // Save previous poses for combat velocity tracking
+        for robot in self.robots.iter_mut() {
+            if robot.state.combat.is_some() {
+                robot.state.save_previous_poses();
+            }
+        }
+
         let bvh = self.cached_bvh.as_ref().unwrap();
         let step_one = |robot: &mut ManagedRobot| {
             step_dynamics(&robot.definition, &mut robot.state, dt);
@@ -122,6 +131,9 @@ impl RobotManager {
         } else {
             self.robots.iter_mut().for_each(step_one);
         }
+
+        // Sequential combat step after parallel physics
+        self.last_hit_events = step_combat(&mut self.robots, dt);
     }
 
     /// Get an immutable reference to a robot by index.
@@ -155,6 +167,80 @@ impl RobotManager {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// step_combat — sequential combat resolution after parallel physics
+// ---------------------------------------------------------------------------
+
+fn step_combat(robots: &mut [ManagedRobot], dt: f32) -> Vec<HitEvent> {
+    // 1. Clear recent_hits for combat-enabled robots
+    for robot in robots.iter_mut() {
+        if let Some(ref mut combat) = robot.state.combat {
+            combat.recent_hits.clear();
+        }
+    }
+
+    // 2. Collect combat-enabled robots for collision detection
+    let combat_data: Vec<(usize, &RobotDefinition, &RobotState)> = robots
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.state.combat.is_some())
+        .map(|(i, r)| (i, &r.definition, &r.state))
+        .collect();
+
+    if combat_data.len() < 2 {
+        // Regenerate stamina even without combat
+        for robot in robots.iter_mut() {
+            if let Some(ref mut combat) = robot.state.combat {
+                combat.regenerate_stamina(dt);
+            }
+        }
+        return Vec::new();
+    }
+
+    // 3. Detect robot-robot collisions
+    let collisions = detect_robot_collisions(&combat_data);
+
+    // 4. Compute link velocities for combat robots
+    let velocities: Vec<Vec<glam::Vec3>> = combat_data
+        .iter()
+        .map(|(i, _, _)| robots[*i].state.compute_link_velocities(dt))
+        .collect();
+
+    // 5. Build robots-with-velocities slice for detect_punches
+    let punch_data: Vec<(usize, &RobotDefinition, &RobotState, &[glam::Vec3])> = combat_data
+        .iter()
+        .zip(velocities.iter())
+        .map(|((id, def, state), vels)| (*id, *def, *state, vels.as_slice()))
+        .collect();
+
+    // 6. Detect punches
+    let hit_events = detect_punches(&collisions, &punch_data);
+
+    // 7. Apply damage and consume stamina
+    for hit in &hit_events {
+        // Apply damage to target
+        if let Some(ref mut combat) = robots[hit.target_robot].state.combat {
+            combat.apply_damage(hit.damage);
+            combat.total_damage_received += hit.damage;
+            combat.recent_hits.push(hit.clone());
+        }
+        // Consume stamina from attacker and track damage dealt
+        if let Some(ref mut combat) = robots[hit.attacker_robot].state.combat {
+            combat.consume_stamina(PUNCH_STAMINA_COST);
+            combat.total_damage_dealt += hit.damage;
+        }
+    }
+
+    // 8. Regenerate stamina for all combat robots
+    for robot in robots.iter_mut() {
+        if let Some(ref mut combat) = robot.state.combat {
+            combat.regenerate_stamina(dt);
+        }
+    }
+
+    hit_events
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +475,7 @@ mod tests {
                     half_extents: glam::Vec3::splat(0.1),
                 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             }],
             joints: vec![],
             sensors: vec![SensorMount {
@@ -721,7 +807,7 @@ mod tests {
                     half_extents: glam::Vec3::splat(0.1),
                 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             }],
             joints: vec![],
             sensors: vec![SensorMount {
@@ -1644,7 +1730,7 @@ mod tests {
                     half_extents: glam::Vec3::splat(0.1),
                 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             },
             LinkDefinition {
                 name: "link1".into(),
@@ -1655,7 +1741,7 @@ mod tests {
                     height: 0.5,
                 },
                 parent_joint: Some(0),
-                    body_zone: None,
+                body_zone: None,
             },
             LinkDefinition {
                 name: "link2".into(),
@@ -1666,7 +1752,7 @@ mod tests {
                     height: 0.4,
                 },
                 parent_joint: Some(1),
-                    body_zone: None,
+                body_zone: None,
             },
             LinkDefinition {
                 name: "link3".into(),
@@ -1674,7 +1760,7 @@ mod tests {
                 inertia: 0.05,
                 collision_shape: CollisionShape::Sphere { radius: 0.08 },
                 parent_joint: Some(2),
-                    body_zone: None,
+                body_zone: None,
             },
         ];
         let joints = vec![
@@ -1941,5 +2027,349 @@ mod tests {
         let a = run();
         let b = run();
         assert_eq!(a, b, "two parallel runs should produce identical results");
+    }
+
+    // ------------------------------------------------------------------
+    // Task 5: Combat integration tests
+    // ------------------------------------------------------------------
+
+    use crate::robot::collision::PUNCH_STAMINA_COST as TEST_PUNCH_STAMINA_COST;
+    use crate::robot::state::CombatState;
+
+    /// Helper: build a combat robot definition with body zones on all links.
+    fn combat_robot_def() -> RobotDefinition {
+        use crate::robot::definition::BodyZone;
+
+        RobotDefinition {
+            name: "combat_bot".to_string(),
+            links: vec![
+                LinkDefinition {
+                    name: "base".to_string(),
+                    mass: 5.0,
+                    inertia: 1.0,
+                    collision_shape: CollisionShape::Cuboid {
+                        half_extents: glam::Vec3::splat(0.5),
+                    },
+                    parent_joint: None,
+                    body_zone: Some(BodyZone::Body),
+                },
+                LinkDefinition {
+                    name: "arm".to_string(),
+                    mass: 2.0,
+                    inertia: 0.5,
+                    collision_shape: CollisionShape::Cuboid {
+                        half_extents: glam::Vec3::splat(0.3),
+                    },
+                    parent_joint: Some(0),
+                    body_zone: Some(BodyZone::RightArm),
+                },
+            ],
+            joints: vec![JointDefinition {
+                name: "shoulder".to_string(),
+                joint_type: JointType::Revolute,
+                axis: glam::Vec3::Y,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 10.0,
+                damping: 0.1,
+            }],
+            sensors: vec![],
+        }
+    }
+
+    #[test]
+    fn test_combat_step_no_combat_robots() {
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::from_translation(glam::Vec3::new(5.0, 0.0, 0.0)));
+
+        manager.step(0.01, &[]);
+
+        assert!(
+            manager.last_hit_events.is_empty(),
+            "non-combat robots should produce no hit events"
+        );
+    }
+
+    #[test]
+    fn test_combat_step_overlapping_robots() {
+        // Test step_combat directly with prepared robot state to avoid
+        // step() overwriting prev_link_poses.
+        let def = combat_robot_def();
+        let dt = 0.01_f32;
+
+        let mut robots = vec![
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        // Enable combat on both
+        robots[0].state.combat = Some(CombatState::new(100.0, 100.0));
+        robots[1].state.combat = Some(CombatState::new(100.0, 100.0));
+
+        // Both at origin (link_poses default to identity = overlapping).
+        // Set prev_link_poses for robot 0's arm link with a large offset
+        // so velocity = (current - prev) / dt > threshold.
+        robots[0].state.prev_link_poses = robots[0].state.link_poses.clone();
+        robots[1].state.prev_link_poses = robots[1].state.link_poses.clone();
+
+        // Offset prev_link_poses[1] translation by -5.0 on X so velocity = 5.0 / 0.01 = 500 m/s
+        robots[0].state.prev_link_poses[1][12] -= 5.0;
+
+        let hits = step_combat(&mut robots, dt);
+
+        assert!(
+            !hits.is_empty(),
+            "overlapping combat robots with high-velocity link should produce hit events"
+        );
+    }
+
+    #[test]
+    fn test_combat_step_far_apart() {
+        let mut manager = RobotManager::new();
+        let def = combat_robot_def();
+
+        let idx_a = manager.add_robot(def.clone(), Mat4::IDENTITY);
+        let idx_b = manager.add_robot(
+            def,
+            Mat4::from_translation(glam::Vec3::new(100.0, 0.0, 0.0)),
+        );
+
+        manager.get_robot_mut(idx_a).unwrap().state.combat = Some(CombatState::new(100.0, 100.0));
+        manager.get_robot_mut(idx_b).unwrap().state.combat = Some(CombatState::new(100.0, 100.0));
+
+        manager.step(0.01, &[]);
+
+        assert!(
+            manager.last_hit_events.is_empty(),
+            "far-apart combat robots should produce no hit events"
+        );
+    }
+
+    #[test]
+    fn test_combat_damage_applied() {
+        let def = combat_robot_def();
+        let dt = 0.01_f32;
+
+        let mut robots = vec![
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        robots[0].state.combat = Some(CombatState::new(100.0, 100.0));
+        robots[1].state.combat = Some(CombatState::new(100.0, 100.0));
+
+        // Set prev_link_poses and create high velocity on robot 0's arm
+        robots[0].state.prev_link_poses = robots[0].state.link_poses.clone();
+        robots[1].state.prev_link_poses = robots[1].state.link_poses.clone();
+        robots[0].state.prev_link_poses[1][12] -= 5.0;
+
+        let health_before = robots[1].state.combat.as_ref().unwrap().health;
+
+        let hits = step_combat(&mut robots, dt);
+
+        // There should be hits on robot 1 (target)
+        let hits_on_1: Vec<_> = hits.iter().filter(|h| h.target_robot == 1).collect();
+        assert!(!hits_on_1.is_empty(), "should have hits targeting robot 1");
+
+        let health_after = robots[1].state.combat.as_ref().unwrap().health;
+        assert!(
+            health_after < health_before,
+            "target health should decrease after being hit: before={}, after={}",
+            health_before,
+            health_after
+        );
+    }
+
+    #[test]
+    fn test_combat_stamina_consumed() {
+        let def = combat_robot_def();
+        let dt = 0.01_f32;
+
+        let mut robots = vec![
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+            ManagedRobot {
+                definition: def.clone(),
+                state: RobotState::new(&def),
+                base_pose: Mat4::IDENTITY.to_cols_array(),
+            },
+        ];
+
+        robots[0].state.combat = Some(CombatState::new(100.0, 100.0));
+        robots[1].state.combat = Some(CombatState::new(100.0, 100.0));
+
+        // Set prev_link_poses and create high velocity on robot 0's arm
+        robots[0].state.prev_link_poses = robots[0].state.link_poses.clone();
+        robots[1].state.prev_link_poses = robots[1].state.link_poses.clone();
+        robots[0].state.prev_link_poses[1][12] -= 5.0;
+
+        let stamina_before = robots[0].state.combat.as_ref().unwrap().stamina;
+
+        let hits = step_combat(&mut robots, dt);
+
+        let hits_from_0: Vec<_> = hits.iter().filter(|h| h.attacker_robot == 0).collect();
+        assert!(
+            !hits_from_0.is_empty(),
+            "robot 0 should have landed punches"
+        );
+
+        let stamina_after = robots[0].state.combat.as_ref().unwrap().stamina;
+        // Stamina consumed = PUNCH_STAMINA_COST per hit, but also regenerated by dt
+        let expected_consumption = hits_from_0.len() as f32 * TEST_PUNCH_STAMINA_COST;
+        let regen = 5.0 * dt; // regen rate * dt
+        let expected_stamina = stamina_before - expected_consumption + regen;
+        assert!(
+            (stamina_after - expected_stamina).abs() < 1.0,
+            "attacker stamina should decrease by PUNCH_STAMINA_COST per hit: before={}, after={}, expected~={}",
+            stamina_before,
+            stamina_after,
+            expected_stamina
+        );
+    }
+
+    #[test]
+    fn test_combat_stamina_regenerates() {
+        let mut manager = RobotManager::new();
+        let def = combat_robot_def();
+
+        let idx = manager.add_robot(def, Mat4::IDENTITY);
+        manager.get_robot_mut(idx).unwrap().state.combat = Some(CombatState::new(100.0, 100.0));
+
+        // Reduce stamina manually
+        manager
+            .get_robot_mut(idx)
+            .unwrap()
+            .state
+            .combat
+            .as_mut()
+            .unwrap()
+            .stamina = 50.0;
+
+        let stamina_before = 50.0_f32;
+
+        // Step many times without any opponents (no punching)
+        for _ in 0..100 {
+            manager.step(0.01, &[]);
+        }
+
+        let stamina_after = manager
+            .get_robot(idx)
+            .unwrap()
+            .state
+            .combat
+            .as_ref()
+            .unwrap()
+            .stamina;
+        assert!(
+            stamina_after > stamina_before,
+            "stamina should regenerate over time: before={}, after={}",
+            stamina_before,
+            stamina_after
+        );
+    }
+
+    #[test]
+    fn test_combat_knockdown() {
+        let mut manager = RobotManager::new();
+        let def = combat_robot_def();
+
+        let idx = manager.add_robot(def, Mat4::IDENTITY);
+        manager.get_robot_mut(idx).unwrap().state.combat = Some(CombatState::new(100.0, 100.0));
+
+        // Directly apply enough damage to reach 0 health
+        manager
+            .get_robot_mut(idx)
+            .unwrap()
+            .state
+            .combat
+            .as_mut()
+            .unwrap()
+            .apply_damage(100.0);
+
+        let combat = manager
+            .get_robot(idx)
+            .unwrap()
+            .state
+            .combat
+            .as_ref()
+            .unwrap();
+        assert!(
+            combat.knockdown,
+            "knockdown should be true when health reaches 0"
+        );
+        assert!(
+            (combat.health - 0.0).abs() < 1e-6,
+            "health should be 0, got {}",
+            combat.health
+        );
+    }
+
+    #[test]
+    fn test_existing_tests_unaffected() {
+        // Verify that non-combat robots behave identically after combat integration
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(1);
+        let idx = manager.add_robot(def, Mat4::IDENTITY);
+
+        // No combat state
+        assert!(
+            manager.get_robot(idx).unwrap().state.combat.is_none(),
+            "non-combat robot should have no combat state"
+        );
+
+        // Set a velocity command
+        manager.set_command(idx, 0, ActuatorCommand::Velocity(2.0));
+
+        let pos_before = manager.get_robot(idx).unwrap().state.joint_positions[0];
+
+        // Step several times
+        for _ in 0..10 {
+            manager.step(0.01, &[]);
+        }
+
+        let pos_after = manager.get_robot(idx).unwrap().state.joint_positions[0];
+
+        // Joint should have moved (physics still works)
+        assert!(
+            (pos_after - pos_before).abs() > 1e-6,
+            "non-combat robot joint should still move: before={}, after={}",
+            pos_before,
+            pos_after
+        );
+
+        // No hit events
+        assert!(
+            manager.last_hit_events.is_empty(),
+            "non-combat robot should produce no hit events"
+        );
+
+        // Combat state should remain None
+        assert!(
+            manager.get_robot(idx).unwrap().state.combat.is_none(),
+            "combat state should remain None for non-combat robot"
+        );
     }
 }

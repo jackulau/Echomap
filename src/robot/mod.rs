@@ -1,5 +1,6 @@
 pub mod actuators;
 pub mod body;
+pub mod boxing;
 pub mod collision;
 pub mod definition;
 pub mod dynamics;

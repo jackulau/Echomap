@@ -187,14 +187,17 @@ pub enum SimResponse {
         state: GymRobotState,
         step_count: u64,
         messages: Vec<AgentMessage>,
+        match_state: Option<crate::robot::boxing::BoxingMatchState>,
     },
     Observation {
         state: GymRobotState,
         messages: Vec<AgentMessage>,
+        match_state: Option<crate::robot::boxing::BoxingMatchState>,
     },
     Reset {
         state: GymRobotState,
         messages: Vec<AgentMessage>,
+        match_state: Option<crate::robot::boxing::BoxingMatchState>,
     },
     Removed,
     MessageSent,
@@ -300,9 +303,27 @@ pub struct SimBridgeClient {
     step_counts: Vec<u64>,
     state_buffer: GymStateBuffer,
     message_bus: MessageBus,
+    pub boxing_match: Option<crate::robot::boxing::BoxingMatch>,
 }
 
 impl SimBridgeClient {
+    fn boxing_match_snapshot(
+        &self,
+        robot_id: usize,
+        manager: &RobotManager,
+    ) -> Option<crate::robot::boxing::BoxingMatchState> {
+        let bm = self.boxing_match.as_ref()?;
+        let opponent_id = if robot_id == bm.robot_a {
+            bm.robot_b
+        } else {
+            bm.robot_a
+        };
+        let opponent_combat = manager
+            .get_robot(opponent_id)
+            .and_then(|r| r.state.combat.as_ref());
+        Some(bm.snapshot(robot_id, opponent_combat))
+    }
+
     /// Non-blocking drain of the command channel.
     ///
     /// For each pending command, executes the operation on `manager` and
@@ -357,6 +378,17 @@ impl SimBridgeClient {
                     let dt = 1.0 / 60.0;
                     manager.step(dt, scene_meshes);
 
+                    if let Some(bm) = &mut self.boxing_match {
+                        let combat_states: Vec<(usize, &crate::robot::state::CombatState)> =
+                            manager
+                                .robots
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(i, r)| r.state.combat.as_ref().map(|c| (i, c)))
+                                .collect();
+                        bm.update(&manager.last_hit_events, &combat_states, dt);
+                    }
+
                     if let Some(robot) = manager.get_robot(robot_id) {
                         if self.step_counts.len() <= robot_id {
                             self.step_counts.resize(robot_id + 1, 0);
@@ -369,10 +401,12 @@ impl SimBridgeClient {
                             &mut self.state_buffer,
                         );
                         let messages = self.message_bus.drain(robot_id);
+                        let match_state = self.boxing_match_snapshot(robot_id, manager);
                         SimResponse::Stepped {
                             state,
                             step_count: self.step_counts[robot_id],
                             messages,
+                            match_state,
                         }
                     } else {
                         SimResponse::Error {
@@ -394,7 +428,12 @@ impl SimBridgeClient {
                         &mut self.state_buffer,
                     );
                     let messages = self.message_bus.drain(robot_id);
-                    SimResponse::Observation { state, messages }
+                    let match_state = self.boxing_match_snapshot(robot_id, manager);
+                    SimResponse::Observation {
+                        state,
+                        messages,
+                        match_state,
+                    }
                 } else {
                     SimResponse::Error {
                         message: format!("invalid robot_id: {}", robot_id),
@@ -416,7 +455,12 @@ impl SimBridgeClient {
                         &mut self.state_buffer,
                     );
                     let messages = self.message_bus.drain(robot_id);
-                    SimResponse::Reset { state, messages }
+                    let match_state = self.boxing_match_snapshot(robot_id, manager);
+                    SimResponse::Reset {
+                        state,
+                        messages,
+                        match_state,
+                    }
                 } else {
                     SimResponse::Error {
                         message: format!("invalid robot_id: {}", robot_id),
@@ -443,6 +487,9 @@ impl SimBridgeClient {
                 if let Some(robot) = manager.get_robot(robot_id) {
                     let observation_space = ObservationSpace::from_definition(&robot.definition);
                     let action_space = ActionSpace::from_definition(&robot.definition);
+                    if let Some(bm) = &mut self.boxing_match {
+                        bm.connect_agent(robot_id);
+                    }
                     SimResponse::Spaces {
                         observation_space,
                         action_space,
@@ -561,6 +608,7 @@ pub fn create_bridge() -> (SimBridgeServer, SimBridgeClient) {
         step_counts: Vec::new(),
         state_buffer: GymStateBuffer::new(),
         message_bus: MessageBus::new(100),
+        boxing_match: None,
     };
     (server, client)
 }

@@ -98,7 +98,11 @@ impl AgentSession {
             .send_command(SimCommand::Reset { robot_id })
             .await
         {
-            Ok(SimResponse::Reset { state, messages }) => {
+            Ok(SimResponse::Reset {
+                state,
+                messages,
+                match_state,
+            }) => {
                 self.step_count = 0;
                 let hit_events = state
                     .combat
@@ -112,7 +116,7 @@ impl AgentSession {
                     step_count: 0,
                     messages,
                     hit_events,
-                    match_state: None,
+                    match_state,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -139,7 +143,10 @@ impl AgentSession {
             .await
         {
             Ok(SimResponse::Stepped {
-                state, messages, ..
+                state,
+                messages,
+                match_state,
+                ..
             }) => {
                 self.step_count += 1;
                 let hit_events = state
@@ -154,7 +161,7 @@ impl AgentSession {
                     step_count: self.step_count,
                     messages,
                     hit_events,
-                    match_state: None,
+                    match_state,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -180,7 +187,11 @@ impl AgentSession {
             .send_command(SimCommand::GetObservation { robot_id })
             .await
         {
-            Ok(SimResponse::Observation { state, messages }) => {
+            Ok(SimResponse::Observation {
+                state,
+                messages,
+                match_state,
+            }) => {
                 let hit_events = state
                     .combat
                     .as_ref()
@@ -193,7 +204,7 @@ impl AgentSession {
                     step_count: self.step_count,
                     messages,
                     hit_events,
-                    match_state: None,
+                    match_state,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },

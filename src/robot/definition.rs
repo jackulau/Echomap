@@ -229,6 +229,102 @@ impl RobotDefinition {
             sensors: Vec::new(),
         }
     }
+
+    /// Factory method for a 4-link boxing humanoid (torso, head, two arms).
+    ///
+    /// Creates a humanoid robot with body zones suitable for boxing scenarios:
+    /// - Torso (Body) as root link
+    /// - Head connected via neck joint
+    /// - Left arm connected via left shoulder joint
+    /// - Right arm connected via right shoulder joint
+    pub fn boxing_humanoid() -> Self {
+        // 4 links: torso (Body), head (Head), left_arm (LeftArm), right_arm (RightArm)
+        // 3 joints: neck (torso->head), left_shoulder (torso->left_arm), right_shoulder (torso->right_arm)
+
+        let links = vec![
+            LinkDefinition {
+                name: "torso".to_string(),
+                mass: 10.0,
+                inertia: 2.0,
+                collision_shape: CollisionShape::Cuboid {
+                    half_extents: Vec3::new(0.2, 0.3, 0.15),
+                },
+                parent_joint: None,
+                body_zone: Some(BodyZone::Body),
+            },
+            LinkDefinition {
+                name: "head".to_string(),
+                mass: 3.0,
+                inertia: 0.5,
+                collision_shape: CollisionShape::Sphere { radius: 0.1 },
+                parent_joint: Some(0), // connected via neck joint (joint index 0)
+                body_zone: Some(BodyZone::Head),
+            },
+            LinkDefinition {
+                name: "left_arm".to_string(),
+                mass: 2.0,
+                inertia: 0.3,
+                collision_shape: CollisionShape::Cylinder {
+                    radius: 0.05,
+                    height: 0.4,
+                },
+                parent_joint: Some(1), // connected via left_shoulder joint (joint index 1)
+                body_zone: Some(BodyZone::LeftArm),
+            },
+            LinkDefinition {
+                name: "right_arm".to_string(),
+                mass: 2.0,
+                inertia: 0.3,
+                collision_shape: CollisionShape::Cylinder {
+                    radius: 0.05,
+                    height: 0.4,
+                },
+                parent_joint: Some(2), // connected via right_shoulder joint (joint index 2)
+                body_zone: Some(BodyZone::RightArm),
+            },
+        ];
+        let joints = vec![
+            JointDefinition {
+                name: "neck".to_string(),
+                joint_type: JointType::Revolute,
+                axis: Vec3::Y,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -std::f32::consts::FRAC_PI_4,
+                limit_max: std::f32::consts::FRAC_PI_4,
+                max_torque: 5.0,
+                damping: 0.2,
+            },
+            JointDefinition {
+                name: "left_shoulder".to_string(),
+                joint_type: JointType::Revolute,
+                axis: Vec3::Y,
+                parent_link: 0,
+                child_link: 2,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 20.0,
+                damping: 0.1,
+            },
+            JointDefinition {
+                name: "right_shoulder".to_string(),
+                joint_type: JointType::Revolute,
+                axis: Vec3::Y,
+                parent_link: 0,
+                child_link: 3,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 20.0,
+                damping: 0.1,
+            },
+        ];
+        Self {
+            name: "boxing_humanoid".to_string(),
+            links,
+            joints,
+            sensors: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +501,61 @@ mod tests {
                 "Arm segment '{}' should have no zone",
                 link.name
             );
+        }
+    }
+
+    #[test]
+    fn test_boxing_humanoid_link_count() {
+        let robot = RobotDefinition::boxing_humanoid();
+        assert_eq!(robot.links.len(), 4, "boxing_humanoid should have 4 links");
+        assert_eq!(
+            robot.joints.len(),
+            3,
+            "boxing_humanoid should have 3 joints"
+        );
+    }
+
+    #[test]
+    fn test_boxing_humanoid_zones() {
+        let robot = RobotDefinition::boxing_humanoid();
+        assert_eq!(
+            robot.links[0].body_zone,
+            Some(BodyZone::Body),
+            "link 0 (torso) should be Body"
+        );
+        assert_eq!(
+            robot.links[1].body_zone,
+            Some(BodyZone::Head),
+            "link 1 (head) should be Head"
+        );
+        assert_eq!(
+            robot.links[2].body_zone,
+            Some(BodyZone::LeftArm),
+            "link 2 (left_arm) should be LeftArm"
+        );
+        assert_eq!(
+            robot.links[3].body_zone,
+            Some(BodyZone::RightArm),
+            "link 3 (right_arm) should be RightArm"
+        );
+    }
+
+    #[test]
+    fn test_boxing_humanoid_head_has_sphere() {
+        let robot = RobotDefinition::boxing_humanoid();
+        let head = &robot.links[1];
+        assert_eq!(head.name, "head");
+        match &head.collision_shape {
+            CollisionShape::Sphere { radius } => {
+                assert!(
+                    (radius - 0.1).abs() < 1e-6,
+                    "head sphere radius should be 0.1"
+                );
+            }
+            other => panic!(
+                "Expected head to use Sphere collision shape, got {:?}",
+                other
+            ),
         }
     }
 }

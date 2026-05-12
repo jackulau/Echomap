@@ -229,8 +229,7 @@ pub fn detect_robot_collisions(
         let (id_a, def_a, state_a) = &robots[i];
         let aabbs_a = collect_link_aabbs(def_a, state_a);
 
-        for j in (i + 1)..robots.len() {
-            let (id_b, def_b, state_b) = &robots[j];
+        for (id_b, def_b, state_b) in &robots[(i + 1)..] {
             let aabbs_b = collect_link_aabbs(def_b, state_b);
 
             for &(link_a_idx, ref aabb_a) in &aabbs_a {

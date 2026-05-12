@@ -100,12 +100,18 @@ impl AgentSession {
         {
             Ok(SimResponse::Reset { state, messages }) => {
                 self.step_count = 0;
+                let hit_events = state
+                    .combat
+                    .as_ref()
+                    .map(|c| c.recent_hits.clone())
+                    .unwrap_or_default();
                 ServerMessage::Observation {
                     state,
                     reward: 0.0,
                     done: false,
                     step_count: 0,
                     messages,
+                    hit_events,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -135,12 +141,18 @@ impl AgentSession {
                 state, messages, ..
             }) => {
                 self.step_count += 1;
+                let hit_events = state
+                    .combat
+                    .as_ref()
+                    .map(|c| c.recent_hits.clone())
+                    .unwrap_or_default();
                 ServerMessage::Observation {
                     state,
                     reward: 0.0,
                     done: false,
                     step_count: self.step_count,
                     messages,
+                    hit_events,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -166,13 +178,21 @@ impl AgentSession {
             .send_command(SimCommand::GetObservation { robot_id })
             .await
         {
-            Ok(SimResponse::Observation { state, messages }) => ServerMessage::Observation {
-                state,
-                reward: 0.0,
-                done: false,
-                step_count: self.step_count,
-                messages,
-            },
+            Ok(SimResponse::Observation { state, messages }) => {
+                let hit_events = state
+                    .combat
+                    .as_ref()
+                    .map(|c| c.recent_hits.clone())
+                    .unwrap_or_default();
+                ServerMessage::Observation {
+                    state,
+                    reward: 0.0,
+                    done: false,
+                    step_count: self.step_count,
+                    messages,
+                    hit_events,
+                }
+            }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),

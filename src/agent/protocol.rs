@@ -37,6 +37,8 @@ pub enum ServerMessage {
         step_count: u64,
         #[serde(default)]
         messages: Vec<AgentMessage>,
+        #[serde(default)]
+        hit_events: Vec<crate::robot::collision::HitEvent>,
     },
     MessageSent,
     Error {
@@ -144,6 +146,7 @@ mod tests {
                 is_open: false,
                 attached_object: Some(2),
             }],
+            combat: None,
         };
         let msg = ServerMessage::Observation {
             state,
@@ -151,6 +154,7 @@ mod tests {
             done: false,
             step_count: 42,
             messages: vec![],
+            hit_events: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -419,11 +423,13 @@ mod tests {
                     camera_visible: vec![],
                 },
                 gripper_states: vec![],
+                combat: None,
             },
             reward: f32::NAN,
             done: false,
             step_count: 0,
             messages: vec![],
+            hit_events: vec![],
         };
         let json = serde_json::to_string(&msg).expect("NaN serializes to null");
         assert!(json.contains("null"), "NaN should serialize as null");
@@ -509,11 +515,13 @@ mod tests {
                     camera_visible: vec![],
                 },
                 gripper_states: vec![],
+                combat: None,
             },
             reward: f32::INFINITY,
             done: false,
             step_count: 0,
             messages: vec![],
+            hit_events: vec![],
         };
         let json = serde_json::to_string(&msg).expect("Infinity serializes to null");
         assert!(json.contains("null"), "Infinity should serialize as null");
@@ -624,12 +632,14 @@ mod tests {
                 camera_visible: vec![],
             },
             gripper_states: vec![],
+            combat: None,
         };
         let msg = ServerMessage::Observation {
             state,
             reward: 0.0,
             done: false,
             step_count: 1,
+            hit_events: vec![],
             messages: vec![AgentMessage {
                 from_robot_id: 0,
                 to_robot_id: 1,

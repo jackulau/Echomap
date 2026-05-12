@@ -405,7 +405,7 @@ mod tests {
                 inertia: 1.0,
                 collision_shape: CollisionShape::Sphere { radius: 0.1 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             }],
             joints: vec![],
             sensors: Vec::new(),

@@ -1957,6 +1957,7 @@ mod tests {
                 camera_visible: vec![],
             },
             gripper_states: vec![],
+            combat: None,
         };
 
         let msg = ServerMessage::Observation {
@@ -1965,6 +1966,7 @@ mod tests {
             done: false,
             step_count: 1,
             messages: vec![],
+            hit_events: vec![],
         };
 
         // serde_json succeeds in serializing but produces `null` for NaN/Inf.

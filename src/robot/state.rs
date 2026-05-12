@@ -201,6 +201,19 @@ pub struct GripperState {
     pub attached_object: Option<usize>,
 }
 
+/// Combat state snapshot for gym-compatible agent interfaces.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GymCombatState {
+    pub health: f32,
+    pub max_health: f32,
+    pub stamina: f32,
+    pub max_stamina: f32,
+    pub knockdown: bool,
+    pub recent_hits: Vec<super::collision::HitEvent>,
+    pub total_damage_dealt: f32,
+    pub total_damage_received: f32,
+}
+
 /// Gym-compatible snapshot of a robot's full state for agent communication.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GymRobotState {
@@ -208,6 +221,8 @@ pub struct GymRobotState {
     pub joint_velocities: Vec<f32>,
     pub sensor_readings: GymSensorReadings,
     pub gripper_states: Vec<GripperState>,
+    #[serde(default)]
+    pub combat: Option<GymCombatState>,
 }
 
 impl GymRobotState {
@@ -249,6 +264,16 @@ impl GymRobotState {
                 camera_visible,
             },
             gripper_states: Vec::new(),
+            combat: state.combat.as_ref().map(|c| GymCombatState {
+                health: c.health,
+                max_health: c.max_health,
+                stamina: c.stamina,
+                max_stamina: c.max_stamina,
+                knockdown: c.knockdown,
+                recent_hits: c.recent_hits.clone(),
+                total_damage_dealt: c.total_damage_dealt,
+                total_damage_received: c.total_damage_received,
+            }),
         }
     }
 
@@ -293,6 +318,16 @@ impl GymRobotState {
                 camera_visible: Vec::new(),
             },
             gripper_states: Vec::new(),
+            combat: state.combat.as_ref().map(|c| GymCombatState {
+                health: c.health,
+                max_health: c.max_health,
+                stamina: c.stamina,
+                max_stamina: c.max_stamina,
+                knockdown: c.knockdown,
+                recent_hits: c.recent_hits.clone(),
+                total_damage_dealt: c.total_damage_dealt,
+                total_damage_received: c.total_damage_received,
+            }),
         }
     }
 }
@@ -850,6 +885,7 @@ mod tests {
                 is_open: false,
                 attached_object: Some(3),
             }],
+            combat: None,
         };
 
         let json = serde_json::to_string(&state).expect("serialization failed");
@@ -1387,5 +1423,87 @@ mod tests {
             SensorReading::Lidar(vec![1.0, 2.0])
         );
         assert_eq!(deser.sensor_readings[2], SensorReading::Contact(true));
+    }
+
+    // ---- Task 6: GymCombatState integration tests ----
+
+    #[test]
+    fn test_gym_state_with_combat() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+        state.combat = Some(CombatState::new(100.0, 100.0));
+
+        let gym_state = GymRobotState::from_robot_state(&state, &def);
+        assert!(gym_state.combat.is_some(), "combat should be Some");
+        let combat = gym_state.combat.unwrap();
+        assert!((combat.health - 100.0).abs() < 1e-6);
+        assert!((combat.max_health - 100.0).abs() < 1e-6);
+        assert!((combat.stamina - 100.0).abs() < 1e-6);
+        assert!((combat.max_stamina - 100.0).abs() < 1e-6);
+        assert!(!combat.knockdown);
+        assert!(combat.recent_hits.is_empty());
+        assert!((combat.total_damage_dealt - 0.0).abs() < 1e-6);
+        assert!((combat.total_damage_received - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_gym_state_without_combat() {
+        let def = gym_definition();
+        let state = RobotState::new(&def);
+        assert!(state.combat.is_none(), "default combat should be None");
+
+        let gym_state = GymRobotState::from_robot_state(&state, &def);
+        assert!(
+            gym_state.combat.is_none(),
+            "gym combat should be None when source is None"
+        );
+    }
+
+    #[test]
+    fn test_gym_combat_state_serialization() {
+        let combat = GymCombatState {
+            health: 75.0,
+            max_health: 100.0,
+            stamina: 40.0,
+            max_stamina: 80.0,
+            knockdown: false,
+            recent_hits: vec![],
+            total_damage_dealt: 25.0,
+            total_damage_received: 10.0,
+        };
+
+        let json = serde_json::to_string(&combat).expect("serialization failed");
+        let deser: GymCombatState = serde_json::from_str(&json).expect("deserialization failed");
+
+        assert!((deser.health - 75.0).abs() < 1e-6);
+        assert!((deser.max_health - 100.0).abs() < 1e-6);
+        assert!((deser.stamina - 40.0).abs() < 1e-6);
+        assert!((deser.max_stamina - 80.0).abs() < 1e-6);
+        assert!(!deser.knockdown);
+        assert!(deser.recent_hits.is_empty());
+        assert!((deser.total_damage_dealt - 25.0).abs() < 1e-6);
+        assert!((deser.total_damage_received - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_gym_state_combat_via_buffered_constructor() {
+        let def = gym_definition();
+        let mut state = RobotState::new(&def);
+        state.combat = Some(CombatState::new(80.0, 60.0));
+        // Apply some damage to verify it propagates
+        state.combat.as_mut().unwrap().apply_damage(20.0);
+
+        let mut buf = GymStateBuffer::new();
+        let gym_state = GymRobotState::from_robot_state_into(&state, &def, &mut buf);
+
+        assert!(gym_state.combat.is_some());
+        let combat = gym_state.combat.unwrap();
+        assert!(
+            (combat.health - 60.0).abs() < 1e-6,
+            "health should be 80 - 20 = 60"
+        );
+        assert!((combat.max_health - 80.0).abs() < 1e-6);
+        assert!((combat.stamina - 60.0).abs() < 1e-6);
+        assert!(!combat.knockdown);
     }
 }

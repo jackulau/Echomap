@@ -345,7 +345,7 @@ mod tests {
                 half_extents: Vec3::splat(0.1),
             },
             parent_joint: None,
-                    body_zone: None,
+            body_zone: None,
         });
 
         for (i, (jtype, axis, _pos)) in joint_specs.iter().enumerate() {
@@ -369,7 +369,7 @@ mod tests {
                     height: 0.5,
                 },
                 parent_joint: Some(i),
-                    body_zone: None,
+                body_zone: None,
             });
         }
 
@@ -608,7 +608,7 @@ mod tests {
                     half_extents: Vec3::splat(0.1),
                 },
                 parent_joint: None,
-                    body_zone: None,
+                body_zone: None,
             }],
             joints: vec![],
             sensors: Vec::new(),

@@ -87,6 +87,8 @@ pub struct RobotState {
     pub joint_positions: Vec<f32>,
     pub joint_velocities: Vec<f32>,
     pub link_poses: Vec<[f32; 16]>,
+    #[serde(default)]
+    pub prev_link_poses: Vec<[f32; 16]>,
     pub sensor_readings: Vec<SensorReading>,
     pub actuator_commands: Vec<ActuatorCommand>,
     pub timestamp: f32,
@@ -125,6 +127,7 @@ impl RobotState {
             joint_positions: vec![0.0; num_joints],
             joint_velocities: vec![0.0; num_joints],
             link_poses: vec![Mat4::IDENTITY.to_cols_array(); num_links],
+            prev_link_poses: Vec::new(),
             sensor_readings,
             actuator_commands: Vec::with_capacity(num_sensors),
             timestamp: 0.0,
@@ -142,6 +145,32 @@ impl RobotState {
     /// Convert link_poses to glam::Mat4 values.
     pub fn link_poses_as_mat4(&self) -> Vec<Mat4> {
         self.link_poses.iter().map(Mat4::from_cols_array).collect()
+    }
+
+    /// Save the current link poses as the previous poses (for velocity computation).
+    pub fn save_previous_poses(&mut self) {
+        self.prev_link_poses = self.link_poses.clone();
+    }
+
+    /// Compute per-link velocities from the difference between current and previous poses.
+    ///
+    /// If `prev_link_poses` is empty (first simulation step), returns zero velocities
+    /// for every link. Otherwise, extracts the translation column (indices 12, 13, 14)
+    /// from each column-major Mat4 and divides by `dt`.
+    pub fn compute_link_velocities(&self, dt: f32) -> Vec<Vec3> {
+        if self.prev_link_poses.is_empty() {
+            return vec![Vec3::ZERO; self.link_poses.len()];
+        }
+
+        self.link_poses
+            .iter()
+            .zip(self.prev_link_poses.iter())
+            .map(|(cur, prev)| {
+                let cur_pos = Vec3::new(cur[12], cur[13], cur[14]);
+                let prev_pos = Vec3::new(prev[12], prev[13], prev[14]);
+                (cur_pos - prev_pos) / dt
+            })
+            .collect()
     }
 
     /// Set a link pose from a glam::Mat4.
@@ -1251,6 +1280,87 @@ mod tests {
         let json = serde_json::to_string(&state).expect("serialize");
         let deser: RobotState = serde_json::from_str(&json).expect("deserialize");
         assert!(deser.combat.is_none(), "combat should default to None");
+    }
+
+    // ---- Task 4: Link velocity tests ----
+
+    #[test]
+    fn test_compute_link_velocities_stationary() {
+        let def = test_definition();
+        let mut state = RobotState::new(&def);
+        // Both current and previous poses are identity (stationary)
+        state.prev_link_poses = state.link_poses.clone();
+
+        let vels = state.compute_link_velocities(1.0);
+        assert_eq!(vels.len(), def.links.len());
+        for (i, v) in vels.iter().enumerate() {
+            assert!(
+                v.length() < 1e-6,
+                "link {} velocity should be zero for stationary poses, got {:?}",
+                i,
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_link_velocities_moving() {
+        let def = test_definition();
+        let mut state = RobotState::new(&def);
+        // Previous poses: identity
+        state.prev_link_poses = state.link_poses.clone();
+        // Move link 0 by (1, 0, 0)
+        state.set_link_pose(0, Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0)));
+
+        let vels = state.compute_link_velocities(1.0);
+        assert!(
+            (vels[0] - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-6,
+            "link 0 velocity should be (1,0,0), got {:?}",
+            vels[0]
+        );
+        // Other links stayed at identity
+        for v in &vels[1..] {
+            assert!(
+                v.length() < 1e-6,
+                "stationary links should have zero velocity, got {:?}",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_save_previous_poses() {
+        let def = test_definition();
+        let mut state = RobotState::new(&def);
+        assert!(
+            state.prev_link_poses.is_empty(),
+            "prev_link_poses should start empty"
+        );
+
+        state.save_previous_poses();
+        assert_eq!(
+            state.prev_link_poses, state.link_poses,
+            "after save, prev_link_poses should equal link_poses"
+        );
+    }
+
+    #[test]
+    fn test_compute_velocities_first_step() {
+        let def = test_definition();
+        let state = RobotState::new(&def);
+        // prev_link_poses is empty on first step
+        assert!(state.prev_link_poses.is_empty());
+
+        let vels = state.compute_link_velocities(1.0);
+        assert_eq!(vels.len(), def.links.len());
+        for (i, v) in vels.iter().enumerate() {
+            assert!(
+                v.length() < 1e-6,
+                "link {} velocity should be zero on first step, got {:?}",
+                i,
+                v
+            );
+        }
     }
 
     #[test]

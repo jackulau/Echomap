@@ -274,6 +274,91 @@ pub fn detect_robot_collisions(
 }
 
 // ---------------------------------------------------------------------------
+// Punch detection
+// ---------------------------------------------------------------------------
+
+/// Minimum link velocity magnitude (m/s) to count as a punch.
+pub const PUNCH_VELOCITY_THRESHOLD: f32 = 2.0;
+
+/// Stamina cost per punch.
+pub const PUNCH_STAMINA_COST: f32 = 10.0;
+
+/// Detect punches from a set of link-link collisions by checking link velocities.
+///
+/// Each element of `robots` is `(robot_id, definition, state, link_velocities)`.
+/// For every collision where the attacker link's velocity exceeds
+/// [`PUNCH_VELOCITY_THRESHOLD`], a [`HitEvent`] is emitted provided the target
+/// link has a `body_zone` assigned (links without a zone produce no damage).
+#[allow(dead_code)]
+pub fn detect_punches(
+    collisions: &[LinkCollision],
+    robots: &[(usize, &RobotDefinition, &RobotState, &[Vec3])],
+) -> Vec<HitEvent> {
+    let mut hits = Vec::new();
+
+    for collision in collisions {
+        // Find robot entries matching collision ids
+        let robot_a = robots.iter().find(|(id, ..)| *id == collision.robot_a);
+        let robot_b = robots.iter().find(|(id, ..)| *id == collision.robot_b);
+
+        let (robot_a, robot_b) = match (robot_a, robot_b) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+
+        // Check if robot_a's link is punching robot_b
+        if let Some(vel_a) = robot_a.3.get(collision.link_a) {
+            let speed_a = vel_a.length();
+            if speed_a > PUNCH_VELOCITY_THRESHOLD {
+                // Target is robot_b's link
+                if let Some(zone) = &robot_b.1.links[collision.link_b].body_zone {
+                    let mass_a = robot_a.1.links[collision.link_a].mass;
+                    let impact_force = mass_a * speed_a;
+                    let damage = impact_force * zone.damage_multiplier();
+                    hits.push(HitEvent {
+                        attacker_robot: collision.robot_a,
+                        target_robot: collision.robot_b,
+                        attacker_link: collision.link_a,
+                        target_link: collision.link_b,
+                        zone: zone.clone(),
+                        impact_force,
+                        damage,
+                        contact_point: collision.contact_point,
+                        contact_normal: collision.contact_normal,
+                    });
+                }
+            }
+        }
+
+        // Check if robot_b's link is punching robot_a
+        if let Some(vel_b) = robot_b.3.get(collision.link_b) {
+            let speed_b = vel_b.length();
+            if speed_b > PUNCH_VELOCITY_THRESHOLD {
+                // Target is robot_a's link
+                if let Some(zone) = &robot_a.1.links[collision.link_a].body_zone {
+                    let mass_b = robot_b.1.links[collision.link_b].mass;
+                    let impact_force = mass_b * speed_b;
+                    let damage = impact_force * zone.damage_multiplier();
+                    hits.push(HitEvent {
+                        attacker_robot: collision.robot_b,
+                        target_robot: collision.robot_a,
+                        attacker_link: collision.link_b,
+                        target_link: collision.link_a,
+                        zone: zone.clone(),
+                        impact_force,
+                        damage,
+                        contact_point: collision.contact_point,
+                        contact_normal: collision.contact_normal,
+                    });
+                }
+            }
+        }
+    }
+
+    hits
+}
+
+// ---------------------------------------------------------------------------
 // BVH — Bounding Volume Hierarchy for accelerated ray-casting
 // ---------------------------------------------------------------------------
 
@@ -936,6 +1021,7 @@ mod tests {
             joint_positions: vec![],
             joint_velocities: vec![],
             link_poses: link_poses.iter().map(|m| m.to_cols_array()).collect(),
+            prev_link_poses: vec![],
             sensor_readings: vec![],
             actuator_commands: vec![],
             timestamp: 0.0,
@@ -1180,6 +1266,294 @@ mod tests {
         assert!(
             collisions.is_empty(),
             "single robot should produce no collisions"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4: Punch detection tests
+    // -----------------------------------------------------------------------
+
+    use crate::robot::definition::BodyZone;
+
+    /// Helper: build a robot definition with body zones assigned to links.
+    fn punch_robot_def(
+        num_links: usize,
+        mass: f32,
+        zones: Vec<Option<BodyZone>>,
+    ) -> RobotDefinition {
+        let links = (0..num_links)
+            .map(|i| LinkDefinition {
+                name: format!("link_{}", i),
+                mass,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Cuboid {
+                    half_extents: Vec3::splat(0.5),
+                },
+                parent_joint: if i == 0 { None } else { Some(i - 1) },
+                body_zone: zones.get(i).cloned().flatten(),
+            })
+            .collect();
+        RobotDefinition {
+            name: "punch_robot".to_string(),
+            links,
+            joints: vec![],
+            sensors: vec![],
+        }
+    }
+
+    #[test]
+    fn test_punch_detected_high_velocity() {
+        let def_a = punch_robot_def(1, 2.0, vec![None]);
+        let def_b = punch_robot_def(1, 2.0, vec![Some(BodyZone::Body)]);
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let collision = LinkCollision {
+            robot_a: 0,
+            link_a: 0,
+            robot_b: 1,
+            link_b: 0,
+            contact_point: Vec3::ZERO,
+            contact_normal: Vec3::X,
+            penetration: 0.1,
+        };
+
+        // Robot A's link moving at 3.0 m/s (above threshold of 2.0)
+        let vels_a = vec![Vec3::new(3.0, 0.0, 0.0)];
+        let vels_b = vec![Vec3::ZERO];
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![
+            (0, &def_a, &state_a, &vels_a),
+            (1, &def_b, &state_b, &vels_b),
+        ];
+
+        let hits = detect_punches(&[collision], &robots);
+        assert_eq!(hits.len(), 1, "should detect one punch");
+        assert_eq!(hits[0].attacker_robot, 0);
+        assert_eq!(hits[0].target_robot, 1);
+    }
+
+    #[test]
+    fn test_no_punch_low_velocity() {
+        let def_a = punch_robot_def(1, 2.0, vec![None]);
+        let def_b = punch_robot_def(1, 2.0, vec![Some(BodyZone::Body)]);
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let collision = LinkCollision {
+            robot_a: 0,
+            link_a: 0,
+            robot_b: 1,
+            link_b: 0,
+            contact_point: Vec3::ZERO,
+            contact_normal: Vec3::X,
+            penetration: 0.1,
+        };
+
+        // Robot A's link moving at 1.5 m/s (below threshold of 2.0)
+        let vels_a = vec![Vec3::new(1.5, 0.0, 0.0)];
+        let vels_b = vec![Vec3::ZERO];
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![
+            (0, &def_a, &state_a, &vels_a),
+            (1, &def_b, &state_b, &vels_b),
+        ];
+
+        let hits = detect_punches(&[collision], &robots);
+        assert!(hits.is_empty(), "low velocity should not produce a punch");
+    }
+
+    #[test]
+    fn test_punch_damage_head_zone() {
+        let def_a = punch_robot_def(1, 2.0, vec![None]);
+        let def_b = punch_robot_def(1, 2.0, vec![Some(BodyZone::Head)]);
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let collision = LinkCollision {
+            robot_a: 0,
+            link_a: 0,
+            robot_b: 1,
+            link_b: 0,
+            contact_point: Vec3::ZERO,
+            contact_normal: Vec3::X,
+            penetration: 0.1,
+        };
+
+        let speed = 5.0_f32;
+        let vels_a = vec![Vec3::new(speed, 0.0, 0.0)];
+        let vels_b = vec![Vec3::ZERO];
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![
+            (0, &def_a, &state_a, &vels_a),
+            (1, &def_b, &state_b, &vels_b),
+        ];
+
+        let hits = detect_punches(&[collision], &robots);
+        assert_eq!(hits.len(), 1);
+        let expected_force = 2.0 * speed; // mass * speed
+        let expected_damage = expected_force * 3.0; // Head multiplier = 3.0
+        assert!(
+            (hits[0].impact_force - expected_force).abs() < 1e-6,
+            "impact_force should be {}, got {}",
+            expected_force,
+            hits[0].impact_force
+        );
+        assert!(
+            (hits[0].damage - expected_damage).abs() < 1e-6,
+            "damage should be {} (head zone 3x), got {}",
+            expected_damage,
+            hits[0].damage
+        );
+    }
+
+    #[test]
+    fn test_punch_damage_body_zone() {
+        let def_a = punch_robot_def(1, 2.0, vec![None]);
+        let def_b = punch_robot_def(1, 2.0, vec![Some(BodyZone::Body)]);
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let collision = LinkCollision {
+            robot_a: 0,
+            link_a: 0,
+            robot_b: 1,
+            link_b: 0,
+            contact_point: Vec3::ZERO,
+            contact_normal: Vec3::X,
+            penetration: 0.1,
+        };
+
+        let speed = 5.0_f32;
+        let vels_a = vec![Vec3::new(speed, 0.0, 0.0)];
+        let vels_b = vec![Vec3::ZERO];
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![
+            (0, &def_a, &state_a, &vels_a),
+            (1, &def_b, &state_b, &vels_b),
+        ];
+
+        let hits = detect_punches(&[collision], &robots);
+        assert_eq!(hits.len(), 1);
+        let expected_force = 2.0 * speed;
+        let expected_damage = expected_force * 1.0; // Body multiplier = 1.0
+        assert!(
+            (hits[0].damage - expected_damage).abs() < 1e-6,
+            "damage should be {} (body zone 1x), got {}",
+            expected_damage,
+            hits[0].damage
+        );
+    }
+
+    #[test]
+    fn test_punch_damage_arm_zone() {
+        let def_a = punch_robot_def(1, 2.0, vec![None]);
+        let def_b = punch_robot_def(1, 2.0, vec![Some(BodyZone::LeftArm)]);
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let collision = LinkCollision {
+            robot_a: 0,
+            link_a: 0,
+            robot_b: 1,
+            link_b: 0,
+            contact_point: Vec3::ZERO,
+            contact_normal: Vec3::X,
+            penetration: 0.1,
+        };
+
+        let speed = 5.0_f32;
+        let vels_a = vec![Vec3::new(speed, 0.0, 0.0)];
+        let vels_b = vec![Vec3::ZERO];
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![
+            (0, &def_a, &state_a, &vels_a),
+            (1, &def_b, &state_b, &vels_b),
+        ];
+
+        let hits = detect_punches(&[collision], &robots);
+        assert_eq!(hits.len(), 1);
+        let expected_force = 2.0 * speed;
+        let expected_damage = expected_force * 0.5; // LeftArm multiplier = 0.5
+        assert!(
+            (hits[0].damage - expected_damage).abs() < 1e-6,
+            "damage should be {} (arm zone 0.5x), got {}",
+            expected_damage,
+            hits[0].damage
+        );
+    }
+
+    #[test]
+    fn test_punch_no_zone_no_damage() {
+        let def_a = punch_robot_def(1, 2.0, vec![None]);
+        let def_b = punch_robot_def(1, 2.0, vec![None]); // No body zone on target
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let collision = LinkCollision {
+            robot_a: 0,
+            link_a: 0,
+            robot_b: 1,
+            link_b: 0,
+            contact_point: Vec3::ZERO,
+            contact_normal: Vec3::X,
+            penetration: 0.1,
+        };
+
+        let vels_a = vec![Vec3::new(5.0, 0.0, 0.0)];
+        let vels_b = vec![Vec3::ZERO];
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![
+            (0, &def_a, &state_a, &vels_a),
+            (1, &def_b, &state_b, &vels_b),
+        ];
+
+        let hits = detect_punches(&[collision], &robots);
+        assert!(
+            hits.is_empty(),
+            "no body zone on target should produce no HitEvent"
+        );
+    }
+
+    #[test]
+    fn test_zero_mass_link_no_panic() {
+        let def_a = punch_robot_def(1, 0.0, vec![None]); // Zero mass attacker
+        let def_b = punch_robot_def(1, 2.0, vec![Some(BodyZone::Body)]);
+        let state_a = test_robot_state(1, vec![Mat4::IDENTITY]);
+        let state_b = test_robot_state(1, vec![Mat4::IDENTITY]);
+
+        let collision = LinkCollision {
+            robot_a: 0,
+            link_a: 0,
+            robot_b: 1,
+            link_b: 0,
+            contact_point: Vec3::ZERO,
+            contact_normal: Vec3::X,
+            penetration: 0.1,
+        };
+
+        let vels_a = vec![Vec3::new(5.0, 0.0, 0.0)];
+        let vels_b = vec![Vec3::ZERO];
+
+        let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![
+            (0, &def_a, &state_a, &vels_a),
+            (1, &def_b, &state_b, &vels_b),
+        ];
+
+        let hits = detect_punches(&[collision], &robots);
+        assert_eq!(hits.len(), 1, "zero mass should still produce a HitEvent");
+        assert!(
+            (hits[0].impact_force - 0.0).abs() < 1e-6,
+            "impact_force should be 0 for zero mass"
+        );
+        assert!(
+            (hits[0].damage - 0.0).abs() < 1e-6,
+            "damage should be 0 for zero mass"
+        );
+        // Verify no NaN or Inf
+        assert!(
+            hits[0].damage.is_finite(),
+            "damage should be finite, not NaN/Inf"
         );
     }
 }

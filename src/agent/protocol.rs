@@ -699,4 +699,67 @@ mod tests {
             "boolean in motor_velocities should fail for f32 field"
         );
     }
+
+    #[test]
+    fn test_observation_with_match_state() {
+        let state = GymRobotState {
+            joint_positions: vec![],
+            joint_velocities: vec![],
+            sensor_readings: GymSensorReadings {
+                distances: vec![],
+                contacts: vec![],
+                imu: vec![],
+                camera_visible: vec![],
+            },
+            gripper_states: vec![],
+            combat: None,
+        };
+        let ms = crate::robot::boxing::BoxingMatchState {
+            phase: "fighting".to_string(),
+            current_round: 2,
+            round_time: 45.0,
+            round_duration: 180.0,
+            scores: vec![[10, 9]],
+            total_score_a: 10,
+            total_score_b: 9,
+            your_robot: 0,
+            opponent_health: 80.0,
+            opponent_stamina: 60.0,
+        };
+        let msg = ServerMessage::Observation {
+            state,
+            reward: 0.0,
+            done: false,
+            step_count: 100,
+            messages: vec![],
+            hit_events: vec![],
+            match_state: Some(ms),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: ServerMessage = serde_json::from_str(&json).unwrap();
+        match deser {
+            ServerMessage::Observation { match_state, .. } => {
+                let ms = match_state.expect("match_state should be present");
+                assert_eq!(ms.phase, "fighting");
+                assert_eq!(ms.current_round, 2);
+                assert!((ms.opponent_health - 80.0).abs() < 0.01);
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_observation_without_match_state_backward_compat() {
+        let json = r#"{"type":"observation","state":{"joint_positions":[],"joint_velocities":[],"sensor_readings":{"distances":[],"contacts":[],"imu":[],"camera_visible":[]},"gripper_states":[]},"reward":0.0,"done":false,"step_count":0}"#;
+        let deser: ServerMessage = serde_json::from_str(json).unwrap();
+        match deser {
+            ServerMessage::Observation { match_state, .. } => {
+                assert!(
+                    match_state.is_none(),
+                    "missing match_state should default to None"
+                );
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+    }
 }

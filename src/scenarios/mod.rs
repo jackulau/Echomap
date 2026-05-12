@@ -105,6 +105,73 @@ pub fn make_test_room(size: f32) -> Scene {
     }
 }
 
+/// Create a boxing ring scene centered at the origin.
+///
+/// The ring is a flat floor with 4 low walls (1.0m high) forming a square
+/// boundary, representing ropes. The ring spans from `(-size/2, 0, -size/2)`
+/// to `(size/2, wall_height, size/2)` on the XZ plane with the floor at y=0.
+///
+/// Returns a `Scene` with 5 `SceneObject`s: 1 floor + 4 walls.
+/// A default `size` of 6.0 meters is typical for a boxing ring.
+pub fn make_boxing_ring(size: f32) -> Scene {
+    let h = size / 2.0;
+    let wall_height: f32 = 1.0;
+    let mat = make_default_material();
+
+    // Floor corners (y=0)
+    let f0 = Vec3::new(-h, 0.0, -h);
+    let f1 = Vec3::new(h, 0.0, -h);
+    let f2 = Vec3::new(h, 0.0, h);
+    let f3 = Vec3::new(-h, 0.0, h);
+
+    // Top-of-wall corners (y=wall_height)
+    let t0 = Vec3::new(-h, wall_height, -h);
+    let t1 = Vec3::new(h, wall_height, -h);
+    let t2 = Vec3::new(h, wall_height, h);
+    let t3 = Vec3::new(-h, wall_height, h);
+
+    let make_wall = |name: &str, a: Vec3, b: Vec3, c: Vec3, d: Vec3, normal: Vec3| -> SceneObject {
+        let v = |pos: Vec3| Vertex {
+            position: pos,
+            normal,
+        };
+        SceneObject {
+            name: name.to_string(),
+            mesh: Mesh {
+                triangles: vec![
+                    Triangle {
+                        vertices: [v(a), v(b), v(c)],
+                    },
+                    Triangle {
+                        vertices: [v(a), v(c), v(d)],
+                    },
+                ],
+            },
+            material: mat.clone(),
+            visible: true,
+            interior_medium: None,
+        }
+    };
+
+    let meshes = vec![
+        // Floor (y=0, normal up)
+        make_wall("Floor", f0, f1, f2, f3, Vec3::Y),
+        // Front wall (z=-h, normal +Z into ring)
+        make_wall("Front Wall", f0, t0, t1, f1, Vec3::Z),
+        // Back wall (z=+h, normal -Z into ring)
+        make_wall("Back Wall", f2, t2, t3, f3, Vec3::NEG_Z),
+        // Left wall (x=-h, normal +X into ring)
+        make_wall("Left Wall", f3, t3, t0, f0, Vec3::X),
+        // Right wall (x=+h, normal -X into ring)
+        make_wall("Right Wall", f1, t1, t2, f2, Vec3::NEG_X),
+    ];
+
+    Scene {
+        meshes,
+        ..Scene::default()
+    }
+}
+
 /// Create a default acoustic material with known physical properties.
 ///
 /// Uses concrete-like values matching `AcousticMaterial::default()` but
@@ -416,5 +483,104 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_boxing_ring_has_floor_and_walls() {
+        let scene = make_boxing_ring(6.0);
+        assert_eq!(
+            scene.meshes.len(),
+            5,
+            "Boxing ring should have 5 SceneObjects (1 floor + 4 walls)"
+        );
+
+        // Verify names
+        assert_eq!(scene.meshes[0].name, "Floor");
+        assert_eq!(scene.meshes[1].name, "Front Wall");
+        assert_eq!(scene.meshes[2].name, "Back Wall");
+        assert_eq!(scene.meshes[3].name, "Left Wall");
+        assert_eq!(scene.meshes[4].name, "Right Wall");
+
+        // Each object has 2 triangles with nonzero area
+        for (i, obj) in scene.meshes.iter().enumerate() {
+            assert_eq!(
+                obj.mesh.triangles.len(),
+                2,
+                "Object {i} ({}) should have 2 triangles",
+                obj.name
+            );
+            for (j, tri) in obj.mesh.triangles.iter().enumerate() {
+                let area = tri.area();
+                assert!(
+                    area > 0.0,
+                    "Object {i} ({}) triangle {j} should have nonzero area, got {area}",
+                    obj.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_boxing_ring_dimensions() {
+        let size = 8.0_f32;
+        let half = size / 2.0;
+        let wall_height = 1.0_f32;
+        let scene = make_boxing_ring(size);
+
+        // All vertex positions should be within [-half, half] on X and Z,
+        // and within [0, wall_height] on Y.
+        for obj in &scene.meshes {
+            for tri in &obj.mesh.triangles {
+                for v in &tri.vertices {
+                    assert!(
+                        v.position.x >= -half && v.position.x <= half,
+                        "Vertex x={} should be within [-{half}, {half}]",
+                        v.position.x
+                    );
+                    assert!(
+                        v.position.z >= -half && v.position.z <= half,
+                        "Vertex z={} should be within [-{half}, {half}]",
+                        v.position.z
+                    );
+                    assert!(
+                        v.position.y >= 0.0 && v.position.y <= wall_height,
+                        "Vertex y={} should be within [0, {wall_height}]",
+                        v.position.y
+                    );
+                }
+            }
+        }
+
+        // Verify ring spans the full extent: collect all unique x and z values
+        let mut min_x = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut min_z = f32::MAX;
+        let mut max_z = f32::MIN;
+        for obj in &scene.meshes {
+            for tri in &obj.mesh.triangles {
+                for v in &tri.vertices {
+                    min_x = min_x.min(v.position.x);
+                    max_x = max_x.max(v.position.x);
+                    min_z = min_z.min(v.position.z);
+                    max_z = max_z.max(v.position.z);
+                }
+            }
+        }
+        assert!(
+            (min_x - (-half)).abs() < f32::EPSILON,
+            "Min x should be -{half}, got {min_x}"
+        );
+        assert!(
+            (max_x - half).abs() < f32::EPSILON,
+            "Max x should be {half}, got {max_x}"
+        );
+        assert!(
+            (min_z - (-half)).abs() < f32::EPSILON,
+            "Min z should be -{half}, got {min_z}"
+        );
+        assert!(
+            (max_z - half).abs() < f32::EPSILON,
+            "Max z should be {half}, got {max_z}"
+        );
     }
 }

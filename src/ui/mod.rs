@@ -55,6 +55,11 @@ pub struct ViewportState {
     pub selected_robot: usize,
     pub show_robots: bool,
     pub show_sensor_rays: bool,
+    pub hit_flash_timer: f32,
+    pub hit_flash_robot: Option<usize>,
+    pub camera_auto_track: bool,
+    pub show_boxing_hud: bool,
+    pub boxing_messages: Vec<(f32, String, usize)>,
 }
 
 impl Default for ViewportState {
@@ -79,6 +84,11 @@ impl Default for ViewportState {
             selected_robot: 0,
             show_robots: true,
             show_sensor_rays: true,
+            hit_flash_timer: 0.0,
+            hit_flash_robot: None,
+            camera_auto_track: false,
+            show_boxing_hud: true,
+            boxing_messages: Vec::new(),
         }
     }
 }
@@ -1089,6 +1099,7 @@ pub fn viewport_3d(
     gas_sim: &GasSimulation,
     robot_manager: &RobotManager,
     activity_log: &AgentActivityLog,
+    bridge: &SimBridgeClient,
 ) {
     egui::CentralPanel::default().show(ctx, |ui| {
         let (response, painter) =
@@ -1374,6 +1385,82 @@ pub fn viewport_3d(
                 scale,
                 rect,
             );
+
+            // --- Boxing HUD overlays ---
+            if vp.show_boxing_hud && bridge.boxing_match.is_some() {
+                render_health_bars(&painter, robot_manager, cam, center, scale, rect);
+                render_boxing_score_overlay(&painter, bridge, rect);
+                render_message_feed(&painter, &vp.boxing_messages, activity_log.elapsed, rect);
+                render_hit_flash(&painter, vp.hit_flash_timer, rect);
+            }
+        }
+
+        // Update hit flash timer
+        let dt = ctx.input(|i| i.predicted_dt);
+        if vp.hit_flash_timer > 0.0 {
+            vp.hit_flash_timer = (vp.hit_flash_timer - dt * 4.0).max(0.0);
+        }
+
+        // Trigger flash on new hit events
+        if !robot_manager.last_hit_events.is_empty() {
+            vp.hit_flash_timer = 1.0;
+            if let Some(hit) = robot_manager.last_hit_events.first() {
+                vp.hit_flash_robot = Some(hit.target_robot);
+            }
+        }
+
+        // Camera auto-track: follow midpoint between two boxing robots
+        if vp.camera_auto_track {
+            if let Some(ref bm) = bridge.boxing_match {
+                let robot_a_id = bm.robot_a;
+                let robot_b_id = bm.robot_b;
+                if let (Some(ra), Some(rb)) = (
+                    robot_manager.get_robot(robot_a_id),
+                    robot_manager.get_robot(robot_b_id),
+                ) {
+                    let poses_a = ra.state.link_poses_as_mat4();
+                    let poses_b = rb.state.link_poses_as_mat4();
+                    if !poses_a.is_empty() && !poses_b.is_empty() {
+                        let pos_a = Vec3::new(
+                            poses_a[0].w_axis.x,
+                            poses_a[0].w_axis.y,
+                            poses_a[0].w_axis.z,
+                        );
+                        let pos_b = Vec3::new(
+                            poses_b[0].w_axis.x,
+                            poses_b[0].w_axis.y,
+                            poses_b[0].w_axis.z,
+                        );
+                        let mid = (pos_a + pos_b) * 0.5;
+                        let dist = (pos_a - pos_b).length();
+                        let target = Vec3::new(mid.x, mid.y + 0.3, mid.z);
+                        let lerp_f = 0.05;
+                        cam.target = cam.target + (target - cam.target) * lerp_f;
+                        let desired_dist = (dist * 2.5).max(4.0);
+                        cam.distance += (desired_dist - cam.distance) * lerp_f;
+                        cam.update_position();
+                    }
+                }
+            }
+        }
+
+        // Collect messages from activity log for the message feed
+        for event in activity_log.iter() {
+            if event.kind == AgentEventKind::Message {
+                let robot_id = event.robot_id.unwrap_or(0);
+                let already_has = vp.boxing_messages.iter().any(|(t, msg, rid)| {
+                    (*t - event.timestamp).abs() < 0.01
+                        && msg == &event.description
+                        && *rid == robot_id
+                });
+                if !already_has {
+                    vp.boxing_messages
+                        .push((event.timestamp, event.description.clone(), robot_id));
+                    if vp.boxing_messages.len() > 50 {
+                        vp.boxing_messages.remove(0);
+                    }
+                }
+            }
         }
 
         // Sound sources
@@ -1865,6 +1952,206 @@ fn focus_on_scene(cam: &mut Camera, scene: &Scene) {
     let center = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
     cam.focus_on(center, radius);
+}
+
+// ---------------------------------------------------------------------------
+// Boxing HUD overlays
+// ---------------------------------------------------------------------------
+
+fn render_health_bars(
+    painter: &egui::Painter,
+    robot_manager: &RobotManager,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    for robot in &robot_manager.robots {
+        let combat = match &robot.state.combat {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let link_poses = robot.state.link_poses_as_mat4();
+        if link_poses.is_empty() {
+            continue;
+        }
+
+        let base_pos = Vec3::new(
+            link_poses[0].w_axis.x,
+            link_poses[0].w_axis.y + 0.55,
+            link_poses[0].w_axis.z,
+        );
+        let sp = project_3d(base_pos, cam, center, scale);
+        if !rect.contains(sp) {
+            continue;
+        }
+
+        let bar_w = 50.0;
+        let bar_h = 6.0;
+        let bar_x = sp.x - bar_w / 2.0;
+
+        // Health bar background
+        let bg_rect =
+            egui::Rect::from_min_size(egui::pos2(bar_x, sp.y - bar_h), egui::vec2(bar_w, bar_h));
+        painter.rect_filled(bg_rect, 2.0, egui::Color32::from_rgb(40, 40, 40));
+
+        // Health fill
+        let health_pct = (combat.health / combat.max_health).clamp(0.0, 1.0);
+        let health_color = if health_pct > 0.5 {
+            egui::Color32::from_rgb(80, 220, 80)
+        } else if health_pct > 0.25 {
+            egui::Color32::from_rgb(220, 200, 60)
+        } else {
+            egui::Color32::from_rgb(220, 60, 60)
+        };
+        let fill_rect = egui::Rect::from_min_size(
+            egui::pos2(bar_x, sp.y - bar_h),
+            egui::vec2(bar_w * health_pct, bar_h),
+        );
+        painter.rect_filled(fill_rect, 2.0, health_color);
+
+        // Stamina bar (smaller, below health)
+        let stam_y = sp.y + 1.0;
+        let stam_h = 3.0;
+        let stam_bg =
+            egui::Rect::from_min_size(egui::pos2(bar_x, stam_y), egui::vec2(bar_w, stam_h));
+        painter.rect_filled(stam_bg, 1.0, egui::Color32::from_rgb(30, 30, 30));
+
+        let stam_pct = (combat.stamina / combat.max_stamina).clamp(0.0, 1.0);
+        let stam_fill = egui::Rect::from_min_size(
+            egui::pos2(bar_x, stam_y),
+            egui::vec2(bar_w * stam_pct, stam_h),
+        );
+        painter.rect_filled(stam_fill, 1.0, egui::Color32::from_rgb(60, 150, 255));
+
+        // Health text
+        painter.text(
+            egui::pos2(sp.x, sp.y - bar_h - 2.0),
+            egui::Align2::CENTER_BOTTOM,
+            format!("{:.0}", combat.health),
+            egui::FontId::proportional(10.0),
+            egui::Color32::WHITE,
+        );
+    }
+}
+
+fn render_boxing_score_overlay(
+    painter: &egui::Painter,
+    bridge: &SimBridgeClient,
+    rect: egui::Rect,
+) {
+    let bm = match &bridge.boxing_match {
+        Some(bm) => bm,
+        None => return,
+    };
+
+    let snapshot = bm.snapshot(0, None);
+    let phase_display = match snapshot.phase.as_str() {
+        p if p.starts_with("countdown_") => {
+            let secs = p.strip_prefix("countdown_").unwrap_or("?");
+            format!("Countdown: {}", secs)
+        }
+        "fighting" => format!(
+            "Round {} — {:.0}s",
+            snapshot.current_round,
+            snapshot.round_duration - snapshot.round_time
+        ),
+        p if p.starts_with("round_end_") => "Round End".to_string(),
+        "match_end" => "Match Over".to_string(),
+        "waiting_for_agents" => "Waiting for Agents...".to_string(),
+        other => other.to_string(),
+    };
+
+    let top_center = egui::pos2(rect.center().x, rect.min.y + 15.0);
+
+    // Phase banner
+    painter.text(
+        top_center,
+        egui::Align2::CENTER_TOP,
+        &phase_display,
+        egui::FontId::proportional(16.0),
+        egui::Color32::WHITE,
+    );
+
+    // Score
+    let score_pos = egui::pos2(rect.center().x, rect.min.y + 35.0);
+    let score_text = format!(
+        "Robot A: {}  —  Robot B: {}",
+        snapshot.total_score_a, snapshot.total_score_b
+    );
+    painter.text(
+        score_pos,
+        egui::Align2::CENTER_TOP,
+        &score_text,
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_rgb(200, 200, 200),
+    );
+
+    // Round scores
+    if !snapshot.scores.is_empty() {
+        let rounds_pos = egui::pos2(rect.center().x, rect.min.y + 52.0);
+        let rounds: Vec<String> = snapshot
+            .scores
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("R{}: {}-{}", i + 1, s[0], s[1]))
+            .collect();
+        painter.text(
+            rounds_pos,
+            egui::Align2::CENTER_TOP,
+            rounds.join("  "),
+            egui::FontId::proportional(10.0),
+            egui::Color32::from_rgb(150, 150, 150),
+        );
+    }
+}
+
+fn render_message_feed(
+    painter: &egui::Painter,
+    messages: &[(f32, String, usize)],
+    elapsed: f32,
+    rect: egui::Rect,
+) {
+    let feed_x = rect.min.x + 10.0;
+    let feed_y = rect.max.y - 20.0;
+    let max_age = 8.0;
+    let max_show = 6;
+
+    let recent: Vec<_> = messages
+        .iter()
+        .filter(|(t, _, _)| elapsed - t < max_age)
+        .rev()
+        .take(max_show)
+        .collect();
+
+    for (i, (timestamp, text, robot_id)) in recent.iter().enumerate() {
+        let age = elapsed - timestamp;
+        let alpha = ((1.0 - age / max_age) * 255.0) as u8;
+        let color = if *robot_id == 0 {
+            egui::Color32::from_rgba_premultiplied(80, 180, 255, alpha)
+        } else {
+            egui::Color32::from_rgba_premultiplied(255, 120, 80, alpha)
+        };
+        let y = feed_y - (i as f32) * 16.0;
+        let label = format!("R{}: {}", robot_id, text);
+        painter.text(
+            egui::pos2(feed_x, y),
+            egui::Align2::LEFT_BOTTOM,
+            &label,
+            egui::FontId::proportional(11.0),
+            color,
+        );
+    }
+}
+
+fn render_hit_flash(painter: &egui::Painter, flash_timer: f32, rect: egui::Rect) {
+    if flash_timer <= 0.0 {
+        return;
+    }
+    let alpha = (flash_timer.min(1.0) * 80.0) as u8;
+    let flash_color = egui::Color32::from_rgba_premultiplied(255, 50, 50, alpha);
+    painter.rect_filled(rect, 0.0, flash_color);
 }
 
 // ---------------------------------------------------------------------------

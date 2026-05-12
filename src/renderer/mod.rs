@@ -75,7 +75,7 @@ impl Camera {
         self.update_position();
     }
 
-    fn update_position(&mut self) {
+    pub fn update_position(&mut self) {
         self.position = self.target
             + Vec3::new(
                 self.distance * self.pitch.cos() * self.yaw.cos(),
@@ -380,5 +380,71 @@ fn sample_gas_field(
             let vz = grid.vel_z[idx];
             (vx * vx + vy * vy + vz * vz).sqrt()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_camera_default_position() {
+        let cam = Camera::default();
+        assert!(cam.distance > 0.0);
+        assert!((cam.target - Vec3::ZERO).length() < 0.01);
+    }
+
+    #[test]
+    fn test_camera_focus_on() {
+        let mut cam = Camera::default();
+        let target = Vec3::new(1.0, 2.0, 3.0);
+        cam.focus_on(target, 5.0);
+        assert!((cam.target - target).length() < 0.01);
+        assert!(cam.distance >= 3.0);
+    }
+
+    #[test]
+    fn test_camera_orbit() {
+        let mut cam = Camera::default();
+        let old_yaw = cam.yaw;
+        cam.orbit(10.0, 0.0);
+        assert!((cam.yaw - old_yaw).abs() > 0.01);
+    }
+
+    #[test]
+    fn test_camera_zoom() {
+        let mut cam = Camera::default();
+        let old_dist = cam.distance;
+        cam.zoom(2.0);
+        assert!(cam.distance < old_dist);
+    }
+
+    #[test]
+    fn test_camera_update_position_public() {
+        let mut cam = Camera::default();
+        cam.target = Vec3::new(1.0, 0.0, 0.0);
+        cam.update_position();
+        assert!((cam.position - cam.target).length() > 0.1);
+    }
+
+    #[test]
+    fn test_camera_smooth_track() {
+        let mut cam = Camera::default();
+        let target = Vec3::new(5.0, 0.5, 0.0);
+        let lerp = 0.05;
+        for _ in 0..100 {
+            cam.target = cam.target + (target - cam.target) * lerp;
+            cam.update_position();
+        }
+        assert!((cam.target - target).length() < 0.1);
+    }
+
+    #[test]
+    fn test_project_3d_center_stays_near_center() {
+        let cam = Camera::default();
+        let screen_center = egui::Pos2::new(500.0, 400.0);
+        let sp = project_3d(cam.target, &cam, screen_center, 50.0);
+        assert!((sp.x - screen_center.x).abs() < 100.0);
+        assert!((sp.y - screen_center.y).abs() < 100.0);
     }
 }

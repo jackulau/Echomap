@@ -133,6 +133,7 @@ mod app {
                 &self.gas_sim,
                 &self.robot_manager,
                 &self.activity_log,
+                &self.bridge_client,
             );
             echomap::ui::status_bar(ctx, &self.viewport, &self.scene);
 

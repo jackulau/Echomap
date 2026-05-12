@@ -166,6 +166,65 @@ impl GymRobotState {
             gripper_states: Vec::new(),
         }
     }
+
+    pub fn from_robot_state_into(
+        state: &RobotState,
+        _def: &RobotDefinition,
+        buf: &mut GymStateBuffer,
+    ) -> Self {
+        buf.distances.clear();
+        buf.contacts.clear();
+        buf.imu.clear();
+        buf.joint_positions.clear();
+        buf.joint_velocities.clear();
+
+        for reading in &state.sensor_readings {
+            match reading {
+                SensorReading::Distance(d) => buf.distances.push(*d),
+                SensorReading::Contact(c) => buf.contacts.push(*c),
+                SensorReading::Imu {
+                    linear_accel,
+                    angular_vel,
+                } => buf.imu.push(ImuReading {
+                    linear_acceleration: *linear_accel,
+                    angular_velocity: *angular_vel,
+                }),
+                SensorReading::Lidar(_) => {}
+            }
+        }
+
+        buf.joint_positions
+            .extend_from_slice(&state.joint_positions);
+        buf.joint_velocities
+            .extend_from_slice(&state.joint_velocities);
+
+        Self {
+            joint_positions: buf.joint_positions.clone(),
+            joint_velocities: buf.joint_velocities.clone(),
+            sensor_readings: GymSensorReadings {
+                distances: buf.distances.clone(),
+                contacts: buf.contacts.clone(),
+                imu: buf.imu.clone(),
+                camera_visible: Vec::new(),
+            },
+            gripper_states: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct GymStateBuffer {
+    pub distances: Vec<f32>,
+    pub contacts: Vec<bool>,
+    pub imu: Vec<ImuReading>,
+    pub joint_positions: Vec<f32>,
+    pub joint_velocities: Vec<f32>,
+}
+
+impl GymStateBuffer {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// Describes the dimensions and ranges of sensor outputs (observation space)
@@ -246,10 +305,12 @@ pub fn apply_action(def: &RobotDefinition, state: &mut RobotState, action: &Robo
     let num_joints = def.joints.len();
     let num_motors = action.motor_velocities.len().min(num_joints);
 
-    state.actuator_commands = action.motor_velocities[..num_motors]
-        .iter()
-        .map(|&v| ActuatorCommand::Velocity(v))
-        .collect();
+    state.actuator_commands.clear();
+    state.actuator_commands.extend(
+        action.motor_velocities[..num_motors]
+            .iter()
+            .map(|&v| ActuatorCommand::Velocity(v)),
+    );
 }
 
 #[cfg(test)]

@@ -40,6 +40,10 @@ impl AgentSession {
             ClientMessage::Step { action } => self.handle_step(action).await,
             ClientMessage::Observe => self.handle_observe().await,
             ClientMessage::Close => self.handle_close(),
+            ClientMessage::SendMessage {
+                to_robot_id,
+                content,
+            } => self.handle_send_message(to_robot_id, content).await,
         }
     }
 
@@ -94,13 +98,14 @@ impl AgentSession {
             .send_command(SimCommand::Reset { robot_id })
             .await
         {
-            Ok(SimResponse::Reset { state }) => {
+            Ok(SimResponse::Reset { state, messages }) => {
                 self.step_count = 0;
                 ServerMessage::Observation {
                     state,
                     reward: 0.0,
                     done: false,
                     step_count: 0,
+                    messages,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -126,13 +131,16 @@ impl AgentSession {
             .send_command(SimCommand::Step { robot_id, action })
             .await
         {
-            Ok(SimResponse::Stepped { state, .. }) => {
+            Ok(SimResponse::Stepped {
+                state, messages, ..
+            }) => {
                 self.step_count += 1;
                 ServerMessage::Observation {
                     state,
                     reward: 0.0,
                     done: false,
                     step_count: self.step_count,
+                    messages,
                 }
             }
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
@@ -158,12 +166,41 @@ impl AgentSession {
             .send_command(SimCommand::GetObservation { robot_id })
             .await
         {
-            Ok(SimResponse::Observation { state }) => ServerMessage::Observation {
+            Ok(SimResponse::Observation { state, messages }) => ServerMessage::Observation {
                 state,
                 reward: 0.0,
                 done: false,
                 step_count: self.step_count,
+                messages,
             },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(_) => ServerMessage::Error {
+                message: "unexpected response from bridge".to_string(),
+            },
+            Err(e) => ServerMessage::Error { message: e },
+        }
+    }
+
+    async fn handle_send_message(&mut self, to_robot_id: usize, content: String) -> ServerMessage {
+        let from_robot_id = match self.robot_id {
+            Some(id) => id,
+            None => {
+                return ServerMessage::Error {
+                    message: "not connected to a robot".to_string(),
+                }
+            }
+        };
+
+        match self
+            .bridge
+            .send_command(SimCommand::SendMessage {
+                from_robot_id,
+                to_robot_id,
+                content,
+            })
+            .await
+        {
+            Ok(SimResponse::MessageSent) => ServerMessage::MessageSent,
             Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
@@ -789,6 +826,100 @@ mod tests {
             other => panic!("Expected Observation, got {:?}", other),
         }
 
+        handle.abort();
+    }
+
+    // ---- Messaging tests ----
+
+    fn setup_two_robot_env() -> (AgentSession, AgentSession, tokio::task::JoinHandle<()>) {
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        let (server, mut client) = create_bridge();
+        let session0 = AgentSession::new(server.clone());
+        let session1 = AgentSession::new(server);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                client.process_pending(&mut manager, &[]);
+                tokio::task::yield_now().await;
+            }
+        });
+
+        (session0, session1, handle)
+    }
+
+    #[tokio::test]
+    async fn test_session_send_message() {
+        let (mut s0, _s1, handle) = setup_two_robot_env();
+        s0.handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        let resp = s0
+            .handle_message(ClientMessage::SendMessage {
+                to_robot_id: 1,
+                content: "trash talk".into(),
+            })
+            .await;
+        assert!(
+            matches!(resp, ServerMessage::MessageSent),
+            "Expected MessageSent, got {:?}",
+            resp
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_send_message_not_connected() {
+        let (mut s0, _s1, handle) = setup_two_robot_env();
+
+        let resp = s0
+            .handle_message(ClientMessage::SendMessage {
+                to_robot_id: 1,
+                content: "hello".into(),
+            })
+            .await;
+        match resp {
+            ServerMessage::Error { message } => {
+                assert!(message.contains("not connected"));
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_session_step_includes_messages() {
+        let (mut s0, mut s1, handle) = setup_two_robot_env();
+        s0.handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+        s1.handle_message(ClientMessage::Connect { robot_id: 1 })
+            .await;
+
+        // Robot 0 sends message to robot 1
+        s0.handle_message(ClientMessage::SendMessage {
+            to_robot_id: 1,
+            content: "incoming".into(),
+        })
+        .await;
+
+        // Robot 1 steps — should receive the message
+        let action = RobotAction {
+            motor_velocities: vec![0.0, 0.0],
+            gripper_commands: vec![],
+        };
+        let resp = s1.handle_message(ClientMessage::Step { action }).await;
+        match resp {
+            ServerMessage::Observation { messages, .. } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "incoming");
+                assert_eq!(messages[0].from_robot_id, 0);
+                assert_eq!(messages[0].to_robot_id, 1);
+            }
+            other => panic!("Expected Observation with messages, got {:?}", other),
+        }
         handle.abort();
     }
 }

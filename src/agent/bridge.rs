@@ -1,10 +1,12 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::protocol::AgentMessage;
 use crate::robot::definition::RobotDefinition;
 use crate::robot::state::{
-    apply_action, ActionSpace, GymRobotState, ObservationSpace, RobotAction, RobotState,
+    apply_action, ActionSpace, GymRobotState, GymStateBuffer, ObservationSpace, RobotAction,
+    RobotState,
 };
 use crate::robot::RobotManager;
 use crate::scene::SceneObject;
@@ -36,6 +38,7 @@ pub enum AgentEventKind {
     Reset,
     Remove,
     Error,
+    Message,
 }
 
 /// Rolling log of agent activity events, with a fixed capacity.
@@ -137,7 +140,10 @@ impl AgentActivityLog {
 
     /// Check if a robot is currently connected to an agent.
     pub fn is_connected(&self, robot_id: usize) -> bool {
-        self.connected_robots.get(robot_id).copied().unwrap_or(false)
+        self.connected_robots
+            .get(robot_id)
+            .copied()
+            .unwrap_or(false)
     }
 }
 
@@ -164,6 +170,11 @@ pub enum SimCommand {
     GetSpaces {
         robot_id: usize,
     },
+    SendMessage {
+        from_robot_id: usize,
+        to_robot_id: usize,
+        content: String,
+    },
 }
 
 /// A response sent from the simulation main loop back to the agent server.
@@ -175,14 +186,18 @@ pub enum SimResponse {
     Stepped {
         state: GymRobotState,
         step_count: u64,
+        messages: Vec<AgentMessage>,
     },
     Observation {
         state: GymRobotState,
+        messages: Vec<AgentMessage>,
     },
     Reset {
         state: GymRobotState,
+        messages: Vec<AgentMessage>,
     },
     Removed,
+    MessageSent,
     Spaces {
         observation_space: ObservationSpace,
         action_space: ActionSpace,
@@ -223,10 +238,68 @@ impl SimBridgeServer {
 /// `process_pending` is called each frame (non-blocking) to drain queued
 /// commands, execute them against the `RobotManager`, and send responses
 /// back via the per-command oneshot channels.
+pub struct MessageBus {
+    pending: HashMap<usize, VecDeque<AgentMessage>>,
+    history: HashMap<(usize, usize), VecDeque<AgentMessage>>,
+    history_capacity: usize,
+    next_timestamp: u64,
+}
+
+impl MessageBus {
+    pub fn new(history_capacity: usize) -> Self {
+        Self {
+            pending: HashMap::new(),
+            history: HashMap::new(),
+            history_capacity,
+            next_timestamp: 0,
+        }
+    }
+
+    pub fn send(
+        &mut self,
+        from_robot_id: usize,
+        to_robot_id: usize,
+        content: String,
+    ) -> AgentMessage {
+        let msg = AgentMessage {
+            from_robot_id,
+            to_robot_id,
+            content,
+            timestamp: self.next_timestamp,
+        };
+        self.next_timestamp += 1;
+
+        self.pending
+            .entry(to_robot_id)
+            .or_default()
+            .push_back(msg.clone());
+
+        let hist = self
+            .history
+            .entry((from_robot_id, to_robot_id))
+            .or_default();
+        if hist.len() >= self.history_capacity {
+            hist.pop_front();
+        }
+        hist.push_back(msg.clone());
+
+        msg
+    }
+
+    pub fn drain(&mut self, robot_id: usize) -> Vec<AgentMessage> {
+        self.pending
+            .remove(&robot_id)
+            .map(|q| q.into_iter().collect())
+            .unwrap_or_default()
+    }
+}
+
 pub struct SimBridgeClient {
     rx: mpsc::UnboundedReceiver<CommandEnvelope>,
     /// Per-robot step counters. Indexed by robot_id.
     step_counts: Vec<u64>,
+    state_buffer: GymStateBuffer,
+    message_bus: MessageBus,
 }
 
 impl SimBridgeClient {
@@ -280,25 +353,26 @@ impl SimBridgeClient {
 
             SimCommand::Step { robot_id, action } => {
                 if let Some(robot) = manager.get_robot_mut(robot_id) {
-                    apply_action(&robot.definition.clone(), &mut robot.state, &action);
-                    // Step only this robot by calling the manager-level step.
-                    // We step the entire manager which steps all robots — this
-                    // matches the spec's step-locked model.
+                    apply_action(&robot.definition, &mut robot.state, &action);
                     let dt = 1.0 / 60.0;
                     manager.step(dt, scene_meshes);
 
                     if let Some(robot) = manager.get_robot(robot_id) {
-                        // Increment step counter.
                         if self.step_counts.len() <= robot_id {
                             self.step_counts.resize(robot_id + 1, 0);
                         }
                         self.step_counts[robot_id] += 1;
 
-                        let state =
-                            GymRobotState::from_robot_state(&robot.state, &robot.definition);
+                        let state = GymRobotState::from_robot_state_into(
+                            &robot.state,
+                            &robot.definition,
+                            &mut self.state_buffer,
+                        );
+                        let messages = self.message_bus.drain(robot_id);
                         SimResponse::Stepped {
                             state,
                             step_count: self.step_counts[robot_id],
+                            messages,
                         }
                     } else {
                         SimResponse::Error {
@@ -314,8 +388,13 @@ impl SimBridgeClient {
 
             SimCommand::GetObservation { robot_id } => {
                 if let Some(robot) = manager.get_robot(robot_id) {
-                    let state = GymRobotState::from_robot_state(&robot.state, &robot.definition);
-                    SimResponse::Observation { state }
+                    let state = GymRobotState::from_robot_state_into(
+                        &robot.state,
+                        &robot.definition,
+                        &mut self.state_buffer,
+                    );
+                    let messages = self.message_bus.drain(robot_id);
+                    SimResponse::Observation { state, messages }
                 } else {
                     SimResponse::Error {
                         message: format!("invalid robot_id: {}", robot_id),
@@ -325,16 +404,19 @@ impl SimBridgeClient {
 
             SimCommand::Reset { robot_id } => {
                 if let Some(robot) = manager.get_robot_mut(robot_id) {
-                    let def = robot.definition.clone();
-                    robot.state = RobotState::new(&def);
-                    // Reset step counter.
+                    robot.state = RobotState::new(&robot.definition);
                     if self.step_counts.len() <= robot_id {
                         self.step_counts.resize(robot_id + 1, 0);
                     }
                     self.step_counts[robot_id] = 0;
 
-                    let state = GymRobotState::from_robot_state(&robot.state, &def);
-                    SimResponse::Reset { state }
+                    let state = GymRobotState::from_robot_state_into(
+                        &robot.state,
+                        &robot.definition,
+                        &mut self.state_buffer,
+                    );
+                    let messages = self.message_bus.drain(robot_id);
+                    SimResponse::Reset { state, messages }
                 } else {
                     SimResponse::Error {
                         message: format!("invalid robot_id: {}", robot_id),
@@ -371,6 +453,30 @@ impl SimBridgeClient {
                     }
                 }
             }
+
+            SimCommand::SendMessage {
+                from_robot_id,
+                to_robot_id,
+                content,
+            } => {
+                if content.len() > 1024 {
+                    return SimResponse::Error {
+                        message: "message content exceeds 1024 bytes".to_string(),
+                    };
+                }
+                if manager.get_robot(from_robot_id).is_none() {
+                    return SimResponse::Error {
+                        message: format!("invalid from_robot_id: {}", from_robot_id),
+                    };
+                }
+                if manager.get_robot(to_robot_id).is_none() {
+                    return SimResponse::Error {
+                        message: format!("invalid to_robot_id: {}", to_robot_id),
+                    };
+                }
+                self.message_bus.send(from_robot_id, to_robot_id, content);
+                SimResponse::MessageSent
+            }
         }
     }
 }
@@ -381,21 +487,11 @@ fn log_command(cmd: &SimCommand, log: &mut AgentActivityLog) {
         SimCommand::AddRobot { .. } => {
             log.push(AgentEventKind::Connect, None, "AddRobot request".into());
         }
-        SimCommand::Step { robot_id, action } => {
-            let vel_count = action.motor_velocities.len();
-            let grip_count = action.gripper_commands.len();
-            log.push(
-                AgentEventKind::Step,
-                Some(*robot_id),
-                format!("Step: {vel_count} motors, {grip_count} grippers"),
-            );
+        SimCommand::Step { robot_id, .. } => {
+            log.push(AgentEventKind::Step, Some(*robot_id), "Step".into());
         }
         SimCommand::GetObservation { robot_id } => {
-            log.push(
-                AgentEventKind::Observe,
-                Some(*robot_id),
-                "Observe".into(),
-            );
+            log.push(AgentEventKind::Observe, Some(*robot_id), "Observe".into());
         }
         SimCommand::Reset { robot_id } => {
             log.push(AgentEventKind::Reset, Some(*robot_id), "Reset".into());
@@ -413,6 +509,17 @@ fn log_command(cmd: &SimCommand, log: &mut AgentActivityLog) {
                 AgentEventKind::Connect,
                 Some(*robot_id),
                 "GetSpaces (connect)".into(),
+            );
+        }
+        SimCommand::SendMessage {
+            from_robot_id,
+            to_robot_id,
+            ..
+        } => {
+            log.push(
+                AgentEventKind::Message,
+                Some(*from_robot_id),
+                format!("Message {} -> {}", from_robot_id, to_robot_id),
             );
         }
     }
@@ -452,6 +559,8 @@ pub fn create_bridge() -> (SimBridgeServer, SimBridgeClient) {
     let client = SimBridgeClient {
         rx,
         step_counts: Vec::new(),
+        state_buffer: GymStateBuffer::new(),
+        message_bus: MessageBus::new(100),
     };
     (server, client)
 }
@@ -508,7 +617,9 @@ mod tests {
 
         let response = handle.await.unwrap().unwrap();
         match response {
-            SimResponse::Stepped { state, step_count } => {
+            SimResponse::Stepped {
+                state, step_count, ..
+            } => {
                 assert_eq!(step_count, 1, "first step should have step_count 1");
                 assert_eq!(
                     state.joint_positions.len(),
@@ -536,7 +647,7 @@ mod tests {
 
         let response = handle.await.unwrap().unwrap();
         match response {
-            SimResponse::Observation { state } => {
+            SimResponse::Observation { state, .. } => {
                 assert_eq!(state.joint_positions.len(), 2);
                 // Initial state — positions should be zero.
                 for p in &state.joint_positions {
@@ -581,7 +692,7 @@ mod tests {
 
         let response = handle.await.unwrap().unwrap();
         match response {
-            SimResponse::Reset { state } => {
+            SimResponse::Reset { state, .. } => {
                 // After reset, positions should be zero.
                 for p in &state.joint_positions {
                     assert!(p.abs() < 1e-6, "reset position should be zero, got {}", p);
@@ -1191,7 +1302,7 @@ mod tests {
         client.process_pending(&mut manager, &[]);
         let obs_resp = handle.await.unwrap().unwrap();
         let obs_state = match obs_resp {
-            SimResponse::Observation { state } => state,
+            SimResponse::Observation { state, .. } => state,
             other => panic!("Expected Observation, got {:?}", other),
         };
 
@@ -1236,5 +1347,471 @@ mod tests {
             "double remove should error, got {:?}",
             resp
         );
+    }
+
+    // ---- MessageBus unit tests ----
+
+    #[test]
+    fn test_message_bus_send_and_drain() {
+        let mut bus = MessageBus::new(50);
+        bus.send(0, 1, "hello".into());
+        let msgs = bus.drain(1);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].from_robot_id, 0);
+        assert_eq!(msgs[0].to_robot_id, 1);
+        assert_eq!(msgs[0].content, "hello");
+    }
+
+    #[test]
+    fn test_message_bus_history() {
+        let mut bus = MessageBus::new(50);
+        bus.send(0, 1, "first".into());
+        bus.send(0, 1, "second".into());
+        let hist = bus.history.get(&(0, 1)).unwrap();
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist[0].content, "first");
+        assert_eq!(hist[1].content, "second");
+    }
+
+    #[test]
+    fn test_message_bus_drain_clears() {
+        let mut bus = MessageBus::new(50);
+        bus.send(0, 1, "msg".into());
+        let msgs = bus.drain(1);
+        assert_eq!(msgs.len(), 1);
+        let msgs2 = bus.drain(1);
+        assert!(msgs2.is_empty(), "second drain should be empty");
+    }
+
+    #[test]
+    fn test_message_bus_history_capacity() {
+        let mut bus = MessageBus::new(3);
+        for i in 0..5 {
+            bus.send(0, 1, format!("msg{}", i));
+        }
+        let hist = bus.history.get(&(0, 1)).unwrap();
+        assert_eq!(hist.len(), 3);
+        assert_eq!(hist[0].content, "msg2");
+    }
+
+    #[test]
+    fn test_message_bus_timestamps_monotonic() {
+        let mut bus = MessageBus::new(50);
+        bus.send(0, 1, "a".into());
+        bus.send(1, 0, "b".into());
+        bus.send(0, 1, "c".into());
+        let msgs = bus.drain(1);
+        assert!(msgs[0].timestamp < msgs[1].timestamp);
+    }
+
+    // ---- Bridge SendMessage tests ----
+
+    #[tokio::test]
+    async fn test_bridge_send_message() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::SendMessage {
+                    from_robot_id: 0,
+                    to_robot_id: 1,
+                    content: "hello".into(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let resp = handle.await.unwrap().unwrap();
+        assert!(
+            matches!(resp, SimResponse::MessageSent),
+            "Expected MessageSent, got {:?}",
+            resp
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bridge_send_to_invalid_robot() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::SendMessage {
+                    from_robot_id: 0,
+                    to_robot_id: 99,
+                    content: "hello".into(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let resp = handle.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Error { message } => {
+                assert!(message.contains("invalid to_robot_id"));
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_send_from_invalid_robot() {
+        let (server, mut client) = create_bridge();
+        let mut manager = manager_with_arm();
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::SendMessage {
+                    from_robot_id: 99,
+                    to_robot_id: 0,
+                    content: "hello".into(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let resp = handle.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Error { message } => {
+                assert!(message.contains("invalid from_robot_id"));
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_step_delivers_messages() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        // Send message from 0 to 1
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::SendMessage {
+                    from_robot_id: 0,
+                    to_robot_id: 1,
+                    content: "hey".into(),
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let _ = handle.await.unwrap();
+
+        // Step robot 1 — should get the message
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::Step {
+                    robot_id: 1,
+                    action: RobotAction {
+                        motor_velocities: vec![0.0, 0.0],
+                        gripper_commands: vec![],
+                    },
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Stepped { messages, .. } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "hey");
+                assert_eq!(messages[0].from_robot_id, 0);
+            }
+            other => panic!("Expected Stepped with messages, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_observe_delivers_messages() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        // Send message from 1 to 0
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::SendMessage {
+                    from_robot_id: 1,
+                    to_robot_id: 0,
+                    content: "yo".into(),
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let _ = handle.await.unwrap();
+
+        // Observe robot 0 — should get the message
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Observation { messages, .. } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "yo");
+            }
+            other => panic!("Expected Observation with messages, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_message_content_too_long() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        let long_content = "x".repeat(1025);
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::SendMessage {
+                    from_robot_id: 0,
+                    to_robot_id: 1,
+                    content: long_content,
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Error { message } => {
+                assert!(message.contains("1024"));
+            }
+            other => panic!("Expected Error for long message, got {:?}", other),
+        }
+    }
+
+    // ---- Integration tests: two agents messaging ----
+
+    #[tokio::test]
+    async fn test_two_agents_message_exchange() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        // Agent 0 sends "hello" to Agent 1
+        let h = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::SendMessage {
+                    from_robot_id: 0,
+                    to_robot_id: 1,
+                    content: "hello".into(),
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        assert!(matches!(
+            h.await.unwrap().unwrap(),
+            SimResponse::MessageSent
+        ));
+
+        // Agent 1 steps and receives the message
+        let h = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::Step {
+                    robot_id: 1,
+                    action: RobotAction {
+                        motor_velocities: vec![0.0, 0.0],
+                        gripper_commands: vec![],
+                    },
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = h.await.unwrap().unwrap();
+        let msgs = match resp {
+            SimResponse::Stepped { messages, .. } => messages,
+            other => panic!("Expected Stepped, got {:?}", other),
+        };
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "hello");
+        assert_eq!(msgs[0].from_robot_id, 0);
+        assert_eq!(msgs[0].to_robot_id, 1);
+
+        // Agent 1 replies "world" to Agent 0
+        let h = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::SendMessage {
+                    from_robot_id: 1,
+                    to_robot_id: 0,
+                    content: "world".into(),
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        assert!(matches!(
+            h.await.unwrap().unwrap(),
+            SimResponse::MessageSent
+        ));
+
+        // Agent 0 observes and receives the reply
+        let h = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = h.await.unwrap().unwrap();
+        let msgs = match resp {
+            SimResponse::Observation { messages, .. } => messages,
+            other => panic!("Expected Observation, got {:?}", other),
+        };
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "world");
+        assert_eq!(msgs[0].from_robot_id, 1);
+        assert_eq!(msgs[0].to_robot_id, 0);
+        assert!(msgs[0].timestamp > msgs[0].timestamp.wrapping_sub(1));
+    }
+
+    #[tokio::test]
+    async fn test_message_delivery_order() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        // Send 3 messages in order
+        for i in 0..3 {
+            let h = tokio::spawn({
+                let tx = server.tx.clone();
+                async move {
+                    let srv = SimBridgeServer { tx };
+                    srv.send_command(SimCommand::SendMessage {
+                        from_robot_id: 0,
+                        to_robot_id: 1,
+                        content: format!("msg{}", i),
+                    })
+                    .await
+                }
+            });
+            tokio::task::yield_now().await;
+            client.process_pending(&mut manager, &[]);
+            let _ = h.await.unwrap();
+        }
+
+        // Drain via observe
+        let h = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 1 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = h.await.unwrap().unwrap();
+        let msgs = match resp {
+            SimResponse::Observation { messages, .. } => messages,
+            other => panic!("Expected Observation, got {:?}", other),
+        };
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].content, "msg0");
+        assert_eq!(msgs[1].content, "msg1");
+        assert_eq!(msgs[2].content, "msg2");
+        assert!(msgs[0].timestamp < msgs[1].timestamp);
+        assert!(msgs[1].timestamp < msgs[2].timestamp);
+    }
+
+    #[tokio::test]
+    async fn test_messages_only_delivered_once() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        // Send a message
+        let h = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::SendMessage {
+                    from_robot_id: 0,
+                    to_robot_id: 1,
+                    content: "once".into(),
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let _ = h.await.unwrap();
+
+        // First observe delivers the message
+        let h = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::GetObservation { robot_id: 1 })
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = h.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Observation { messages, .. } => assert_eq!(messages.len(), 1),
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        // Second observe — message should be gone
+        let h = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 1 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = h.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Observation { messages, .. } => {
+                assert!(
+                    messages.is_empty(),
+                    "messages should be drained after first delivery"
+                );
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
     }
 }

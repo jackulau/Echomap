@@ -488,6 +488,104 @@ fn compute_imu_angular_vel(
 }
 
 // ---------------------------------------------------------------------------
+// BVH-accelerated sensor simulation
+// ---------------------------------------------------------------------------
+
+use super::collision::SceneBvh;
+
+fn cast_ray_bvh(origin: Vec3, direction: Vec3, bvh: &SceneBvh, max_range: f32) -> f32 {
+    match bvh.ray_cast(origin, direction, max_range) {
+        Some(hit) => hit.distance,
+        None => max_range,
+    }
+}
+
+fn simulate_lidar_bvh(
+    origin: Vec3,
+    center_dir: Vec3,
+    num_rays: usize,
+    fov_rad: f32,
+    max_range: f32,
+    bvh: &SceneBvh,
+) -> Vec<f32> {
+    if num_rays == 0 {
+        return Vec::new();
+    }
+
+    let up_candidate = if center_dir.dot(Vec3::Y).abs() < 0.99 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let right = center_dir.cross(up_candidate).normalize();
+
+    let mut distances = Vec::with_capacity(num_rays);
+    for i in 0..num_rays {
+        let angle = if num_rays == 1 {
+            0.0
+        } else {
+            -fov_rad * 0.5 + fov_rad * (i as f32) / (num_rays as f32 - 1.0)
+        };
+        let ray_dir = Quat::from_axis_angle(right, angle).mul_vec3(center_dir);
+        distances.push(cast_ray_bvh(origin, ray_dir, bvh, max_range));
+    }
+    distances
+}
+
+/// BVH-accelerated sensor simulation. Same behavior as `simulate_sensors`
+/// but uses the pre-built BVH for ray-casting instead of brute-force.
+pub fn simulate_sensors_bvh(
+    definition: &RobotDefinition,
+    state: &mut RobotState,
+    scene_meshes: &[SceneObject],
+    bvh: &SceneBvh,
+) {
+    let gravity = Vec3::new(0.0, -9.81, 0.0);
+
+    for (sensor_idx, mount) in definition.sensors.iter().enumerate() {
+        if sensor_idx >= state.sensor_readings.len() {
+            break;
+        }
+
+        let (world_pos, world_dir) = sensor_world_pose(mount, state);
+
+        let reading = match &mount.sensor {
+            SensorDefinition::Distance {
+                max_range,
+                direction: _,
+            } => {
+                let dist = cast_ray_bvh(world_pos, world_dir, bvh, *max_range);
+                SensorReading::Distance(dist)
+            }
+            SensorDefinition::Lidar {
+                num_rays,
+                fov_rad,
+                max_range,
+            } => {
+                let distances =
+                    simulate_lidar_bvh(world_pos, world_dir, *num_rays, *fov_rad, *max_range, bvh);
+                SensorReading::Lidar(distances)
+            }
+            SensorDefinition::Contact => {
+                let contact_radius =
+                    collision_shape_radius(&definition.links[mount.link_index].collision_shape);
+                let in_contact = check_contact(world_pos, contact_radius, scene_meshes);
+                SensorReading::Contact(in_contact)
+            }
+            SensorDefinition::Imu => {
+                let angular_vel = compute_imu_angular_vel(definition, state, mount.link_index);
+                SensorReading::Imu {
+                    linear_accel: gravity,
+                    angular_vel,
+                }
+            }
+        };
+
+        state.sensor_readings[sensor_idx] = reading;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

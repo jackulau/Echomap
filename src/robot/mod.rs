@@ -1,45 +1,23 @@
-#[allow(dead_code)]
 pub mod actuators;
-#[allow(dead_code)]
 pub mod body;
-#[allow(dead_code)]
 pub mod collision;
-#[allow(dead_code)]
 pub mod definition;
-#[allow(dead_code)]
 pub mod dynamics;
-#[allow(dead_code)]
 pub mod kinematics;
-#[allow(dead_code)]
 pub mod sensors;
-#[allow(dead_code)]
 pub mod state;
-
-#[allow(unused_imports)]
-pub use actuators::*;
-#[allow(unused_imports)]
-pub use body::*;
-#[allow(unused_imports)]
-pub use collision::*;
-#[allow(unused_imports)]
-pub use definition::*;
-#[allow(unused_imports)]
-pub use dynamics::*;
-#[allow(unused_imports)]
-pub use kinematics::*;
-#[allow(unused_imports)]
-pub use sensors::*;
-#[allow(unused_imports)]
-pub use state::*;
 
 use glam::Mat4;
 use serde::{Deserialize, Serialize};
 
+use rayon::prelude::*;
+
 use crate::scene::SceneObject;
+use collision::SceneBvh;
 use definition::RobotDefinition;
 use dynamics::step_dynamics;
 use kinematics::forward_kinematics;
-use sensors::simulate_sensors;
+use sensors::simulate_sensors_bvh;
 use state::{ActuatorCommand, RobotState};
 
 // ---------------------------------------------------------------------------
@@ -79,6 +57,8 @@ impl ManagedRobot {
 pub struct RobotManager {
     pub robots: Vec<ManagedRobot>,
     pub running: bool,
+    cached_bvh: Option<SceneBvh>,
+    bvh_mesh_count: usize,
 }
 
 impl Default for RobotManager {
@@ -94,6 +74,8 @@ impl RobotManager {
         Self {
             robots: Vec::new(),
             running: true,
+            cached_bvh: None,
+            bvh_mesh_count: 0,
         }
     }
 
@@ -120,11 +102,25 @@ impl RobotManager {
         if !self.running {
             return;
         }
-        for robot in &mut self.robots {
+
+        let mesh_count = scene_meshes.len();
+        if self.cached_bvh.is_none() || self.bvh_mesh_count != mesh_count {
+            self.cached_bvh = Some(SceneBvh::build(scene_meshes));
+            self.bvh_mesh_count = mesh_count;
+        }
+
+        let bvh = self.cached_bvh.as_ref().unwrap();
+        let step_one = |robot: &mut ManagedRobot| {
             step_dynamics(&robot.definition, &mut robot.state, dt);
             let bp = Mat4::from_cols_array(&robot.base_pose);
             forward_kinematics(&robot.definition, &mut robot.state, bp);
-            simulate_sensors(&robot.definition, &mut robot.state, scene_meshes);
+            simulate_sensors_bvh(&robot.definition, &mut robot.state, scene_meshes, bvh);
+        };
+
+        if self.robots.len() >= 2 {
+            self.robots.par_iter_mut().for_each(step_one);
+        } else {
+            self.robots.iter_mut().for_each(step_one);
         }
     }
 
@@ -195,6 +191,51 @@ impl RobotSimulation {
             return;
         }
         self.manager.step(self.dt, scene_meshes);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PhysicsTimer — optional per-frame timing utility
+// ---------------------------------------------------------------------------
+
+pub struct PhysicsTimer {
+    durations: std::collections::VecDeque<std::time::Duration>,
+    capacity: usize,
+}
+
+impl PhysicsTimer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            durations: std::collections::VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn record(&mut self, d: std::time::Duration) {
+        if self.durations.len() >= self.capacity {
+            self.durations.pop_front();
+        }
+        self.durations.push_back(d);
+    }
+
+    pub fn last(&self) -> Option<std::time::Duration> {
+        self.durations.back().copied()
+    }
+
+    pub fn avg(&self) -> Option<std::time::Duration> {
+        if self.durations.is_empty() {
+            return None;
+        }
+        let sum: std::time::Duration = self.durations.iter().sum();
+        Some(sum / self.durations.len() as u32)
+    }
+
+    pub fn len(&self) -> usize {
+        self.durations.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.durations.is_empty()
     }
 }
 
@@ -1576,5 +1617,319 @@ mod tests {
         let sim = RobotSimulation::default();
         assert!((sim.dt - 1.0 / 60.0).abs() < 1e-6);
         assert!(sim.running);
+    }
+
+    // ------------------------------------------------------------------
+    // Performance benchmarks
+    // ------------------------------------------------------------------
+
+    use crate::robot::definition::{
+        CollisionShape, JointDefinition, JointType, LinkDefinition, SensorDefinition, SensorMount,
+    };
+    use crate::scene::SceneObject;
+
+    fn perf_robot_def() -> RobotDefinition {
+        let links = vec![
+            LinkDefinition {
+                name: "base".into(),
+                mass: 5.0,
+                inertia: 1.0,
+                collision_shape: CollisionShape::Cuboid {
+                    half_extents: glam::Vec3::splat(0.1),
+                },
+                parent_joint: None,
+            },
+            LinkDefinition {
+                name: "link1".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Cylinder {
+                    radius: 0.05,
+                    height: 0.5,
+                },
+                parent_joint: Some(0),
+            },
+            LinkDefinition {
+                name: "link2".into(),
+                mass: 1.0,
+                inertia: 0.1,
+                collision_shape: CollisionShape::Cylinder {
+                    radius: 0.05,
+                    height: 0.4,
+                },
+                parent_joint: Some(1),
+            },
+            LinkDefinition {
+                name: "link3".into(),
+                mass: 0.5,
+                inertia: 0.05,
+                collision_shape: CollisionShape::Sphere { radius: 0.08 },
+                parent_joint: Some(2),
+            },
+        ];
+        let joints = vec![
+            JointDefinition {
+                name: "j0".into(),
+                joint_type: JointType::Revolute,
+                axis: glam::Vec3::Y,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 10.0,
+                damping: 0.1,
+            },
+            JointDefinition {
+                name: "j1".into(),
+                joint_type: JointType::Revolute,
+                axis: glam::Vec3::X,
+                parent_link: 1,
+                child_link: 2,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 8.0,
+                damping: 0.1,
+            },
+            JointDefinition {
+                name: "j2".into(),
+                joint_type: JointType::Revolute,
+                axis: glam::Vec3::Y,
+                parent_link: 2,
+                child_link: 3,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 5.0,
+                damping: 0.1,
+            },
+        ];
+        let sensors = vec![
+            SensorMount {
+                link_index: 3,
+                local_offset: glam::Vec3::new(0.0, 0.0, 0.1),
+                sensor: SensorDefinition::Distance {
+                    direction: glam::Vec3::Z,
+                    max_range: 5.0,
+                },
+            },
+            SensorMount {
+                link_index: 3,
+                local_offset: glam::Vec3::new(0.0, 0.0, 0.1),
+                sensor: SensorDefinition::Distance {
+                    direction: glam::Vec3::X,
+                    max_range: 5.0,
+                },
+            },
+        ];
+        RobotDefinition {
+            name: "perf_bot".into(),
+            links,
+            joints,
+            sensors,
+        }
+    }
+
+    fn perf_scene(num_tris: usize) -> Vec<SceneObject> {
+        use crate::scene::{AcousticMaterial, Mesh, Triangle, Vertex};
+
+        let triangles: Vec<Triangle> = (0..num_tris)
+            .map(|i| {
+                let x = (i as f32) * 0.3 - (num_tris as f32) * 0.15;
+                let y = 2.0 + (i as f32) * 0.01;
+                let n = glam::Vec3::Y;
+                Triangle {
+                    vertices: [
+                        Vertex {
+                            position: glam::Vec3::new(x, y, -1.0),
+                            normal: n,
+                        },
+                        Vertex {
+                            position: glam::Vec3::new(x + 0.2, y, -1.0),
+                            normal: n,
+                        },
+                        Vertex {
+                            position: glam::Vec3::new(x + 0.1, y + 0.2, -1.0),
+                            normal: n,
+                        },
+                    ],
+                }
+            })
+            .collect();
+
+        vec![SceneObject {
+            name: "perf_floor".into(),
+            mesh: Mesh { triangles },
+            material: AcousticMaterial::default(),
+            visible: true,
+            interior_medium: None,
+        }]
+    }
+
+    fn setup_perf_manager(num_robots: usize, scene: &[SceneObject]) -> RobotManager {
+        let mut manager = RobotManager::new();
+        for i in 0..num_robots {
+            let def = perf_robot_def();
+            let offset = glam::Vec3::new(i as f32 * 2.0, 0.0, 0.0);
+            manager.add_robot(def, Mat4::from_translation(offset));
+        }
+        manager.step(1.0 / 60.0, scene);
+        manager
+    }
+
+    #[test]
+    fn test_perf_1_robot_step_time() {
+        let scene = perf_scene(100);
+        let mut manager = setup_perf_manager(1, &scene);
+
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            manager.step(1.0 / 60.0, &scene);
+        }
+        let elapsed = start.elapsed();
+        let per_step = elapsed / 100;
+
+        println!("1 robot: {per_step:?}/step ({elapsed:?} total for 100 steps)");
+        assert!(
+            per_step < std::time::Duration::from_millis(1),
+            "1 robot step should be <1ms, got {:?}",
+            per_step
+        );
+    }
+
+    #[test]
+    fn test_perf_4_robots_under_2ms() {
+        let scene = perf_scene(100);
+        let mut manager = setup_perf_manager(4, &scene);
+
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            manager.step(1.0 / 60.0, &scene);
+        }
+        let elapsed = start.elapsed();
+        let per_step = elapsed / 100;
+
+        println!("4 robots: {per_step:?}/step ({elapsed:?} total for 100 steps)");
+        assert!(
+            per_step < std::time::Duration::from_millis(2),
+            "4 robot step should be <2ms, got {:?}",
+            per_step
+        );
+    }
+
+    #[test]
+    fn test_perf_scaling() {
+        let scene = perf_scene(100);
+
+        for n in [1, 2, 4] {
+            let mut manager = setup_perf_manager(n, &scene);
+
+            let start = std::time::Instant::now();
+            for _ in 0..100 {
+                manager.step(1.0 / 60.0, &scene);
+            }
+            let elapsed = start.elapsed();
+            let per_step = elapsed / 100;
+            println!("{n} robot(s): {per_step:?}/step");
+        }
+    }
+
+    #[test]
+    fn test_physics_timer_records() {
+        let mut timer = PhysicsTimer::new(100);
+        assert!(timer.is_empty());
+        assert_eq!(timer.len(), 0);
+        assert!(timer.last().is_none());
+        assert!(timer.avg().is_none());
+
+        for i in 0..150 {
+            timer.record(std::time::Duration::from_micros(100 + i));
+        }
+
+        assert_eq!(timer.len(), 100, "should cap at capacity");
+        assert_eq!(
+            timer.last(),
+            Some(std::time::Duration::from_micros(249)),
+            "last should be most recent"
+        );
+        assert!(timer.avg().is_some());
+    }
+
+    #[test]
+    fn test_parallel_step_matches_sequential() {
+        let scene = perf_scene(50);
+
+        let mut seq_manager = RobotManager::new();
+        let mut par_manager = RobotManager::new();
+        for i in 0..4 {
+            let def = perf_robot_def();
+            let offset = glam::Vec3::new(i as f32 * 2.0, 0.0, 0.0);
+            seq_manager.add_robot(def.clone(), Mat4::from_translation(offset));
+            par_manager.add_robot(def, Mat4::from_translation(offset));
+        }
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..10 {
+            // Sequential
+            let bvh = crate::robot::collision::SceneBvh::build(&scene);
+            for robot in &mut seq_manager.robots {
+                step_dynamics(&robot.definition, &mut robot.state, dt);
+                let bp = Mat4::from_cols_array(&robot.base_pose);
+                forward_kinematics(&robot.definition, &mut robot.state, bp);
+                simulate_sensors_bvh(&robot.definition, &mut robot.state, &scene, &bvh);
+            }
+            // Parallel
+            par_manager.step(dt, &scene);
+        }
+
+        for i in 0..4 {
+            let s = &seq_manager.robots[i].state;
+            let p = &par_manager.robots[i].state;
+            assert_eq!(
+                s.joint_positions, p.joint_positions,
+                "robot {i} positions diverged"
+            );
+            assert_eq!(
+                s.joint_velocities, p.joint_velocities,
+                "robot {i} velocities diverged"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parallel_step_single_robot() {
+        let scene = perf_scene(10);
+        let mut manager = RobotManager::new();
+        manager.add_robot(perf_robot_def(), Mat4::IDENTITY);
+
+        for _ in 0..10 {
+            manager.step(1.0 / 60.0, &scene);
+        }
+
+        let robot = manager.get_robot(0).unwrap();
+        assert_eq!(robot.state.joint_positions.len(), 3);
+    }
+
+    #[test]
+    fn test_parallel_step_deterministic() {
+        let scene = perf_scene(50);
+
+        let run = || {
+            let mut manager = RobotManager::new();
+            for i in 0..4 {
+                let offset = glam::Vec3::new(i as f32 * 2.0, 0.0, 0.0);
+                manager.add_robot(perf_robot_def(), Mat4::from_translation(offset));
+            }
+            for _ in 0..20 {
+                manager.step(1.0 / 60.0, &scene);
+            }
+            manager
+                .robots
+                .iter()
+                .flat_map(|r| r.state.joint_positions.clone())
+                .collect::<Vec<f32>>()
+        };
+
+        let a = run();
+        let b = run();
+        assert_eq!(a, b, "two parallel runs should produce identical results");
     }
 }

@@ -290,7 +290,7 @@ mod tests {
         });
 
         match response {
-            Ok(crate::agent::bridge::SimResponse::Observation { state }) => {
+            Ok(crate::agent::bridge::SimResponse::Observation { state, .. }) => {
                 assert_eq!(
                     state.joint_positions.len(),
                     2,
@@ -1964,6 +1964,7 @@ mod tests {
             reward: 0.0,
             done: false,
             step_count: 1,
+            messages: vec![],
         };
 
         // serde_json succeeds in serializing but produces `null` for NaN/Inf.

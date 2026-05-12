@@ -1687,6 +1687,9 @@ pub fn agent_activity_panel(
                                     AgentEventKind::Reset => egui::Color32::from_rgb(255, 200, 80),
                                     AgentEventKind::Remove => egui::Color32::from_rgb(200, 150, 80),
                                     AgentEventKind::Error => egui::Color32::from_rgb(255, 80, 80),
+                                    AgentEventKind::Message => {
+                                        egui::Color32::from_rgb(200, 150, 255)
+                                    }
                                 };
                                 let robot_str = event
                                     .robot_id

@@ -304,7 +304,10 @@ mod tests {
         let v0 = compute_velocities(DemoBehavior::ReachTarget, 3, 0);
         let v100 = compute_velocities(DemoBehavior::ReachTarget, 3, 100);
         // At least one joint velocity should differ between step 0 and 100
-        let differs = v0.iter().zip(v100.iter()).any(|(a, b)| (a - b).abs() > 1e-6);
+        let differs = v0
+            .iter()
+            .zip(v100.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-6);
         assert!(
             differs,
             "velocities should change over time: {:?} vs {:?}",

@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::robot::state::{ActionSpace, GymRobotState, ObservationSpace, RobotAction};
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub from_robot_id: usize,
+    pub to_robot_id: usize,
+    pub content: String,
+    pub timestamp: u64,
+}
+
 /// Messages sent from the client (agent) to the server.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -11,6 +19,7 @@ pub enum ClientMessage {
     Step { action: RobotAction },
     Observe,
     Close,
+    SendMessage { to_robot_id: usize, content: String },
 }
 
 /// Messages sent from the server to the client (agent).
@@ -26,7 +35,10 @@ pub enum ServerMessage {
         reward: f32,
         done: bool,
         step_count: u64,
+        #[serde(default)]
+        messages: Vec<AgentMessage>,
     },
+    MessageSent,
     Error {
         message: String,
     },
@@ -138,6 +150,7 @@ mod tests {
             reward: 1.5,
             done: false,
             step_count: 42,
+            messages: vec![],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -147,6 +160,7 @@ mod tests {
                 reward,
                 done,
                 step_count,
+                ..
             } => {
                 assert_eq!(state.joint_positions.len(), 2);
                 assert!((state.joint_positions[0] - 1.0).abs() < 1e-6);
@@ -247,6 +261,7 @@ mod tests {
                 reward,
                 done,
                 step_count,
+                ..
             } => {
                 assert_eq!(state.joint_positions.len(), 1);
                 assert!((reward - 0.0).abs() < 1e-6);
@@ -408,6 +423,7 @@ mod tests {
             reward: f32::NAN,
             done: false,
             step_count: 0,
+            messages: vec![],
         };
         let json = serde_json::to_string(&msg).expect("NaN serializes to null");
         assert!(json.contains("null"), "NaN should serialize as null");
@@ -497,6 +513,7 @@ mod tests {
             reward: f32::INFINITY,
             done: false,
             step_count: 0,
+            messages: vec![],
         };
         let json = serde_json::to_string(&msg).expect("Infinity serializes to null");
         assert!(json.contains("null"), "Infinity should serialize as null");
@@ -556,6 +573,104 @@ mod tests {
             result.is_err(),
             "string robot_id should fail for usize field"
         );
+    }
+
+    #[test]
+    fn test_agent_message_json_round_trip() {
+        let msg = AgentMessage {
+            from_robot_id: 0,
+            to_robot_id: 1,
+            content: "hello opponent".to_string(),
+            timestamp: 12345,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: AgentMessage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.from_robot_id, 0);
+        assert_eq!(deser.to_robot_id, 1);
+        assert_eq!(deser.content, "hello opponent");
+        assert_eq!(deser.timestamp, 12345);
+    }
+
+    #[test]
+    fn test_send_message_client_message() {
+        let msg = ClientMessage::SendMessage {
+            to_robot_id: 1,
+            content: "trash talk".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("send_message"));
+        let deser: ClientMessage = serde_json::from_str(&json).unwrap();
+        match deser {
+            ClientMessage::SendMessage {
+                to_robot_id,
+                content,
+            } => {
+                assert_eq!(to_robot_id, 1);
+                assert_eq!(content, "trash talk");
+            }
+            other => panic!("Expected SendMessage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_observation_with_messages() {
+        let state = GymRobotState {
+            joint_positions: vec![0.5],
+            joint_velocities: vec![0.1],
+            sensor_readings: GymSensorReadings {
+                distances: vec![],
+                contacts: vec![],
+                imu: vec![],
+                camera_visible: vec![],
+            },
+            gripper_states: vec![],
+        };
+        let msg = ServerMessage::Observation {
+            state,
+            reward: 0.0,
+            done: false,
+            step_count: 1,
+            messages: vec![AgentMessage {
+                from_robot_id: 0,
+                to_robot_id: 1,
+                content: "hey".to_string(),
+                timestamp: 100,
+            }],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let deser: ServerMessage = serde_json::from_str(&json).unwrap();
+        match deser {
+            ServerMessage::Observation { messages, .. } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "hey");
+                assert_eq!(messages[0].from_robot_id, 0);
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_observation_empty_messages() {
+        let json = r#"{"type":"observation","state":{"joint_positions":[],"joint_velocities":[],"sensor_readings":{"distances":[],"contacts":[],"imu":[],"camera_visible":[]},"gripper_states":[]},"reward":0.0,"done":false,"step_count":0}"#;
+        let deser: ServerMessage = serde_json::from_str(json).unwrap();
+        match deser {
+            ServerMessage::Observation { messages, .. } => {
+                assert!(
+                    messages.is_empty(),
+                    "missing messages field should default to empty vec"
+                );
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_sent_round_trip() {
+        let msg = ServerMessage::MessageSent;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("message_sent"));
+        let deser: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deser, ServerMessage::MessageSent));
     }
 
     #[test]

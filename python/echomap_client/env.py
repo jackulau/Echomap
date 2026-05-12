@@ -90,7 +90,7 @@ class EchoMapEnv:
         """Reset the environment and return the initial observation.
 
         Returns:
-            dict: The initial state observation from the server.
+            tuple: (state, info) where info contains messages.
 
         Raises:
             RuntimeError: If not connected or server returns an error.
@@ -108,7 +108,8 @@ class EchoMapEnv:
                 f"Expected observation response, got: {response.get('type')}"
             )
 
-        return response.get("state")
+        info = {"messages": response.get("messages", [])}
+        return response.get("state"), info
 
     def step(self, action):
         """Take a step in the environment with the given action.
@@ -152,7 +153,10 @@ class EchoMapEnv:
         observation = response.get("state")
         reward = response.get("reward", 0.0)
         done = response.get("done", False)
-        info = {"step_count": response.get("step_count", 0)}
+        info = {
+            "step_count": response.get("step_count", 0),
+            "messages": response.get("messages", []),
+        }
 
         return observation, reward, done, info
 
@@ -160,7 +164,7 @@ class EchoMapEnv:
         """Get the current observation without stepping the simulation.
 
         Returns:
-            dict: The current state observation.
+            tuple: (state, info) where info contains messages.
 
         Raises:
             RuntimeError: If not connected or server returns an error.
@@ -178,7 +182,35 @@ class EchoMapEnv:
                 f"Expected observation response, got: {response.get('type')}"
             )
 
-        return response.get("state")
+        info = {"messages": response.get("messages", [])}
+        return response.get("state"), info
+
+    def send_message(self, to_robot_id, content):
+        """Send a text message to another agent.
+
+        Args:
+            to_robot_id: Target robot ID.
+            content: Message text (max 1024 bytes).
+
+        Raises:
+            RuntimeError: If not connected or server returns an error.
+        """
+        self._ensure_connected()
+
+        msg = json.dumps({
+            "type": "send_message",
+            "to_robot_id": to_robot_id,
+            "content": content,
+        })
+        self._ws.send(msg)
+
+        response = json.loads(self._ws.recv())
+        self._check_error(response)
+
+        if response.get("type") != "message_sent":
+            raise RuntimeError(
+                f"Expected message_sent response, got: {response.get('type')}"
+            )
 
     def close(self):
         """Close the connection to the server.

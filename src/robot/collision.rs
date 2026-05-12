@@ -152,6 +152,193 @@ pub fn aabb_from_link(link_world_pos: Vec3, link_world_rot: Quat, half_extents: 
 }
 
 // ---------------------------------------------------------------------------
+// BVH — Bounding Volume Hierarchy for accelerated ray-casting
+// ---------------------------------------------------------------------------
+
+struct StoredTriangle {
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3,
+}
+
+enum BvhNode {
+    Leaf {
+        aabb: Aabb,
+        triangles: Vec<StoredTriangle>,
+    },
+    Internal {
+        aabb: Aabb,
+        left: Box<BvhNode>,
+        right: Box<BvhNode>,
+    },
+}
+
+/// Acceleration structure for ray-casting against static scene geometry.
+pub struct SceneBvh {
+    root: Option<BvhNode>,
+}
+
+impl SceneBvh {
+    /// Build a BVH from scene mesh triangles.
+    pub fn build(meshes: &[SceneObject]) -> Self {
+        let mut tris: Vec<StoredTriangle> = Vec::new();
+        for obj in meshes {
+            for tri in &obj.mesh.triangles {
+                tris.push(StoredTriangle {
+                    v0: tri.vertices[0].position,
+                    v1: tri.vertices[1].position,
+                    v2: tri.vertices[2].position,
+                });
+            }
+        }
+
+        if tris.is_empty() {
+            return Self { root: None };
+        }
+
+        let root = Self::build_recursive(tris);
+        Self { root: Some(root) }
+    }
+
+    fn build_recursive(mut tris: Vec<StoredTriangle>) -> BvhNode {
+        let aabb = Self::compute_aabb(&tris);
+
+        if tris.len() <= 4 {
+            return BvhNode::Leaf {
+                aabb,
+                triangles: tris,
+            };
+        }
+
+        let extent = aabb.half_extents;
+        let axis = if extent.x >= extent.y && extent.x >= extent.z {
+            0
+        } else if extent.y >= extent.z {
+            1
+        } else {
+            2
+        };
+
+        tris.sort_by(|a, b| {
+            let ca = (a.v0[axis] + a.v1[axis] + a.v2[axis]) / 3.0;
+            let cb = (b.v0[axis] + b.v1[axis] + b.v2[axis]) / 3.0;
+            ca.partial_cmp(&cb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mid = tris.len() / 2;
+        let right_tris = tris.split_off(mid);
+
+        BvhNode::Internal {
+            aabb,
+            left: Box::new(Self::build_recursive(tris)),
+            right: Box::new(Self::build_recursive(right_tris)),
+        }
+    }
+
+    fn compute_aabb(tris: &[StoredTriangle]) -> Aabb {
+        let mut min = Vec3::splat(f32::MAX);
+        let mut max = Vec3::splat(f32::MIN);
+        for tri in tris {
+            for v in [tri.v0, tri.v1, tri.v2] {
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+        let center = (min + max) * 0.5;
+        let half_extents = (max - min) * 0.5;
+        Aabb {
+            center,
+            half_extents,
+        }
+    }
+
+    /// Cast a ray against the BVH, returning the nearest hit within `max_distance`.
+    pub fn ray_cast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
+        match &self.root {
+            None => None,
+            Some(node) => Self::ray_cast_node(node, origin, direction, max_distance),
+        }
+    }
+
+    fn ray_cast_node(
+        node: &BvhNode,
+        origin: Vec3,
+        direction: Vec3,
+        max_distance: f32,
+    ) -> Option<RayHit> {
+        match node {
+            BvhNode::Leaf { aabb, triangles } => {
+                if !Self::ray_aabb_test(origin, direction, aabb, max_distance) {
+                    return None;
+                }
+                let mut best: Option<RayHit> = None;
+                for tri in triangles {
+                    if let Some(hit) =
+                        ray_triangle_intersect(origin, direction, tri.v0, tri.v1, tri.v2)
+                    {
+                        let limit = best.as_ref().map_or(max_distance, |b| b.distance);
+                        if hit.distance <= limit {
+                            best = Some(hit);
+                        }
+                    }
+                }
+                best
+            }
+            BvhNode::Internal { aabb, left, right } => {
+                if !Self::ray_aabb_test(origin, direction, aabb, max_distance) {
+                    return None;
+                }
+                let hit_left = Self::ray_cast_node(left, origin, direction, max_distance);
+                let limit = hit_left.as_ref().map_or(max_distance, |h| h.distance);
+                let hit_right = Self::ray_cast_node(right, origin, direction, limit);
+                match (hit_left, hit_right) {
+                    (None, r) => r,
+                    (l, None) => l,
+                    (Some(l), Some(r)) => {
+                        if l.distance <= r.distance {
+                            Some(l)
+                        } else {
+                            Some(r)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn ray_aabb_test(origin: Vec3, direction: Vec3, aabb: &Aabb, max_distance: f32) -> bool {
+        let min = aabb.center - aabb.half_extents;
+        let max = aabb.center + aabb.half_extents;
+
+        let mut tmin = 0.0_f32;
+        let mut tmax = max_distance;
+
+        for i in 0..3 {
+            let d = direction[i];
+            let o = origin[i];
+            if d.abs() < f32::EPSILON {
+                if o < min[i] || o > max[i] {
+                    return false;
+                }
+            } else {
+                let inv_d = 1.0 / d;
+                let mut t0 = (min[i] - o) * inv_d;
+                let mut t1 = (max[i] - o) * inv_d;
+                if t0 > t1 {
+                    std::mem::swap(&mut t0, &mut t1);
+                }
+                tmin = tmin.max(t0);
+                tmax = tmax.min(t1);
+                if tmin > tmax {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -406,6 +593,160 @@ mod tests {
             "rotated half_extent Z should be ~{}, got {}",
             expected_xz,
             aabb.half_extents.z
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // BVH tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bvh_build_empty_scene() {
+        let meshes: Vec<SceneObject> = vec![];
+        let bvh = SceneBvh::build(&meshes);
+        let result = bvh.ray_cast(Vec3::ZERO, Vec3::Z, 100.0);
+        assert!(result.is_none(), "empty BVH should return None");
+    }
+
+    #[test]
+    fn test_bvh_build_single_triangle() {
+        let t = tri(
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        let meshes = vec![scene_obj(vec![t])];
+        let bvh = SceneBvh::build(&meshes);
+
+        let brute = ray_scene_cast(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z, &meshes, 100.0);
+        let accel = bvh.ray_cast(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z, 100.0);
+
+        assert!(brute.is_some() && accel.is_some(), "both should hit");
+        assert!(
+            (brute.unwrap().distance - accel.unwrap().distance).abs() < EPSILON,
+            "BVH distance should match brute-force"
+        );
+    }
+
+    #[test]
+    fn test_bvh_cast_matches_brute_force() {
+        let tris = vec![
+            tri(
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.5, 1.0, 0.0),
+            ),
+            tri(
+                Vec3::new(2.0, 0.0, 0.0),
+                Vec3::new(3.0, 0.0, 0.0),
+                Vec3::new(2.5, 1.0, 0.0),
+            ),
+            tri(
+                Vec3::new(-2.0, -2.0, -1.0),
+                Vec3::new(-1.0, -2.0, -1.0),
+                Vec3::new(-1.5, -1.0, -1.0),
+            ),
+            tri(
+                Vec3::new(0.0, 0.0, 3.0),
+                Vec3::new(1.0, 0.0, 3.0),
+                Vec3::new(0.5, 1.0, 3.0),
+            ),
+            tri(
+                Vec3::new(-1.0, -1.0, 5.0),
+                Vec3::new(1.0, -1.0, 5.0),
+                Vec3::new(0.0, 1.0, 5.0),
+            ),
+        ];
+        let meshes = vec![scene_obj(tris)];
+        let bvh = SceneBvh::build(&meshes);
+
+        let rays = [
+            (Vec3::new(0.5, 0.3, 10.0), Vec3::NEG_Z),
+            (Vec3::new(2.5, 0.3, 10.0), Vec3::NEG_Z),
+            (Vec3::new(-1.5, -1.5, 10.0), Vec3::NEG_Z),
+            (Vec3::new(10.0, 10.0, 10.0), Vec3::NEG_Z),
+            (Vec3::new(0.5, 0.3, -10.0), Vec3::Z),
+        ];
+
+        for (origin, dir) in &rays {
+            let brute = ray_scene_cast(*origin, *dir, &meshes, 100.0);
+            let accel = bvh.ray_cast(*origin, *dir, 100.0);
+            match (&brute, &accel) {
+                (None, None) => {}
+                (Some(b), Some(a)) => {
+                    assert!(
+                        (b.distance - a.distance).abs() < EPSILON,
+                        "BVH mismatch at {:?}: brute={} accel={}",
+                        origin,
+                        b.distance,
+                        a.distance
+                    );
+                }
+                _ => panic!(
+                    "BVH/brute mismatch at {:?}: brute={:?} accel={:?}",
+                    origin,
+                    brute.as_ref().map(|h| h.distance),
+                    accel.as_ref().map(|h| h.distance)
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_bvh_cast_miss() {
+        let t = tri(
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        let meshes = vec![scene_obj(vec![t])];
+        let bvh = SceneBvh::build(&meshes);
+
+        let result = bvh.ray_cast(Vec3::new(10.0, 10.0, 5.0), Vec3::NEG_Z, 100.0);
+        assert!(result.is_none(), "ray should miss");
+    }
+
+    #[test]
+    fn test_bvh_cast_nearest_hit() {
+        let tris = vec![
+            tri(
+                Vec3::new(-1.0, -1.0, 0.0),
+                Vec3::new(1.0, -1.0, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+            ),
+            tri(
+                Vec3::new(-1.0, -1.0, 3.0),
+                Vec3::new(1.0, -1.0, 3.0),
+                Vec3::new(0.0, 1.0, 3.0),
+            ),
+        ];
+        let meshes = vec![scene_obj(tris)];
+        let bvh = SceneBvh::build(&meshes);
+
+        let hit = bvh
+            .ray_cast(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z, 100.0)
+            .unwrap();
+        assert!(
+            (hit.distance - 2.0).abs() < EPSILON,
+            "should hit nearest triangle at z=3, distance=2, got {}",
+            hit.distance
+        );
+    }
+
+    #[test]
+    fn test_bvh_max_distance() {
+        let t = tri(
+            Vec3::new(-1.0, -1.0, 0.0),
+            Vec3::new(1.0, -1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        );
+        let meshes = vec![scene_obj(vec![t])];
+        let bvh = SceneBvh::build(&meshes);
+
+        let result = bvh.ray_cast(Vec3::new(0.0, 0.0, 5.0), Vec3::NEG_Z, 1.0);
+        assert!(
+            result.is_none(),
+            "hit at distance 5 should be beyond max_distance 1"
         );
     }
 }

@@ -108,7 +108,10 @@ class EchoMapEnv:
                 f"Expected observation response, got: {response.get('type')}"
             )
 
-        info = {"messages": response.get("messages", [])}
+        info = {
+            "messages": response.get("messages", []),
+            "match_state": response.get("match_state"),
+        }
         return response.get("state"), info
 
     def step(self, action):
@@ -156,6 +159,7 @@ class EchoMapEnv:
         info = {
             "step_count": response.get("step_count", 0),
             "messages": response.get("messages", []),
+            "match_state": response.get("match_state"),
         }
 
         return observation, reward, done, info
@@ -182,7 +186,10 @@ class EchoMapEnv:
                 f"Expected observation response, got: {response.get('type')}"
             )
 
-        info = {"messages": response.get("messages", [])}
+        info = {
+            "messages": response.get("messages", []),
+            "match_state": response.get("match_state"),
+        }
         return response.get("state"), info
 
     def send_message(self, to_robot_id, content):

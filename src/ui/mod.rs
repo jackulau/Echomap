@@ -238,6 +238,7 @@ pub fn side_panel(
     agent_config: &mut AgentServerConfig,
     agent_handle: &mut Option<AgentServerHandle>,
     bridge_client: &mut SimBridgeClient,
+    bridge_server: &mut Option<SimBridgeServer>,
 ) {
     egui::SidePanel::left("side_panel")
         .default_width(280.0)
@@ -1084,6 +1085,42 @@ pub fn side_panel(
                         }
                     } else {
                         ui.label("Server stopped");
+                    }
+
+                    ui.separator();
+
+                    if ui
+                        .button("Start Boxing Match")
+                        .on_hover_text("Load boxing scenario with two humanoid fighters and start the agent server")
+                        .clicked()
+                    {
+                        if let Some(ref mut h) = agent_handle {
+                            h.stop();
+                        }
+                        *agent_handle = None;
+
+                        let boxing_config = crate::robot::boxing::BoxingMatchConfig {
+                            round_duration: 15.0,
+                            num_rounds: 3,
+                            ..crate::robot::boxing::BoxingMatchConfig::default()
+                        };
+                        let (scenario, new_manager) =
+                            crate::robot::boxing::BoxingScenario::new(boxing_config);
+
+                        *robot_manager = new_manager;
+                        scene.meshes = scenario.ring.meshes;
+
+                        let (new_bridge_server, new_client) =
+                            crate::agent::bridge::create_bridge_with_boxing(scenario.boxing_match);
+                        *bridge_client = new_client;
+
+                        let handle = crate::agent::start_agent_server(
+                            agent_config.clone(),
+                            new_bridge_server.clone(),
+                        );
+                        *bridge_server = Some(new_bridge_server);
+                        *agent_handle = Some(handle);
+                        log::info!("Boxing match started via UI");
                     }
                 });
         });
@@ -2191,88 +2228,272 @@ fn render_robots(
 ) {
     for (robot_idx, robot) in robot_manager.robots.iter().enumerate() {
         let color = robot_color(robot_idx);
-        let joint_color = egui::Color32::from_rgb(
-            (color.r() as u16 * 3 / 4) as u8 + 60,
-            (color.g() as u16 * 3 / 4) as u8 + 60,
-            (color.b() as u16 * 3 / 4) as u8 + 60,
-        );
 
         let link_poses = robot.state.link_poses_as_mat4();
 
-        // --- Draw links ---
-        for (link_idx, link_def) in robot.definition.links.iter().enumerate() {
-            if link_idx >= link_poses.len() {
-                break;
-            }
-            let pose = link_poses[link_idx];
-            render_link_shape(
+        if robot.definition.name == "boxing_humanoid" && link_poses.len() >= 4 {
+            render_boxing_humanoid(
                 painter,
-                &link_def.collision_shape,
-                pose,
+                robot,
+                robot_idx,
+                &link_poses,
                 color,
+                activity_log,
+                cam,
+                center,
+                scale,
+                rect,
+            );
+        } else {
+            render_generic_robot(
+                painter,
+                robot,
+                robot_idx,
+                &link_poses,
+                color,
+                activity_log,
+                show_sensor_rays,
                 cam,
                 center,
                 scale,
                 rect,
             );
         }
+    }
+}
 
-        // --- Draw joints as spheres at the child link origin ---
-        for joint_def in &robot.definition.joints {
-            if joint_def.child_link >= link_poses.len() {
-                continue;
-            }
-            let child_pose = link_poses[joint_def.child_link];
-            let joint_pos = Vec3::new(
-                child_pose.w_axis.x,
-                child_pose.w_axis.y,
-                child_pose.w_axis.z,
-            );
-            let sp = project_3d(joint_pos, cam, center, scale);
-            if rect.contains(sp) {
-                painter.circle_filled(sp, 4.0, joint_color);
-                painter.circle_stroke(sp, 4.0, egui::Stroke::new(1.0, color));
-            }
+#[allow(clippy::too_many_arguments)]
+fn render_boxing_humanoid(
+    painter: &egui::Painter,
+    robot: &crate::robot::ManagedRobot,
+    robot_idx: usize,
+    link_poses: &[glam::Mat4],
+    color: egui::Color32,
+    activity_log: &AgentActivityLog,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let pos_of = |pose: glam::Mat4| Vec3::new(pose.w_axis.x, pose.w_axis.y, pose.w_axis.z);
+    let proj = |p: Vec3| project_3d(p, cam, center, scale);
+
+    let torso_pos = pos_of(link_poses[0]);
+    let head_pos = pos_of(link_poses[1]);
+    let left_fist_pos = pos_of(link_poses[2]);
+    let right_fist_pos = pos_of(link_poses[3]);
+
+    let head_sp = proj(head_pos);
+    let left_fist_sp = proj(left_fist_pos);
+    let right_fist_sp = proj(right_fist_pos);
+
+    let fill = egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 100);
+    let bright = egui::Color32::from_rgb(
+        color.r().saturating_add(40),
+        color.g().saturating_add(40),
+        color.b().saturating_add(40),
+    );
+
+    // Shoulder positions (on torso, offset toward each arm)
+    let left_shoulder = torso_pos + Vec3::new(0.0, 0.15, 0.12);
+    let right_shoulder = torso_pos + Vec3::new(0.0, 0.15, -0.12);
+    let left_shoulder_sp = proj(left_shoulder);
+    let right_shoulder_sp = proj(right_shoulder);
+    let hip_pos = torso_pos - Vec3::new(0.0, 0.25, 0.0);
+    let left_foot = hip_pos + Vec3::new(0.0, -0.4, 0.12);
+    let right_foot = hip_pos + Vec3::new(0.0, -0.4, -0.12);
+    let hip_sp = proj(hip_pos);
+    let left_foot_sp = proj(left_foot);
+    let right_foot_sp = proj(right_foot);
+
+    let limb_stroke = egui::Stroke::new(4.0, color);
+    let body_stroke = egui::Stroke::new(5.0, color);
+
+    // Legs
+    painter.line_segment([hip_sp, left_foot_sp], limb_stroke);
+    painter.line_segment([hip_sp, right_foot_sp], limb_stroke);
+    painter.circle_filled(left_foot_sp, 4.0, color);
+    painter.circle_filled(right_foot_sp, 4.0, color);
+
+    // Torso (thick line from hip to neck area)
+    let neck_pos = torso_pos + Vec3::new(0.0, 0.3, 0.0);
+    let neck_sp = proj(neck_pos);
+    painter.line_segment([hip_sp, neck_sp], body_stroke);
+
+    // Shoulder bar
+    painter.line_segment([left_shoulder_sp, right_shoulder_sp], body_stroke);
+
+    // Torso fill — rectangle between shoulders and hips
+    let torso_rect_points = [
+        proj(torso_pos + Vec3::new(0.0, 0.15, 0.15)),
+        proj(torso_pos + Vec3::new(0.0, 0.15, -0.15)),
+        proj(torso_pos + Vec3::new(0.0, -0.25, -0.12)),
+        proj(torso_pos + Vec3::new(0.0, -0.25, 0.12)),
+    ];
+    let torso_mesh = egui::Shape::convex_polygon(
+        torso_rect_points.to_vec(),
+        fill,
+        egui::Stroke::new(1.5, color),
+    );
+    painter.add(torso_mesh);
+
+    // Arms — thick lines from shoulder to fist
+    painter.line_segment([left_shoulder_sp, left_fist_sp], limb_stroke);
+    painter.line_segment([right_shoulder_sp, right_fist_sp], limb_stroke);
+
+    // Fists — larger filled circles
+    let fist_radius = (0.15 * scale * 5.0).clamp(8.0, 28.0);
+    painter.circle_filled(left_fist_sp, fist_radius, fill);
+    painter.circle_stroke(left_fist_sp, fist_radius, egui::Stroke::new(2.5, bright));
+    painter.circle_filled(right_fist_sp, fist_radius, fill);
+    painter.circle_stroke(right_fist_sp, fist_radius, egui::Stroke::new(2.5, bright));
+
+    // Neck line
+    painter.line_segment([neck_sp, head_sp], egui::Stroke::new(3.0, color));
+
+    // Head — filled circle
+    let head_radius = (0.1 * scale * 5.0).clamp(8.0, 24.0);
+    painter.circle_filled(head_sp, head_radius, fill);
+    painter.circle_stroke(head_sp, head_radius, egui::Stroke::new(2.0, bright));
+
+    // Eyes (two small dots based on facing direction)
+    let face_dir = if robot_idx == 0 { 1.0_f32 } else { -1.0 };
+    let eye_offset = Vec3::new(0.0, 0.02, 0.04 * face_dir);
+    let left_eye_sp = proj(head_pos + eye_offset + Vec3::new(0.0, 0.0, -0.025 * face_dir));
+    let right_eye_sp = proj(head_pos + eye_offset + Vec3::new(0.0, 0.0, 0.025 * face_dir));
+    painter.circle_filled(left_eye_sp, 2.0, egui::Color32::WHITE);
+    painter.circle_filled(right_eye_sp, 2.0, egui::Color32::WHITE);
+
+    // Health bar above head
+    if let Some(ref combat) = robot.state.combat {
+        let bar_center = proj(head_pos + Vec3::new(0.0, 0.18, 0.0));
+        let bar_w = 40.0_f32;
+        let bar_h = 5.0_f32;
+        let hp_frac = (combat.health / combat.max_health).clamp(0.0, 1.0);
+
+        let bg_rect = egui::Rect::from_center_size(bar_center, egui::vec2(bar_w, bar_h));
+        painter.rect_filled(bg_rect, 2.0, egui::Color32::from_rgb(60, 20, 20));
+
+        let hp_color = if hp_frac > 0.5 {
+            egui::Color32::from_rgb(60, 220, 60)
+        } else if hp_frac > 0.25 {
+            egui::Color32::from_rgb(220, 180, 40)
+        } else {
+            egui::Color32::from_rgb(220, 40, 40)
+        };
+        let hp_rect =
+            egui::Rect::from_min_size(bg_rect.left_top(), egui::vec2(bar_w * hp_frac, bar_h));
+        painter.rect_filled(hp_rect, 2.0, hp_color);
+        painter.rect_stroke(
+            bg_rect,
+            2.0,
+            egui::Stroke::new(1.0, egui::Color32::WHITE),
+            egui::StrokeKind::Outside,
+        );
+    }
+
+    // Name label above health bar
+    let label_pos = proj(head_pos + Vec3::new(0.0, 0.26, 0.0));
+    if rect.contains(label_pos) {
+        let connected = activity_log.is_connected(robot_idx);
+        let tag = if connected { "AI" } else { "--" };
+        let label = format!("[{}] R{}", tag, robot_idx);
+        painter.text(
+            label_pos,
+            egui::Align2::CENTER_BOTTOM,
+            &label,
+            egui::FontId::proportional(12.0),
+            bright,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_generic_robot(
+    painter: &egui::Painter,
+    robot: &crate::robot::ManagedRobot,
+    robot_idx: usize,
+    link_poses: &[glam::Mat4],
+    color: egui::Color32,
+    activity_log: &AgentActivityLog,
+    show_sensor_rays: bool,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let joint_color = egui::Color32::from_rgb(
+        (color.r() as u16 * 3 / 4) as u8 + 60,
+        (color.g() as u16 * 3 / 4) as u8 + 60,
+        (color.b() as u16 * 3 / 4) as u8 + 60,
+    );
+
+    for (link_idx, link_def) in robot.definition.links.iter().enumerate() {
+        if link_idx >= link_poses.len() {
+            break;
         }
+        let pose = link_poses[link_idx];
+        render_link_shape(
+            painter,
+            &link_def.collision_shape,
+            pose,
+            color,
+            cam,
+            center,
+            scale,
+            rect,
+        );
+    }
 
-        // --- Draw sensor rays ---
-        if show_sensor_rays {
-            let sensor_color =
-                egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 120);
-            render_sensor_rays(painter, robot, sensor_color, cam, center, scale);
+    for joint_def in &robot.definition.joints {
+        if joint_def.child_link >= link_poses.len() {
+            continue;
         }
+        let child_pose = link_poses[joint_def.child_link];
+        let joint_pos = Vec3::new(
+            child_pose.w_axis.x,
+            child_pose.w_axis.y,
+            child_pose.w_axis.z,
+        );
+        let sp = project_3d(joint_pos, cam, center, scale);
+        if rect.contains(sp) {
+            painter.circle_filled(sp, 4.0, joint_color);
+            painter.circle_stroke(sp, 4.0, egui::Stroke::new(1.0, color));
+        }
+    }
 
-        // --- Label: robot name + connection status above base link ---
-        if !link_poses.is_empty() {
-            let base_pos = Vec3::new(
-                link_poses[0].w_axis.x,
-                link_poses[0].w_axis.y + 0.3,
-                link_poses[0].w_axis.z,
+    if show_sensor_rays {
+        let sensor_color =
+            egui::Color32::from_rgba_premultiplied(color.r(), color.g(), color.b(), 120);
+        render_sensor_rays(painter, robot, sensor_color, cam, center, scale);
+    }
+
+    if !link_poses.is_empty() {
+        let base_pos = Vec3::new(
+            link_poses[0].w_axis.x,
+            link_poses[0].w_axis.y + 0.3,
+            link_poses[0].w_axis.z,
+        );
+        let lp = project_3d(base_pos, cam, center, scale);
+        if rect.contains(lp) {
+            let connected = activity_log.is_connected(robot_idx);
+            let status_icon = if connected { "[A]" } else { "[-]" };
+            let status_color = if connected {
+                egui::Color32::from_rgb(80, 220, 80)
+            } else {
+                egui::Color32::from_rgb(150, 150, 150)
+            };
+
+            let label = format!("{} {} R{}", status_icon, robot.definition.name, robot_idx);
+            painter.text(
+                lp,
+                egui::Align2::CENTER_BOTTOM,
+                &label,
+                egui::FontId::proportional(11.0),
+                color,
             );
-            let lp = project_3d(base_pos, cam, center, scale);
-            if rect.contains(lp) {
-                // Connection status indicator
-                let connected = activity_log.is_connected(robot_idx);
-                let status_icon = if connected { "[A]" } else { "[-]" };
-                let status_color = if connected {
-                    egui::Color32::from_rgb(80, 220, 80)
-                } else {
-                    egui::Color32::from_rgb(150, 150, 150)
-                };
-
-                let label = format!("{} {} R{}", status_icon, robot.definition.name, robot_idx);
-                painter.text(
-                    lp,
-                    egui::Align2::CENTER_BOTTOM,
-                    &label,
-                    egui::FontId::proportional(11.0),
-                    color,
-                );
-
-                // Small status dot next to the label
-                let dot_pos = egui::Pos2::new(lp.x - 30.0, lp.y - 4.0);
-                painter.circle_filled(dot_pos, 3.0, status_color);
-            }
+            let dot_pos = egui::Pos2::new(lp.x - 30.0, lp.y - 4.0);
+            painter.circle_filled(dot_pos, 3.0, status_color);
         }
     }
 }

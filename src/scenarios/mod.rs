@@ -36,6 +36,130 @@ pub struct ScenarioPreset {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-calibration
+// ---------------------------------------------------------------------------
+
+/// Computed solver parameters from scene geometry + medium properties.
+///
+/// Derived such that:
+/// - `dt` respects the strictest CFL/diffusion limit across fluid, gas, and
+///   acoustic propagation (advection: dt <= dx/u, acoustic: dt <= dx/c,
+///   diffusion: dt <= dx^2/(6 D)) with a 0.5x safety factor.
+/// - `dx` divides the longest scene axis into `target_cells_per_axis` cells.
+/// - `ray_count` scales with grid volume so resolution and acoustic sampling
+///   stay balanced, clamped to a sane range.
+#[derive(Clone, Copy, Debug)]
+pub struct AutoCalibration {
+    pub dt: f32,
+    pub dx: f32,
+    pub grid_dims: (usize, usize, usize),
+    pub ray_count: u32,
+}
+
+/// Physics targets used to size the calibration. Sensible defaults match
+/// indoor room scenes with subsonic flow and a typical gas mixture; override
+/// when simulating extreme regimes (supersonic, deep ocean, etc.).
+#[derive(Clone, Copy, Debug)]
+pub struct CalibrationTargets {
+    /// Approximate cell count along the longest scene axis.
+    pub target_cells_per_axis: usize,
+    /// Maximum expected fluid velocity (m/s). Drives advection CFL.
+    pub max_fluid_velocity: f32,
+    /// Speed of sound in the dominant medium (m/s). Drives acoustic CFL.
+    pub acoustic_speed: f32,
+    /// Largest diffusion coefficient in the simulation (m^2/s).
+    pub max_diffusion: f32,
+    /// CFL safety multiplier — final dt is the strict limit times this factor.
+    pub safety_factor: f32,
+}
+
+impl Default for CalibrationTargets {
+    fn default() -> Self {
+        Self {
+            target_cells_per_axis: 32,
+            max_fluid_velocity: 10.0,
+            acoustic_speed: 343.0,
+            max_diffusion: 0.2,
+            safety_factor: 0.5,
+        }
+    }
+}
+
+/// Trait implemented by anything that can derive solver parameters from
+/// scene geometry. Letting it be a trait keeps the door open for scenarios
+/// that override the default behaviour (e.g. supersonic regimes).
+pub trait AutoCalibrate {
+    fn auto_calibrate(&self, targets: CalibrationTargets) -> AutoCalibration;
+}
+
+/// Compute calibration from an explicit bounding box.
+pub fn calibrate_from_bbox(min: Vec3, max: Vec3, targets: CalibrationTargets) -> AutoCalibration {
+    let size = max - min;
+    let size = Vec3::new(size.x.max(1e-3), size.y.max(1e-3), size.z.max(1e-3));
+    let largest = size.x.max(size.y).max(size.z);
+    let cells = targets.target_cells_per_axis.max(2) as f32;
+    let dx = (largest / cells).max(1e-3);
+
+    let nx = ((size.x / dx).ceil() as usize).max(1);
+    let ny = ((size.y / dx).ceil() as usize).max(1);
+    let nz = ((size.z / dx).ceil() as usize).max(1);
+
+    let dt_advect = dx / targets.max_fluid_velocity.max(1e-3);
+    let dt_acoustic = dx / targets.acoustic_speed.max(1.0);
+    let dt_diffuse = dx * dx / (6.0 * targets.max_diffusion.max(1e-6));
+    let dt = dt_advect.min(dt_acoustic).min(dt_diffuse) * targets.safety_factor.clamp(0.05, 1.0);
+
+    let cell_count = (nx as u64)
+        .saturating_mul(ny as u64)
+        .saturating_mul(nz as u64);
+    let ray_count = (cell_count.saturating_mul(4)).clamp(1_000, 100_000) as u32;
+
+    AutoCalibration {
+        dt,
+        dx,
+        grid_dims: (nx, ny, nz),
+        ray_count,
+    }
+}
+
+impl AutoCalibrate for Scene {
+    fn auto_calibrate(&self, targets: CalibrationTargets) -> AutoCalibration {
+        let (min, max) = scene_bbox(self);
+        calibrate_from_bbox(min, max, targets)
+    }
+}
+
+fn scene_bbox(scene: &Scene) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    let mut has_any = false;
+    for obj in &scene.meshes {
+        for tri in &obj.mesh.triangles {
+            for v in &tri.vertices {
+                min = min.min(v.position);
+                max = max.max(v.position);
+                has_any = true;
+            }
+        }
+    }
+    if !has_any {
+        return (Vec3::ZERO, Vec3::ONE);
+    }
+    (min, max)
+}
+
+/// Apply auto-calibration to a FluidConfig: overrides `dt` with the
+/// calibrated value while preserving viscosity/density/gravity choices.
+pub fn apply_calibration_to_fluid(config: &mut FluidConfig, calib: &AutoCalibration) {
+    config.dt = calib.dt;
+}
+
+/// Apply auto-calibration to a GasConfig.
+pub fn apply_calibration_to_gas(config: &mut GasConfig, calib: &AutoCalibration) {
+    config.dt = calib.dt;
+}
+
+// ---------------------------------------------------------------------------
 // Factory functions
 // ---------------------------------------------------------------------------
 
@@ -249,6 +373,8 @@ pub fn make_simple_robot() -> RobotDefinition {
                 limit_max: std::f32::consts::PI,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             },
             JointDefinition {
                 name: "elbow".to_string(),
@@ -260,6 +386,8 @@ pub fn make_simple_robot() -> RobotDefinition {
                 limit_max: std::f32::consts::PI,
                 max_torque: 5.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             },
         ],
         sensors: vec![SensorMount {
@@ -582,5 +710,145 @@ mod tests {
             (max_z - half).abs() < f32::EPSILON,
             "Max z should be {half}, got {max_z}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Auto-calibration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_auto_calibrate_dt_respects_cfl_advection() {
+        // dt must satisfy dt <= dx / max_velocity (with safety factor).
+        let targets = CalibrationTargets::default();
+        let calib = calibrate_from_bbox(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0), targets);
+        let cfl_limit = calib.dx / targets.max_fluid_velocity;
+        assert!(
+            calib.dt <= cfl_limit + 1e-6,
+            "auto-calibrated dt={} must respect advection CFL limit {}",
+            calib.dt,
+            cfl_limit
+        );
+    }
+
+    #[test]
+    fn test_auto_calibrate_dt_respects_acoustic_cfl() {
+        let targets = CalibrationTargets::default();
+        let calib = calibrate_from_bbox(Vec3::ZERO, Vec3::new(5.0, 5.0, 5.0), targets);
+        let acoustic_limit = calib.dx / targets.acoustic_speed;
+        assert!(
+            calib.dt <= acoustic_limit + 1e-6,
+            "auto-calibrated dt={} must respect acoustic CFL limit {}",
+            calib.dt,
+            acoustic_limit
+        );
+    }
+
+    #[test]
+    fn test_auto_calibrate_dt_respects_diffusion_stability() {
+        let targets = CalibrationTargets {
+            max_diffusion: 1.0,
+            ..CalibrationTargets::default()
+        };
+        let calib = calibrate_from_bbox(Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0), targets);
+        let diff_limit = calib.dx * calib.dx / (6.0 * targets.max_diffusion);
+        assert!(
+            calib.dt <= diff_limit + 1e-6,
+            "auto-calibrated dt={} must respect diffusion stability {}",
+            calib.dt,
+            diff_limit
+        );
+    }
+
+    #[test]
+    fn test_auto_calibrate_grid_dims_scale_with_bbox() {
+        let targets = CalibrationTargets::default();
+        let small = calibrate_from_bbox(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0), targets);
+        let big = calibrate_from_bbox(Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0), targets);
+        // dx should be identical (longest-axis-divided), grid_dims also same
+        // because both are cubes scaled equally. Confirm dims are positive.
+        assert!(small.grid_dims.0 > 0 && small.grid_dims.1 > 0 && small.grid_dims.2 > 0);
+        assert!(big.grid_dims.0 > 0 && big.grid_dims.1 > 0 && big.grid_dims.2 > 0);
+
+        // Non-uniform bbox: dim along longest axis should match target_cells_per_axis.
+        let rect = calibrate_from_bbox(Vec3::ZERO, Vec3::new(20.0, 5.0, 1.0), targets);
+        assert_eq!(rect.grid_dims.0, targets.target_cells_per_axis);
+        assert!(rect.grid_dims.1 < rect.grid_dims.0);
+        assert!(rect.grid_dims.2 < rect.grid_dims.0);
+    }
+
+    #[test]
+    fn test_auto_calibrate_ray_count_scales_with_cells() {
+        let targets = CalibrationTargets {
+            target_cells_per_axis: 16,
+            ..CalibrationTargets::default()
+        };
+        let small = calibrate_from_bbox(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0), targets);
+        let large_targets = CalibrationTargets {
+            target_cells_per_axis: 64,
+            ..CalibrationTargets::default()
+        };
+        let large = calibrate_from_bbox(Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0), large_targets);
+
+        assert!(
+            large.ray_count > small.ray_count,
+            "higher cell count must produce more rays: small={}, large={}",
+            small.ray_count,
+            large.ray_count
+        );
+
+        // Clamp bounds.
+        assert!(small.ray_count >= 1_000);
+        assert!(large.ray_count <= 100_000);
+    }
+
+    #[test]
+    fn test_auto_calibrate_handles_degenerate_bbox() {
+        // Zero-size bbox must not produce NaN/Inf or zero dx.
+        let calib = calibrate_from_bbox(Vec3::ZERO, Vec3::ZERO, CalibrationTargets::default());
+        assert!(calib.dt.is_finite() && calib.dt > 0.0);
+        assert!(calib.dx.is_finite() && calib.dx > 0.0);
+        assert!(calib.grid_dims.0 >= 1 && calib.grid_dims.1 >= 1 && calib.grid_dims.2 >= 1);
+    }
+
+    #[test]
+    fn test_scene_auto_calibrate_uses_mesh_bbox() {
+        // A 4x4x4 room scene must yield grid dims consistent with that bbox.
+        let scene = make_test_room(4.0);
+        let calib = scene.auto_calibrate(CalibrationTargets::default());
+        assert!(calib.dt > 0.0);
+        // dx = 4 / 32 = 0.125 expected; dims should equal target_cells_per_axis cube.
+        assert_eq!(calib.grid_dims.0, 32);
+        assert_eq!(calib.grid_dims.1, 32);
+        assert_eq!(calib.grid_dims.2, 32);
+    }
+
+    #[test]
+    fn test_apply_calibration_to_fluid_overrides_dt() {
+        let mut fluid = make_fluid_config();
+        let calib = AutoCalibration {
+            dt: 0.001,
+            dx: 0.1,
+            grid_dims: (32, 32, 32),
+            ray_count: 10_000,
+        };
+        apply_calibration_to_fluid(&mut fluid, &calib);
+        assert!((fluid.dt - 0.001).abs() < 1e-9);
+        // Other settings preserved.
+        assert!(fluid.viscosity > 0.0);
+        assert!(fluid.density > 0.0);
+    }
+
+    #[test]
+    fn test_apply_calibration_to_gas_overrides_dt() {
+        let mut gas = make_gas_config();
+        let calib = AutoCalibration {
+            dt: 0.002,
+            dx: 0.1,
+            grid_dims: (32, 32, 32),
+            ray_count: 10_000,
+        };
+        apply_calibration_to_gas(&mut gas, &calib);
+        assert!((gas.dt - 0.002).abs() < 1e-9);
+        assert!(gas.ambient_temperature > 0.0);
     }
 }

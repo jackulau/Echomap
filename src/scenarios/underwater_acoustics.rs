@@ -5,7 +5,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::acoustics::ray::{AcousticRay, RayHit};
+    use crate::acoustics::ray::{AcousticRay, RayHit, DEFAULT_MAX_PATH_LENGTH};
     use crate::assert_relative_eq;
     use crate::scene::material::{
         AcousticMaterial, FrequencyBands, MediumLibrary, MediumProperties,
@@ -33,6 +33,7 @@ mod tests {
             path: vec![origin],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -71,6 +72,7 @@ mod tests {
             path: vec![origin],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -116,6 +118,7 @@ mod tests {
             path: vec![origin],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -160,6 +163,7 @@ mod tests {
                 path: vec![origin],
                 current_medium: air(),
                 frequency_hz: 1000.0,
+                max_path_length: DEFAULT_MAX_PATH_LENGTH,
             };
 
             let result = ray.refract(normal, &water_med).unwrap();
@@ -188,6 +192,7 @@ mod tests {
             path: vec![origin],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
         let water_med = water();
         let result_water = ray_water.refract(normal, &water_med).unwrap();
@@ -218,6 +223,7 @@ mod tests {
             path: vec![origin],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
         let result_glass = ray_glass.refract(normal, &glass_med).unwrap();
 
@@ -251,6 +257,7 @@ mod tests {
             path: vec![origin],
             current_medium: water(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let material = AcousticMaterial {
@@ -316,6 +323,7 @@ mod tests {
             path: vec![origin],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -348,6 +356,7 @@ mod tests {
             path: vec![origin],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
         let result_small = ray_small.refract(normal, &water_med).unwrap();
 

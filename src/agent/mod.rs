@@ -200,6 +200,77 @@ pub fn start_agent_server(
     }
 }
 
+/// Headless server that runs the simulation without a GUI window.
+///
+/// Bundles the agent server, bridge, robot manager, and processing loop
+/// into a single self-contained unit. Suitable for CI, server deployment,
+/// and automated agent testing.
+pub struct HeadlessServer {
+    handle: AgentServerHandle,
+    _processing_thread: JoinHandle<()>,
+}
+
+impl HeadlessServer {
+    /// Start a headless server with a pre-configured robot manager and scene meshes.
+    ///
+    /// The bridge processing loop runs at 60Hz on a dedicated thread.
+    /// The agent TCP/WS servers accept connections immediately.
+    pub fn start(
+        config: AgentServerConfig,
+        manager: crate::robot::RobotManager,
+        scene_meshes: Vec<crate::scene::SceneObject>,
+        boxing_match: Option<crate::robot::boxing::BoxingMatch>,
+    ) -> Self {
+        let (server, mut client) = if let Some(bm) = boxing_match {
+            bridge::create_bridge_with_boxing(bm)
+        } else {
+            bridge::create_bridge()
+        };
+
+        let handle = start_agent_server(config, server);
+
+        let cancel = handle.cancel.clone();
+        let processing_thread = std::thread::Builder::new()
+            .name("headless-bridge".to_string())
+            .spawn(move || {
+                let mut manager = manager;
+                while !cancel.is_cancelled() {
+                    client.process_pending(&mut manager, &scene_meshes);
+                    std::thread::sleep(std::time::Duration::from_micros(16_667));
+                }
+            })
+            .expect("failed to spawn headless bridge thread");
+
+        HeadlessServer {
+            handle,
+            _processing_thread: processing_thread,
+        }
+    }
+
+    /// Start a headless boxing match server with default config.
+    pub fn start_boxing(config: AgentServerConfig) -> Self {
+        Self::start_boxing_with(config, crate::robot::boxing::BoxingMatchConfig::default())
+    }
+
+    /// Start a headless boxing match server with custom boxing config.
+    pub fn start_boxing_with(
+        config: AgentServerConfig,
+        boxing_config: crate::robot::boxing::BoxingMatchConfig,
+    ) -> Self {
+        let (scenario, manager) = crate::robot::boxing::BoxingScenario::new(boxing_config);
+        let scene_meshes = scenario.ring.meshes.clone();
+        Self::start(config, manager, scene_meshes, Some(scenario.boxing_match))
+    }
+
+    pub fn status(&self) -> AgentServerStatus {
+        self.handle.status()
+    }
+
+    pub fn stop(mut self) {
+        self.handle.stop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,6 +667,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         for i in 1..=10 {
             let resp = tcp_send_recv(
@@ -685,6 +757,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         for i in 1..=10 {
             let resp = ws_send_recv(
@@ -760,10 +833,12 @@ mod tests {
         let action1 = RobotAction {
             motor_velocities: vec![2.0, 0.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let action2 = RobotAction {
             motor_velocities: vec![0.0, -2.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         // Step agent 1 three times.
@@ -847,6 +922,7 @@ mod tests {
             let action = RobotAction {
                 motor_velocities: vec![1.0, 1.0],
                 gripper_commands: vec![],
+                base_velocity: [0.0, 0.0],
             };
             for _ in 0..3 {
                 let resp = tcp_send_recv(
@@ -902,6 +978,7 @@ mod tests {
             let action = RobotAction {
                 motor_velocities: vec![0.5, -0.5],
                 gripper_commands: vec![],
+                base_velocity: [0.0, 0.0],
             };
             let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action }).await;
             match &resp {
@@ -940,6 +1017,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![0.5, -0.3],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         for i in 1..=100u64 {
@@ -999,6 +1077,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![5.0, -3.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         for _ in 0..10 {
             tcp_send_recv(
@@ -1135,6 +1214,7 @@ mod tests {
         let empty_action = RobotAction {
             motor_velocities: vec![],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = tcp_send_recv(
             &mut w,
@@ -1174,6 +1254,7 @@ mod tests {
         let big_action = RobotAction {
             motor_velocities: vec![1.0; 10],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: big_action }).await;
 
@@ -1193,14 +1274,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_nan_inf_action_values() {
-        // BUG DISCOVERED: NaN/Inf in actions propagate through the physics
-        // engine and poison the observation state. When the server then tries
-        // to serialize the observation, serde_json turns NaN into `null`,
-        // which cannot be deserialized back as f32. The TCP handler catches
-        // this as a JSON parse error on the write path and returns an Error.
-        //
-        // This test documents the current (broken) behavior. The correct fix
-        // would be to validate/clamp action values before applying them.
+        // NaN is not representable in JSON (serde writes `null`), so the
+        // server rejects NaN actions at the parse layer. For in-process
+        // callers, apply_action clamps non-finite values to 0.0.
         let (handle, bridge_thread) = start_test_server(1);
         let tcp_port = handle.status().tcp_port;
         let (mut w, mut r) = tcp_connect(tcp_port).await;
@@ -1208,21 +1284,16 @@ mod tests {
         tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
         tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
 
-        // Step with NaN. The server does not crash, but the response will
-        // be an Error because NaN corrupts the observation serialization.
         let nan_action = RobotAction {
             motor_velocities: vec![f32::NAN, f32::NAN],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
-        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: nan_action }).await;
-        // The server does not crash (no panic), but the observation is corrupted.
-        // We verify the server stays alive and responds (either Observation or Error).
+        let resp =
+            tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: nan_action }).await;
         assert!(
-            matches!(
-                resp,
-                ServerMessage::Observation { .. } | ServerMessage::Error { .. }
-            ),
-            "NaN action should not crash the server. Got {:?}",
+            matches!(resp, ServerMessage::Error { .. }),
+            "NaN over JSON should be rejected at parse layer. Got {:?}",
             resp
         );
 
@@ -1254,6 +1325,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = tcp_send_recv(
             &mut w,
@@ -1315,6 +1387,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         for _ in 0..5 {
             tcp_send_recv(
@@ -1383,6 +1456,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action }).await;
         match &resp {
@@ -1438,6 +1512,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         tcp_send_recv(
             &mut w,
@@ -1579,6 +1654,7 @@ mod tests {
             let action = RobotAction {
                 motor_velocities: vec![1.0, -1.0],
                 gripper_commands: vec![],
+                base_velocity: [0.0, 0.0],
             };
             tcp_send_recv(
                 &mut w,
@@ -1741,6 +1817,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![1.0, -1.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -1850,6 +1927,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         // Step robot 0 three times.
@@ -1995,6 +2073,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let msg = ClientMessage::Step { action };
         let json = serde_json::to_string(&msg).unwrap();
@@ -2089,10 +2168,12 @@ mod tests {
         let action1 = RobotAction {
             motor_velocities: vec![1.0, 0.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let action2 = RobotAction {
             motor_velocities: vec![0.0, -1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         let msg1 = ClientMessage::Step {
@@ -2253,5 +2334,75 @@ mod tests {
 
         drop(handle);
         drop(bridge_thread);
+    }
+
+    // ---- HeadlessServer tests ----
+
+    #[test]
+    fn test_headless_server_start_stop() {
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::simple_arm(2);
+        manager.add_robot(def, Mat4::IDENTITY);
+
+        let config = AgentServerConfig {
+            tcp_port: 0,
+            ws_port: 0,
+            max_connections: 16,
+            enabled: true,
+        };
+        let server = HeadlessServer::start(config, manager, vec![], None);
+        let status = server.status();
+        assert!(status.running);
+        assert!(status.tcp_port > 0);
+        assert!(status.ws_port > 0);
+        server.stop();
+    }
+
+    #[test]
+    fn test_headless_boxing_server() {
+        let config = AgentServerConfig {
+            tcp_port: 0,
+            ws_port: 0,
+            max_connections: 16,
+            enabled: true,
+        };
+        let server = HeadlessServer::start_boxing(config);
+        let status = server.status();
+        assert!(status.running);
+        assert!(status.tcp_port > 0);
+        server.stop();
+    }
+
+    #[tokio::test]
+    async fn test_headless_boxing_agent_connects() {
+        let config = AgentServerConfig {
+            tcp_port: 0,
+            ws_port: 0,
+            max_connections: 16,
+            enabled: true,
+        };
+        let server = HeadlessServer::start_boxing(config);
+        let tcp_port = server.status().tcp_port;
+
+        let (mut w, mut r) = tcp_connect(tcp_port).await;
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 0 }).await;
+        assert!(
+            matches!(resp, ServerMessage::Connected { .. }),
+            "agent should connect to headless boxing server, got {:?}",
+            resp
+        );
+
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
+        match resp {
+            ServerMessage::Observation { match_state, .. } => {
+                assert!(
+                    match_state.is_some(),
+                    "boxing match should be auto-wired"
+                );
+            }
+            other => panic!("Expected Observation with match_state, got {:?}", other),
+        }
+
+        server.stop();
     }
 }

@@ -277,7 +277,7 @@ pub fn detect_robot_collisions(
 // ---------------------------------------------------------------------------
 
 /// Minimum link velocity magnitude (m/s) to count as a punch.
-pub const PUNCH_VELOCITY_THRESHOLD: f32 = 2.0;
+pub const PUNCH_VELOCITY_THRESHOLD: f32 = 0.8;
 
 /// Stamina cost per punch.
 pub const PUNCH_STAMINA_COST: f32 = 10.0;
@@ -1349,8 +1349,7 @@ mod tests {
             penetration: 0.1,
         };
 
-        // Robot A's link moving at 1.5 m/s (below threshold of 2.0)
-        let vels_a = vec![Vec3::new(1.5, 0.0, 0.0)];
+        let vels_a = vec![Vec3::new(0.5, 0.0, 0.0)];
         let vels_b = vec![Vec3::ZERO];
 
         let robots: Vec<(usize, &RobotDefinition, &RobotState, &[Vec3])> = vec![

@@ -302,29 +302,29 @@ fn build_energy_grid(
     let nx = (size.x / resolution).ceil() as usize;
     let ny = (size.y / resolution).ceil() as usize;
     let nz = (size.z / resolution).ceil() as usize;
+    let total = nx * ny * nz;
 
-    let mut grid = Vec::with_capacity(nx * ny * nz);
-
-    for ix in 0..nx {
-        for iy in 0..ny {
-            for iz in 0..nz {
-                let pos = min
-                    + Vec3::new(
-                        (ix as f32 + 0.5) * resolution,
-                        (iy as f32 + 0.5) * resolution,
-                        (iz as f32 + 0.5) * resolution,
-                    );
-
-                let energy = compute_point_energy(pos, resolution, ray_paths);
-                grid.push(GridPoint {
-                    position: pos,
-                    energy,
-                });
+    // Parallel: each grid cell's energy is independent — read-only access to
+    // ray_paths means we can fan out across cores.
+    (0..total)
+        .into_par_iter()
+        .map(|idx| {
+            let iz = idx % nz;
+            let iy = (idx / nz) % ny;
+            let ix = idx / (ny * nz);
+            let pos = min
+                + Vec3::new(
+                    (ix as f32 + 0.5) * resolution,
+                    (iy as f32 + 0.5) * resolution,
+                    (iz as f32 + 0.5) * resolution,
+                );
+            let energy = compute_point_energy(pos, resolution, ray_paths);
+            GridPoint {
+                position: pos,
+                energy,
             }
-        }
-    }
-
-    grid
+        })
+        .collect()
 }
 
 fn compute_point_energy(point: Vec3, radius: f32, ray_paths: &[Vec<Vec3>]) -> f32 {

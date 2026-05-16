@@ -355,6 +355,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let msg = serde_json::to_string(&ClientMessage::Step { action }).unwrap();
         let resp = send_and_recv(&mut writer, &mut reader, &msg).await;
@@ -488,6 +489,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let step_json = serde_json::to_string(&ClientMessage::Step {
             action: action.clone(),

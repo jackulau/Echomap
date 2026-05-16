@@ -111,6 +111,8 @@ mod tests {
                 limit_max,
                 max_torque,
                 damping,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             }],
             sensors: Vec::new(),
         }

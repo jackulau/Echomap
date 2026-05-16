@@ -231,6 +231,22 @@ impl BoxingMatch {
         for_robot: usize,
         opponent_combat: Option<&CombatState>,
     ) -> BoxingMatchState {
+        self.snapshot_with_spatial(for_robot, opponent_combat, None, None)
+    }
+
+    /// Build a match state with spatial perception fields.
+    ///
+    /// `own_link_poses` and `opponent_link_poses` should each be the link
+    /// pose array from the robot's RobotState (in column-major Mat4 form).
+    /// When provided, the resulting BoxingMatchState carries own_torso_pos,
+    /// opponent_torso_pos, and opponent_link_positions for the 4 humanoid links.
+    pub fn snapshot_with_spatial(
+        &self,
+        for_robot: usize,
+        opponent_combat: Option<&CombatState>,
+        own_link_poses: Option<&[[f32; 16]]>,
+        opponent_link_poses: Option<&[[f32; 16]]>,
+    ) -> BoxingMatchState {
         let phase_str = match &self.phase {
             MatchPhase::WaitingForAgents => "waiting_for_agents".to_string(),
             MatchPhase::Countdown { remaining } => format!("countdown_{:.1}", remaining),
@@ -241,6 +257,16 @@ impl BoxingMatch {
 
         let scores: Vec<[u8; 2]> = self.rounds.iter().map(|r| [r.score_a, r.score_b]).collect();
         let (total_a, total_b) = self.current_scores();
+
+        let pos_of = |pose: &[f32; 16]| [pose[12], pose[13], pose[14]];
+        let own_torso_pos = own_link_poses
+            .and_then(|p| p.first())
+            .map(pos_of)
+            .unwrap_or([0.0; 3]);
+        let opponent_link_positions: Vec<[f32; 3]> = opponent_link_poses
+            .map(|p| p.iter().map(pos_of).collect())
+            .unwrap_or_default();
+        let opponent_torso_pos = opponent_link_positions.first().copied().unwrap_or([0.0; 3]);
 
         BoxingMatchState {
             phase: phase_str,
@@ -253,6 +279,9 @@ impl BoxingMatch {
             your_robot: for_robot,
             opponent_health: opponent_combat.map(|c| c.health).unwrap_or(100.0),
             opponent_stamina: opponent_combat.map(|c| c.stamina).unwrap_or(100.0),
+            own_torso_pos,
+            opponent_link_positions,
+            opponent_torso_pos,
         }
     }
 }
@@ -273,6 +302,16 @@ pub struct BoxingMatchState {
     pub your_robot: usize,
     pub opponent_health: f32,
     pub opponent_stamina: f32,
+    /// Own torso world position [x, y, z] — anchor for relative spatial reasoning.
+    #[serde(default)]
+    pub own_torso_pos: [f32; 3],
+    /// Opponent link world positions in order: torso, head, left_arm, right_arm.
+    /// Empty if opponent state not available.
+    #[serde(default)]
+    pub opponent_link_positions: Vec<[f32; 3]>,
+    /// Opponent torso world position [x, y, z], convenience copy of opponent_link_positions[0].
+    #[serde(default)]
+    pub opponent_torso_pos: [f32; 3],
 }
 
 // ---------------------------------------------------------------------------
@@ -299,19 +338,19 @@ impl BoxingScenario {
         let mut manager = RobotManager::new();
 
         let def_a = RobotDefinition::boxing_humanoid();
-        let pose_a = Mat4::from_translation(glam::Vec3::new(-1.5, 0.0, 0.0));
+        let pose_a = Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, 0.0));
         let robot_a_id = manager.add_robot(def_a, pose_a);
 
         let def_b = RobotDefinition::boxing_humanoid();
-        let pose_b = Mat4::from_translation(glam::Vec3::new(1.5, 0.0, 0.0));
+        let pose_b = Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0));
         let robot_b_id = manager.add_robot(def_b, pose_b);
 
         // Enable combat state on both robots
         if let Some(robot) = manager.get_robot_mut(robot_a_id) {
-            robot.state.combat = Some(CombatState::new(100.0, 100.0));
+            robot.state.combat = Some(CombatState::new(500.0, 100.0));
         }
         if let Some(robot) = manager.get_robot_mut(robot_b_id) {
-            robot.state.combat = Some(CombatState::new(100.0, 100.0));
+            robot.state.combat = Some(CombatState::new(500.0, 100.0));
         }
 
         let boxing_match = BoxingMatch::new(robot_a_id, robot_b_id, config);
@@ -616,8 +655,8 @@ mod tests {
         let pose_b = manager.robots[1].base_pose_mat4();
         let pos_a = pose_a.col(3).truncate();
         let pos_b = pose_b.col(3).truncate();
-        assert!((pos_a.x - (-1.5)).abs() < 0.01);
-        assert!((pos_b.x - 1.5).abs() < 0.01);
+        assert!((pos_a.x - (-0.5)).abs() < 0.01);
+        assert!((pos_b.x - 0.5).abs() < 0.01);
     }
 
     #[test]
@@ -745,7 +784,6 @@ mod tests {
         scenario.boxing_match.update(&[], &[], 0.1);
         scenario.boxing_match.update(&[], &[], 1.1); // -> Fighting
 
-        // Step the physics (no actual hits expected since robots are far apart)
         let scene_meshes = &scenario.ring.meshes;
         manager.step(1.0 / 60.0, scene_meshes);
 
@@ -761,5 +799,69 @@ mod tests {
             .boxing_match
             .update(hit_events, &combat_states, 1.0 / 60.0);
         assert_eq!(scenario.boxing_match.phase, MatchPhase::Fighting);
+    }
+
+    #[test]
+    fn test_boxing_arms_can_reach_opponent() {
+        use crate::robot::collision::detect_robot_collisions;
+        use crate::robot::state::{apply_action, RobotAction};
+
+        let (_scenario, mut manager) = BoxingScenario::new(make_config());
+
+        let action_a = RobotAction {
+            motor_velocities: vec![0.0, 3.0, -3.0],
+            gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
+        };
+        let action_b = RobotAction {
+            motor_velocities: vec![0.0, -3.0, 3.0],
+            gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
+        };
+
+        let scene_meshes = vec![];
+        let mut total_collisions = 0;
+
+        for step in 0..120 {
+            {
+                let (left, right) = manager.robots.split_at_mut(1);
+                apply_action(&left[0].definition, &mut left[0].state, &action_a);
+                apply_action(&right[0].definition, &mut right[0].state, &action_b);
+            }
+            manager.step(1.0 / 60.0, &scene_meshes);
+
+            let combat_data: Vec<(
+                usize,
+                &crate::robot::definition::RobotDefinition,
+                &crate::robot::state::RobotState,
+            )> = manager
+                .robots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (i, &r.definition, &r.state))
+                .collect();
+            let collisions = detect_robot_collisions(&combat_data);
+            if !collisions.is_empty() {
+                let jp = &manager.robots[0].state.joint_positions;
+                eprintln!(
+                    "Step {}: {} collisions, joints=[{:.2}, {:.2}, {:.2}]",
+                    step,
+                    collisions.len(),
+                    jp.get(0).unwrap_or(&0.0),
+                    jp.get(1).unwrap_or(&0.0),
+                    jp.get(2).unwrap_or(&0.0),
+                );
+                total_collisions += collisions.len();
+            }
+
+            total_collisions += manager.last_hit_events.len();
+        }
+
+        eprintln!("Total collision frames: {}", total_collisions);
+
+        assert!(
+            total_collisions > 0,
+            "Arms should overlap with opponent when extended"
+        );
     }
 }

@@ -3,6 +3,8 @@ use eframe::egui;
 fn main() -> eframe::Result<()> {
     env_logger::init();
 
+    let boxing = std::env::args().any(|a| a == "--boxing");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("EchoMap")
@@ -14,14 +16,15 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "EchoMap",
         options,
-        Box::new(|cc| Ok(Box::new(app::EchoMapApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(app::EchoMapApp::new(cc, boxing)))),
     )
 }
 
 mod app {
     use echomap::acoustics::SimulationState;
     use echomap::agent::bridge::{
-        create_bridge, AgentActivityLog, SimBridgeClient, SimBridgeServer,
+        create_bridge, create_bridge_with_boxing, AgentActivityLog, SimBridgeClient,
+        SimBridgeServer,
     };
     use echomap::agent::demo::{DemoAgentHandle, DemoBehavior};
     use echomap::agent::{AgentServerConfig, AgentServerHandle};
@@ -50,10 +53,67 @@ mod app {
     }
 
     impl EchoMapApp {
-        pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        pub fn new(_cc: &eframe::CreationContext<'_>, boxing: bool) -> Self {
+            let agent_server_config = AgentServerConfig::default();
+
+            if boxing {
+                let mut boxing_config = echomap::robot::boxing::BoxingMatchConfig::default();
+                if let Ok(v) = std::env::var("ROUND_DURATION") {
+                    if let Ok(s) = v.parse::<f32>() {
+                        boxing_config.round_duration = s;
+                    }
+                }
+                if let Ok(v) = std::env::var("NUM_ROUNDS") {
+                    if let Ok(n) = v.parse::<u8>() {
+                        boxing_config.num_rounds = n;
+                    }
+                }
+                let (scenario, robot_manager) =
+                    echomap::robot::boxing::BoxingScenario::new(boxing_config);
+
+                let (bridge_server, bridge_client) =
+                    create_bridge_with_boxing(scenario.boxing_match);
+
+                let handle = echomap::agent::start_agent_server(
+                    agent_server_config.clone(),
+                    bridge_server.clone(),
+                );
+                log::info!(
+                    "Boxing mode: server started on WS:{}",
+                    agent_server_config.ws_port
+                );
+
+                let mut scene = Scene::default();
+                scene.meshes = scenario.ring.meshes;
+
+                let mut viewport = ViewportState::default();
+                viewport.camera.distance = 3.0;
+                viewport.camera.pitch = 15.0_f32.to_radians();
+                viewport.camera.yaw = 0.0;
+                viewport.camera.target = glam::Vec3::new(0.0, 0.3, 0.0);
+                viewport.camera.update_position();
+                viewport.camera_auto_track = true;
+
+                return Self {
+                    scene,
+                    simulation: SimulationState::default(),
+                    fluid_sim: FluidSimulation::default(),
+                    gas_sim: GasSimulation::default(),
+                    robot_manager,
+                    viewport,
+                    show_settings: false,
+                    bridge_client,
+                    bridge_server: Some(bridge_server),
+                    agent_server_config,
+                    agent_server_handle: Some(handle),
+                    activity_log: AgentActivityLog::default(),
+                    demo_handle: None,
+                    demo_behavior: DemoBehavior::ReachTarget,
+                };
+            }
+
             let (bridge_server, bridge_client) = create_bridge();
 
-            let agent_server_config = AgentServerConfig::default();
             let (agent_server_handle, retained_bridge) = if agent_server_config.enabled {
                 log::info!("Starting agent server (enabled by default config)");
                 let handle = echomap::agent::start_agent_server(
@@ -114,6 +174,7 @@ mod app {
                 &mut self.agent_server_config,
                 &mut self.agent_server_handle,
                 &mut self.bridge_client,
+                &mut self.bridge_server,
             );
             echomap::ui::agent_activity_panel(
                 ctx,
@@ -153,8 +214,13 @@ mod app {
                 );
             }
 
-            // Request continuous repainting when demo agent is running.
-            if self.demo_handle.as_ref().is_some_and(|h| h.is_running()) {
+            // Request continuous repainting when demo agent or agent server is running.
+            if self.demo_handle.as_ref().is_some_and(|h| h.is_running())
+                || self
+                    .agent_server_handle
+                    .as_ref()
+                    .is_some_and(|h| h.status().running)
+            {
                 ctx.request_repaint();
             }
         }

@@ -318,10 +318,18 @@ impl SimBridgeClient {
         } else {
             bm.robot_a
         };
-        let opponent_combat = manager
-            .get_robot(opponent_id)
-            .and_then(|r| r.state.combat.as_ref());
-        Some(bm.snapshot(robot_id, opponent_combat))
+        let opponent_robot = manager.get_robot(opponent_id);
+        let opponent_combat = opponent_robot.and_then(|r| r.state.combat.as_ref());
+        let own_link_poses = manager
+            .get_robot(robot_id)
+            .map(|r| r.state.link_poses.as_slice());
+        let opponent_link_poses = opponent_robot.map(|r| r.state.link_poses.as_slice());
+        Some(bm.snapshot_with_spatial(
+            robot_id,
+            opponent_combat,
+            own_link_poses,
+            opponent_link_poses,
+        ))
     }
 
     /// Non-blocking drain of the command channel.
@@ -376,6 +384,18 @@ impl SimBridgeClient {
                 if let Some(robot) = manager.get_robot_mut(robot_id) {
                     apply_action(&robot.definition, &mut robot.state, &action);
                     let dt = 1.0 / 60.0;
+
+                    // Planar base locomotion. Bridge clamps velocity and ring bounds
+                    // so single-link humanoids (no leg joints) can still navigate.
+                    let max_speed = 2.0_f32;
+                    let ring_half = 2.7_f32;
+                    let vx = action.base_velocity[0].clamp(-max_speed, max_speed);
+                    let vz = action.base_velocity[1].clamp(-max_speed, max_speed);
+                    let mut bp = robot.base_pose;
+                    bp[12] = (bp[12] + vx * dt).clamp(-ring_half, ring_half);
+                    bp[14] = (bp[14] + vz * dt).clamp(-ring_half, ring_half);
+                    robot.base_pose = bp;
+
                     manager.step(dt, scene_meshes);
 
                     if let Some(bm) = &mut self.boxing_match {
@@ -443,7 +463,9 @@ impl SimBridgeClient {
 
             SimCommand::Reset { robot_id } => {
                 if let Some(robot) = manager.get_robot_mut(robot_id) {
+                    let combat = robot.state.combat.take();
                     robot.state = RobotState::new(&robot.definition);
+                    robot.state.combat = combat;
                     if self.step_counts.len() <= robot_id {
                         self.step_counts.resize(robot_id + 1, 0);
                     }
@@ -613,6 +635,22 @@ pub fn create_bridge() -> (SimBridgeServer, SimBridgeClient) {
     (server, client)
 }
 
+/// Create a bridge pair with a boxing match pre-wired.
+pub fn create_bridge_with_boxing(
+    boxing_match: crate::robot::boxing::BoxingMatch,
+) -> (SimBridgeServer, SimBridgeClient) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let server = SimBridgeServer { tx };
+    let client = SimBridgeClient {
+        rx,
+        step_counts: Vec::new(),
+        state_buffer: GymStateBuffer::new(),
+        message_bus: MessageBus::new(100),
+        boxing_match: Some(boxing_match),
+    };
+    (server, client)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,6 +691,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![1.0, -0.5],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -721,6 +760,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![5.0, 5.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -810,6 +850,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![1.0, 1.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -905,6 +946,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -949,6 +991,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![1.0, 1.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -1068,6 +1111,7 @@ mod tests {
                         action: RobotAction {
                             motor_velocities: vec![1.0, 1.0],
                             gripper_commands: vec![],
+                            base_velocity: [0.0, 0.0],
                         },
                     })
                     .await
@@ -1098,6 +1142,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![1.0, 1.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -1140,6 +1185,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![1.0, 2.0, 3.0, 4.0, 5.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -1221,6 +1267,7 @@ mod tests {
                         action: RobotAction {
                             motor_velocities: vec![1.0, 1.0],
                             gripper_commands: vec![],
+                            base_velocity: [0.0, 0.0],
                         },
                     })
                     .await
@@ -1327,6 +1374,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![5.0, -3.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -1567,6 +1615,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![0.0, 0.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -1696,6 +1745,7 @@ mod tests {
                     action: RobotAction {
                         motor_velocities: vec![0.0, 0.0],
                         gripper_commands: vec![],
+                        base_velocity: [0.0, 0.0],
                     },
                 })
                 .await
@@ -1860,6 +1910,48 @@ mod tests {
                 );
             }
             other => panic!("Expected Observation, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_bridge_with_boxing() {
+        use crate::robot::boxing::{BoxingMatch, BoxingMatchConfig};
+
+        let bm = BoxingMatch::new(0, 1, BoxingMatchConfig::default());
+        let (server, mut client) = create_bridge_with_boxing(bm);
+
+        assert!(
+            client.boxing_match.is_some(),
+            "boxing_match should be pre-wired"
+        );
+
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::boxing_humanoid();
+        let pose_a = Mat4::from_translation(glam::Vec3::new(-1.5, 0.0, 0.0));
+        let pose_b = Mat4::from_translation(glam::Vec3::new(1.5, 0.0, 0.0));
+        manager.add_robot(def.clone(), pose_a);
+        manager.add_robot(def, pose_b);
+        if let Some(r) = manager.get_robot_mut(0) {
+            r.state.combat = Some(crate::robot::state::CombatState::new(100.0, 100.0));
+        }
+        if let Some(r) = manager.get_robot_mut(1) {
+            r.state.combat = Some(crate::robot::state::CombatState::new(100.0, 100.0));
+        }
+
+        let handle = tokio::spawn(async move {
+            server
+                .send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+
+        let resp = handle.await.unwrap().unwrap();
+        match resp {
+            SimResponse::Observation { match_state, .. } => {
+                assert!(match_state.is_some(), "match_state should be populated");
+            }
+            other => panic!("Expected Observation with match_state, got {:?}", other),
         }
     }
 }

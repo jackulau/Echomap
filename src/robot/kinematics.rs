@@ -100,13 +100,16 @@ pub fn forward_kinematics(definition: &RobotDefinition, state: &mut RobotState, 
     // Base link gets the base_pose directly.
     state.set_link_pose(0, base_pose);
 
-    // Process each joint: child_pose = parent_pose * joint_transform
+    // Process each joint:
+    //   child_pose = parent_pose * translate(anchor_offset) * joint_rotation * translate(child_offset)
     for (joint_idx, joint) in definition.joints.iter().enumerate() {
         let position = state.joint_positions.get(joint_idx).copied().unwrap_or(0.0);
         let joint_transform = compute_joint_transform(joint, position);
 
         let parent_pose = Mat4::from_cols_array(&state.link_poses[joint.parent_link]);
-        let child_pose = parent_pose * joint_transform;
+        let anchor = Mat4::from_translation(joint.anchor_offset);
+        let child_local = Mat4::from_translation(joint.child_offset);
+        let child_pose = parent_pose * anchor * joint_transform * child_local;
 
         state.set_link_pose(joint.child_link, child_pose);
     }
@@ -359,6 +362,8 @@ mod tests {
                 limit_max: 10.0,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             });
             links.push(LinkDefinition {
                 name: format!("link_{}", i + 1),
@@ -679,6 +684,8 @@ mod tests {
                 limit_max: 3.14,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             }],
             sensors: Vec::new(),
         };

@@ -10,10 +10,11 @@ def parse_args(args=None):
     )
     parser.add_argument(
         "--mode",
-        choices=["heuristic", "llm", "mixed"],
+        choices=["heuristic", "llm", "ollama", "mixed"],
         default="heuristic",
-        help="Agent mode: heuristic (no API), llm (Claude API), mixed (one of each)",
+        help="Agent mode: heuristic (rule-based), llm (Claude API), ollama (local Ollama), mixed (LLM vs heuristic)",
     )
+    parser.add_argument("--model", default=None, help="Model name (e.g. llama3.2, claude-haiku-4-5-20251001)")
     parser.add_argument("--host", default="localhost", help="Simulation server host")
     parser.add_argument("--port", type=int, default=9002, help="Simulation server port")
     parser.add_argument("--rounds", type=int, default=3, help="Number of rounds")
@@ -21,7 +22,7 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 
-def create_agents(mode):
+def create_agents(mode, model=None):
     from .agents import HeuristicBoxingAgent
 
     if mode == "heuristic":
@@ -31,9 +32,19 @@ def create_agents(mode):
         )
     elif mode == "llm":
         from .llm_agent import LLMBoxingAgent
+        kwargs = {}
+        if model:
+            kwargs["model"] = model
         return (
-            LLMBoxingAgent(name="LLM-A"),
-            LLMBoxingAgent(name="LLM-B"),
+            LLMBoxingAgent(name="LLM-A", **kwargs),
+            LLMBoxingAgent(name="LLM-B", **kwargs),
+        )
+    elif mode == "ollama":
+        from .ollama_agent import OllamaBoxingAgent
+        m = model or "llama3.2"
+        return (
+            OllamaBoxingAgent(model=m, name=f"Ollama-A ({m})"),
+            OllamaBoxingAgent(model=m, name=f"Ollama-B ({m})"),
         )
     elif mode == "mixed":
         from .llm_agent import LLMBoxingAgent
@@ -52,7 +63,7 @@ def main(args=None):
         print("Error: --rounds must be at least 1", file=sys.stderr)
         sys.exit(1)
 
-    agent_a, agent_b = create_agents(parsed.mode)
+    agent_a, agent_b = create_agents(parsed.mode, parsed.model)
 
     print(f"Boxing Match: {agent_a.name} vs {agent_b.name}")
     print(f"Mode: {parsed.mode} | Server: {parsed.host}:{parsed.port}")

@@ -175,6 +175,7 @@ async fn demo_agent_loop(
         let action = RobotAction {
             motor_velocities: velocities,
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         match bridge

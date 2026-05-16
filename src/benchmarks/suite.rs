@@ -42,7 +42,57 @@ pub fn run_all_benchmarks() -> Vec<BenchmarkResult> {
         benchmark_beckmann_scattering(),
         benchmark_stokes_drag(),
         benchmark_darcy_flow(),
+        benchmark_terminal_velocity(),
+        benchmark_hagen_poiseuille_flow_rate(),
+        benchmark_fick_diffusion_centerline(),
+        benchmark_speed_of_sound_dry_air(),
     ]
+}
+
+/// Benchmark terminal velocity formula on a steel sphere settling in water.
+pub fn benchmark_terminal_velocity() -> BenchmarkResult {
+    let radius = 0.005;
+    let viscosity = 0.001;
+    let rho_solid = 7800.0;
+    let rho_fluid = 998.0;
+    let gravity = 9.81;
+
+    let actual = analytical::terminal_velocity(radius, viscosity, rho_solid, rho_fluid, gravity);
+    let expected = (2.0 / 9.0) * (radius * radius / viscosity) * (rho_solid - rho_fluid) * gravity;
+
+    BenchmarkResult::new("terminal_velocity", expected, actual, 1e-6)
+}
+
+/// Benchmark Hagen-Poiseuille volumetric flow rate against textbook formula.
+pub fn benchmark_hagen_poiseuille_flow_rate() -> BenchmarkResult {
+    let r_pipe = 0.0005;
+    let mu = 1.0e-3;
+    let dp_dx = 1.0e4;
+
+    let actual = analytical::hagen_poiseuille_flow_rate(r_pipe, dp_dx, mu);
+    let expected = std::f64::consts::PI * r_pipe.powi(4) * dp_dx / (8.0 * mu);
+
+    BenchmarkResult::new("hagen_poiseuille_flow_rate", expected, actual, 1e-6)
+}
+
+/// Benchmark Fick 1D diffusion at x=0 — concentration must equal c0/2.
+pub fn benchmark_fick_diffusion_centerline() -> BenchmarkResult {
+    let c0 = 1.0;
+    let d = 1.6e-5;
+    let t = 1.0;
+
+    let actual = analytical::fick_diffusion_1d(c0, 0.0, d, t);
+    let expected = 0.5;
+
+    BenchmarkResult::new("fick_diffusion_centerline", expected, actual, 1e-6)
+}
+
+/// Benchmark speed of sound in dry air at 20C against 343.2 m/s reference.
+pub fn benchmark_speed_of_sound_dry_air() -> BenchmarkResult {
+    let actual = analytical::speed_of_sound_ideal_gas(1.4, 287.05, 293.15);
+    let expected = 343.2;
+
+    BenchmarkResult::new("speed_of_sound_dry_air", expected, actual, 0.01)
 }
 
 /// Benchmark Fresnel reflection at normal incidence for an air-to-water

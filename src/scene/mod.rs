@@ -81,6 +81,7 @@ impl Default for Scene {
     }
 }
 
+#[derive(Clone)]
 pub struct SceneObject {
     pub name: String,
     pub mesh: Mesh,

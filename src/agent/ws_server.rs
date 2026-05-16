@@ -1,6 +1,7 @@
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::sink::SinkExt;
 use futures_util::stream::StreamExt;
@@ -12,6 +13,24 @@ use crate::agent::bridge::SimBridgeServer;
 use crate::agent::protocol::{ClientMessage, ServerMessage};
 use crate::agent::session::AgentSession;
 
+/// Per-connection timing limits. A stalled agent is dropped after `read_timeout`
+/// with no inbound message; the server proactively sends a keepalive ping every
+/// `heartbeat_interval` so that an inert TCP connection is noticed quickly.
+#[derive(Clone, Copy, Debug)]
+pub struct WsServerConfig {
+    pub read_timeout: Duration,
+    pub heartbeat_interval: Duration,
+}
+
+impl Default for WsServerConfig {
+    fn default() -> Self {
+        Self {
+            read_timeout: Duration::from_secs(30),
+            heartbeat_interval: Duration::from_secs(10),
+        }
+    }
+}
+
 /// WebSocket server that accepts connections from agents.
 ///
 /// Uses the same protocol as `TcpAgentServer` but with WebSocket message
@@ -21,6 +40,7 @@ pub struct WsAgentServer {
     bridge: SimBridgeServer,
     connection_count: Arc<AtomicUsize>,
     max_connections: usize,
+    config: WsServerConfig,
 }
 
 impl WsAgentServer {
@@ -32,12 +52,23 @@ impl WsAgentServer {
         bridge: SimBridgeServer,
         max_connections: usize,
     ) -> io::Result<Self> {
+        Self::bind_with_config(port, bridge, max_connections, WsServerConfig::default()).await
+    }
+
+    /// Bind with explicit timeout / heartbeat configuration.
+    pub async fn bind_with_config(
+        port: u16,
+        bridge: SimBridgeServer,
+        max_connections: usize,
+        config: WsServerConfig,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port)).await?;
         Ok(Self {
             listener,
             bridge,
             connection_count: Arc::new(AtomicUsize::new(0)),
             max_connections,
+            config,
         })
     }
 
@@ -89,10 +120,11 @@ impl WsAgentServer {
                             let bridge = self.bridge.clone();
                             let count = self.connection_count.clone();
                             let child_cancel = cancel.clone();
+                            let conn_config = self.config;
 
                             tokio::spawn(async move {
                                 let _guard = ConnectionGuard(count);
-                                Self::handle_connection(stream, bridge, child_cancel).await;
+                                Self::handle_connection(stream, bridge, child_cancel, conn_config).await;
                             });
                         }
                         Err(_) => {
@@ -106,10 +138,17 @@ impl WsAgentServer {
     }
 
     /// Handle a single WebSocket connection.
+    ///
+    /// Drops the connection if no inbound message arrives within
+    /// `config.read_timeout`. Periodically sends a keepalive ping every
+    /// `config.heartbeat_interval` so half-open TCP sockets surface quickly.
+    /// Always runs `ClientMessage::Close` on the session at exit to free the
+    /// robot assignment even if the agent dropped without a clean close frame.
     async fn handle_connection(
         stream: tokio::net::TcpStream,
         bridge: SimBridgeServer,
         cancel: CancellationToken,
+        config: WsServerConfig,
     ) {
         // Upgrade TCP connection to WebSocket with message size limits.
         let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
@@ -124,12 +163,40 @@ impl WsAgentServer {
         let (mut write, mut read) = ws_stream.split();
         let mut session = AgentSession::new(bridge);
 
+        let mut heartbeat = tokio::time::interval(config.heartbeat_interval);
+        // First tick fires immediately; skip it so we don't ping the moment we connect.
+        heartbeat.tick().await;
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break;
                 }
-                msg_opt = read.next() => {
+                _ = heartbeat.tick() => {
+                    // Keepalive: a peer with a half-open socket will fail on send.
+                    if write.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                read_result = tokio::time::timeout(config.read_timeout, read.next()) => {
+                    let msg_opt = match read_result {
+                        Ok(opt) => opt,
+                        Err(_) => {
+                            // Read timed out — agent went silent. Tell them, then drop.
+                            let err = ServerMessage::Error {
+                                message: format!(
+                                    "read timeout after {:.0}s",
+                                    config.read_timeout.as_secs_f32()
+                                ),
+                            };
+                            if let Ok(json) = serde_json::to_string(&err) {
+                                let _ = write.send(Message::Text(json.into())).await;
+                            }
+                            let _ = write.close().await;
+                            break;
+                        }
+                    };
                     match msg_opt {
                         Some(Ok(Message::Text(text))) => {
                             match serde_json::from_str::<ClientMessage>(&text) {
@@ -397,6 +464,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Step { action }).await;
         match &resp {
@@ -525,6 +593,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         let resp1 = ws_send_recv(
@@ -746,6 +815,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Step { action }).await;
         match resp {
@@ -760,6 +830,104 @@ mod tests {
         }
 
         cancel.cancel();
+        bg.abort();
+    }
+
+    /// A connected client that sends nothing must be closed by the server once
+    /// the read timeout elapses, with an explicit "read timeout" error
+    /// preceding the close frame.
+    #[tokio::test]
+    async fn test_ws_read_timeout_drops_silent_client() {
+        let (bridge, bg) = setup_bridge(1);
+        let cfg = WsServerConfig {
+            read_timeout: Duration::from_millis(200),
+            heartbeat_interval: Duration::from_secs(60),
+        };
+        let server = WsAgentServer::bind_with_config(0, bridge, 16, cfg)
+            .await
+            .expect("bind to port 0 should succeed");
+        let port = server.local_port();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let server_handle = tokio::spawn(async move {
+            server.run(cancel_clone).await;
+        });
+
+        let (mut _write, mut read) = ws_connect(port).await;
+
+        // Read messages until we see the timeout error (skipping any pings/pongs).
+        let mut saw_timeout_error = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline && !saw_timeout_error {
+            match tokio::time::timeout(Duration::from_millis(500), read.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let msg: ServerMessage = serde_json::from_str(&text)
+                        .expect("server should send valid JSON");
+                    if let ServerMessage::Error { message } = msg {
+                        if message.contains("timeout") {
+                            saw_timeout_error = true;
+                        }
+                    }
+                }
+                Ok(Some(Ok(Message::Close(_))) | None) => {
+                    break;
+                }
+                Ok(Some(Err(_))) => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_timeout_error,
+            "server should send read-timeout error before closing silent client"
+        );
+
+        cancel.cancel();
+        let _ = server_handle.await;
+        bg.abort();
+    }
+
+    /// The server must proactively send WebSocket ping frames at the
+    /// heartbeat interval; a client that pauses but stays connected should
+    /// observe at least one ping within the expected window.
+    #[tokio::test]
+    async fn test_ws_heartbeat_ping_keepalive() {
+        let (bridge, bg) = setup_bridge(1);
+        let cfg = WsServerConfig {
+            read_timeout: Duration::from_secs(60),
+            heartbeat_interval: Duration::from_millis(100),
+        };
+        let server = WsAgentServer::bind_with_config(0, bridge, 16, cfg)
+            .await
+            .expect("bind to port 0 should succeed");
+        let port = server.local_port();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let server_handle = tokio::spawn(async move {
+            server.run(cancel_clone).await;
+        });
+
+        let (mut _write, mut read) = ws_connect(port).await;
+
+        // Look for at least one Ping frame within ~1s.
+        let mut saw_ping = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while tokio::time::Instant::now() < deadline && !saw_ping {
+            match tokio::time::timeout(Duration::from_millis(500), read.next()).await {
+                Ok(Some(Ok(Message::Ping(_)))) => {
+                    saw_ping = true;
+                }
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
+            }
+        }
+
+        assert!(saw_ping, "server should send ping frame within heartbeat interval");
+
+        cancel.cancel();
+        let _ = server_handle.await;
         bg.abort();
     }
 }

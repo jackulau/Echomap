@@ -2,6 +2,12 @@ use crate::scene::material::MediumProperties;
 use crate::scene::{AcousticMaterial, Triangle};
 use glam::Vec3;
 
+/// Hard cap on `AcousticRay::path` length. Long-running simulations would
+/// otherwise accumulate unbounded memory per ray as bounces grow.
+/// Aligned with SimulationConfig::max_bounces default (50) plus the origin
+/// entry, with headroom for refraction-branched paths.
+pub const DEFAULT_MAX_PATH_LENGTH: usize = 64;
+
 #[allow(dead_code)]
 pub struct RefractionResult {
     pub reflected_direction: Vec3,
@@ -18,6 +24,9 @@ pub struct AcousticRay {
     pub path: Vec<Vec3>,
     pub current_medium: MediumProperties,
     pub frequency_hz: f32,
+    /// Maximum number of points retained in `path`. Older points are dropped
+    /// (FIFO) once this cap is reached.
+    pub max_path_length: usize,
 }
 
 #[allow(dead_code)]
@@ -38,7 +47,35 @@ impl AcousticRay {
             path: vec![origin],
             current_medium: medium,
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         }
+    }
+
+    /// Re-derive the speed of sound for the current medium from a measured
+    /// local density. Uses the ideal-gas approximation: c scales with
+    /// sqrt(reference_density / local_density) at fixed pressure (c^2 ~ P/rho).
+    /// This couples acoustic propagation to fluid/gas density fields so a
+    /// ray traversing a hot/light parcel speeds up and a cold/dense parcel
+    /// slows it down — matching real-world behaviour.
+    pub fn update_speed_from_density(&mut self, local_density: f32) {
+        if local_density <= 0.0 {
+            return;
+        }
+        let ref_density = self.current_medium.density.max(1e-6);
+        let ref_c = self.current_medium.speed_of_sound;
+        let new_c = ref_c * (ref_density / local_density).sqrt();
+        self.current_medium.speed_of_sound = new_c;
+        self.current_medium.impedance = local_density * new_c;
+        self.current_medium.density = local_density;
+    }
+
+    /// Append a point to `path`, evicting the oldest entry once
+    /// `max_path_length` is reached. Keeps memory bounded over long traces.
+    pub fn push_path_point(&mut self, p: Vec3) {
+        if self.path.len() >= self.max_path_length {
+            self.path.remove(0);
+        }
+        self.path.push(p);
     }
 
     pub fn intersect_triangle(&self, tri: &Triangle) -> Option<f32> {
@@ -83,7 +120,7 @@ impl AcousticRay {
         self.direction = self.direction - 2.0 * self.direction.dot(hit.normal) * hit.normal;
         self.direction = self.direction.normalize();
         self.bounces += 1;
-        self.path.push(hit.point);
+        self.push_path_point(hit.point);
     }
 
     /// Compute refraction at a medium boundary using Snell's law and Fresnel
@@ -208,6 +245,7 @@ mod tests {
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -257,6 +295,7 @@ mod tests {
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -288,6 +327,7 @@ mod tests {
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -325,6 +365,7 @@ mod tests {
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: water(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let air_med = air();
@@ -422,6 +463,7 @@ mod tests {
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -463,6 +505,7 @@ mod tests {
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let water_med = water();
@@ -517,6 +560,7 @@ mod tests {
                 path: vec![Vec3::new(0.0, 1.0, 0.0)],
                 current_medium: air(),
                 frequency_hz: 1000.0,
+                max_path_length: DEFAULT_MAX_PATH_LENGTH,
             };
 
             let result = ray.refract(normal, &water_med).unwrap();
@@ -598,6 +642,7 @@ mod tests {
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
             frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
         };
 
         let air_med = air();
@@ -685,5 +730,95 @@ mod tests {
 
         // Path updated
         assert_eq!(ray.path.len(), 2, "Path should have 2 points");
+    }
+
+    /// push_path_point must evict the oldest entry once `max_path_length` is
+    /// reached — proving ray memory stays bounded over long traces.
+    #[test]
+    fn test_max_path_length_bounds_memory() {
+        let mut ray = AcousticRay::new(Vec3::ZERO, Vec3::X, 1.0, MediumProperties::air());
+        ray.max_path_length = 5;
+        // Append 20 points — but path should saturate at 5.
+        for i in 1..=20 {
+            ray.push_path_point(Vec3::new(i as f32, 0.0, 0.0));
+        }
+        assert_eq!(ray.path.len(), 5, "path must be capped at max_path_length");
+
+        // Oldest points were evicted (FIFO): path should contain only the
+        // most recent 5 (16..=20), not the original origin or early entries.
+        let last = ray.path.last().expect("path non-empty");
+        assert!(
+            (last.x - 20.0).abs() < 1e-6,
+            "last entry should be the newest, got {last:?}"
+        );
+    }
+
+    /// Repeated reflect() calls (driving the same code path that pushes the
+    /// hit point) must respect max_path_length. Verifies the bound holds in
+    /// the actual ray-tracing flow.
+    #[test]
+    fn test_reflect_respects_max_path_length() {
+        let mut ray = AcousticRay::new(
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            MediumProperties::air(),
+        );
+        ray.max_path_length = 4;
+        let material = AcousticMaterial::default();
+        for i in 0..50 {
+            let hit = RayHit {
+                point: Vec3::new(i as f32 * 0.1, 0.0, 0.0),
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                distance: 0.1,
+                triangle_index: 0,
+            };
+            ray.reflect(&hit, &material);
+        }
+        assert!(
+            ray.path.len() <= 4,
+            "path length {} exceeded cap 4",
+            ray.path.len()
+        );
+    }
+
+    /// Acoustic-medium coupling: when a ray traverses a region of higher
+    /// density, its speed of sound must decrease (c^2 ~ 1/rho at fixed
+    /// pressure). Demonstrates the ray-fluid coupling required for
+    /// physics-faithful propagation through stratified mediums.
+    #[test]
+    fn test_update_speed_from_density_couples_to_medium() {
+        let mut ray = AcousticRay::new(Vec3::ZERO, Vec3::X, 1.0, MediumProperties::air());
+        let c0 = ray.current_medium.speed_of_sound;
+        let rho0 = ray.current_medium.density;
+
+        // Double the density: c should drop by 1/sqrt(2).
+        ray.update_speed_from_density(rho0 * 2.0);
+        let c_dense = ray.current_medium.speed_of_sound;
+        let expected = c0 / 2.0_f32.sqrt();
+        assert!(
+            (c_dense - expected).abs() < 1.0,
+            "c at 2*rho0 should be c0/sqrt(2)={expected}, got {c_dense}"
+        );
+
+        // Impedance Z = rho*c must update consistently.
+        let expected_z = (rho0 * 2.0) * c_dense;
+        assert!(
+            (ray.current_medium.impedance - expected_z).abs() < 1e-3,
+            "impedance should be rho*c, got {} vs {}",
+            ray.current_medium.impedance,
+            expected_z
+        );
+    }
+
+    /// Zero/negative density must be a no-op (defensive against bad inputs).
+    #[test]
+    fn test_update_speed_ignores_invalid_density() {
+        let mut ray = AcousticRay::new(Vec3::ZERO, Vec3::X, 1.0, MediumProperties::air());
+        let c0 = ray.current_medium.speed_of_sound;
+        ray.update_speed_from_density(0.0);
+        assert_eq!(ray.current_medium.speed_of_sound, c0);
+        ray.update_speed_from_density(-1.0);
+        assert_eq!(ray.current_medium.speed_of_sound, c0);
     }
 }

@@ -1067,6 +1067,8 @@ mod tests {
                 limit_max: std::f32::consts::PI,
                 max_torque: 100.0,
                 damping: 0.0,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             }],
             sensors: vec![SensorMount {
                 link_index: 1,
@@ -1378,6 +1380,8 @@ mod tests {
                 limit_max: std::f32::consts::PI,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             }],
             sensors: vec![
                 SensorMount {
@@ -1775,6 +1779,8 @@ mod tests {
                 limit_max: std::f32::consts::PI,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: glam::Vec3::ZERO,
+                child_offset: glam::Vec3::ZERO,
             },
             JointDefinition {
                 name: "j1".into(),
@@ -1786,6 +1792,8 @@ mod tests {
                 limit_max: std::f32::consts::PI,
                 max_torque: 8.0,
                 damping: 0.1,
+                anchor_offset: glam::Vec3::ZERO,
+                child_offset: glam::Vec3::ZERO,
             },
             JointDefinition {
                 name: "j2".into(),
@@ -1797,6 +1805,8 @@ mod tests {
                 limit_max: std::f32::consts::PI,
                 max_torque: 5.0,
                 damping: 0.1,
+                anchor_offset: glam::Vec3::ZERO,
+                child_offset: glam::Vec3::ZERO,
             },
         ];
         let sensors = vec![
@@ -2075,6 +2085,8 @@ mod tests {
                 limit_max: std::f32::consts::PI,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: glam::Vec3::ZERO,
+                child_offset: glam::Vec3::ZERO,
             }],
             sensors: vec![],
         }

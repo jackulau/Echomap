@@ -1,0 +1,50 @@
+============================================================
+  ECHOMAP AI BOXING MATCH DEMO
+============================================================
+
+  Fighter A: IronFist (llama3.2)
+  Fighter B: ThunderBot (llama3.2)
+  Mode: Ollama (llama3.2)
+  Server: localhost:19002
+  Rounds: 1 x 2s
+
+------------------------------------------------------------
+  FIGHT!
+------------------------------------------------------------
+
+  [Both fighters enter the ring]
+  IronFist (llama3.2): "Bring it on!"
+  ThunderBot (llama3.2): "Bring it on!"
+  IronFist (llama3.2): "You're mine now!"
+  IronFist (llama3.2): "Get ready for a knockout punch, you're going down!"
+  ThunderBot (llama3.2): "You're toast!"
+  IronFist (llama3.2): "You're toast!"
+
+  >>> ROUND 1 - FIGHT! <<<
+
+  IronFist (llama3.2): "Bring it on, you bum!"
+  ThunderBot (llama3.2): "You're toast!"
+  IronFist (llama3.2): "You're toast! Take this!"
+  ThunderBot (llama3.2): "You're toast!"
+  IronFist (llama3.2): "You're a joke! Bring it on!"
+  ThunderBot (llama3.2): "You're toast!"
+  ThunderBot (llama3.2): "You're toast!"
+  ThunderBot (llama3.2): "You're toast!"
+
+============================================================
+  Match Result
+============================================================
+
+  WINNER: ThunderBot (llama3.2)!
+  Score: 9 - 10
+  Total Steps: 152
+  Trash Talk: IronFist (llama3.2)=7, ThunderBot (llama3.2)=7
+  Rounds: 1
+  Hit Events: 15
+
+------------------------------------------------------------
+  COMMENTARY
+------------------------------------------------------------
+  Match over after 1 rounds. Final score: 9-10. Robot B wins!
+
+============================================================

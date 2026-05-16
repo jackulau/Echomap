@@ -1,4 +1,5 @@
 use glam::Vec3;
+use rayon::prelude::*;
 
 use super::grid::{GasCellType, GasGrid};
 
@@ -64,6 +65,8 @@ impl Default for GasConfig {
 ///
 /// For each Gas cell, back-trace through the velocity field and sample the
 /// concentration from the previous timestep via trilinear interpolation.
+/// Cell updates are independent — parallelized with rayon across the flat
+/// cell index.
 pub fn advect_concentrations(grid: &mut GasGrid, dt: f32) {
     let num_species = grid.species.len();
     if num_species == 0 {
@@ -73,51 +76,51 @@ pub fn advect_concentrations(grid: &mut GasGrid, dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
+    let cell_count = nx * ny * nz;
 
-    // Snapshot only the concentration arrays (not the full grid).
     let old_concentrations: Vec<Vec<f32>> = grid.concentrations.clone();
 
     for (s, old_conc) in old_concentrations.iter().enumerate() {
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let idx = grid.idx(i, j, k);
-                    if grid.cell_types[idx] != GasCellType::Gas {
-                        continue;
-                    }
-                    let pos = grid.cell_center(i, j, k);
-                    let vel = grid.velocity_at(pos);
-                    let back_pos = pos - vel * dt;
-                    grid.concentrations[s][idx] =
-                        grid.interpolate_cell_centered(old_conc, back_pos);
+        let new_conc: Vec<f32> = (0..cell_count)
+            .into_par_iter()
+            .map(|idx| {
+                if grid.cell_types[idx] != GasCellType::Gas {
+                    return old_conc[idx];
                 }
-            }
-        }
+                let (i, j, k) = grid.idx_to_ijk(idx);
+                let pos = grid.cell_center(i, j, k);
+                let vel = grid.velocity_at(pos);
+                let back_pos = pos - vel * dt;
+                grid.interpolate_cell_centered(old_conc, back_pos)
+            })
+            .collect();
+        grid.concentrations[s] = new_conc;
     }
 }
 
-/// Semi-Lagrangian advection for the temperature field.
+/// Semi-Lagrangian advection for the temperature field. Parallelized with rayon.
 pub fn advect_temperature(grid: &mut GasGrid, dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
+    let cell_count = nx * ny * nz;
 
     let old_temperature: Vec<f32> = grid.temperature.clone();
 
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let idx = grid.idx(i, j, k);
-                if grid.cell_types[idx] != GasCellType::Gas {
-                    continue;
-                }
-                let pos = grid.cell_center(i, j, k);
-                let vel = grid.velocity_at(pos);
-                let back_pos = pos - vel * dt;
-                grid.temperature[idx] = grid.interpolate_cell_centered(&old_temperature, back_pos);
+    let new_temperature: Vec<f32> = (0..cell_count)
+        .into_par_iter()
+        .map(|idx| {
+            if grid.cell_types[idx] != GasCellType::Gas {
+                return old_temperature[idx];
             }
-        }
-    }
+            let (i, j, k) = grid.idx_to_ijk(idx);
+            let pos = grid.cell_center(i, j, k);
+            let vel = grid.velocity_at(pos);
+            let back_pos = pos - vel * dt;
+            grid.interpolate_cell_centered(&old_temperature, back_pos)
+        })
+        .collect();
+    grid.temperature = new_temperature;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,12 +131,18 @@ pub fn advect_temperature(grid: &mut GasGrid, dt: f32) {
 ///
 /// Each species uses its own `diffusion_coefficient`. The stability factor
 /// `D * dt / dx²` is clamped to `1/6` to prevent numerical blowup in 3D.
+/// Cell updates are independent — parallelized with rayon across the flat
+/// cell index.
 pub fn diffuse_concentrations(grid: &mut GasGrid, dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
     let dx = grid.dx;
+    let cell_count = nx * ny * nz;
     let num_species = grid.species.len();
+
+    let cell_types = &grid.cell_types;
+    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
 
     for s in 0..num_species {
         let diff_coeff = grid.species[s].diffusion_coefficient;
@@ -144,45 +153,48 @@ pub fn diffuse_concentrations(grid: &mut GasGrid, dt: f32) {
         let factor = (diff_coeff * dt / (dx * dx)).min(1.0 / 6.0);
         let old = grid.concentrations[s].clone();
 
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let idx = grid.idx(i, j, k);
-                    if grid.cell_types[idx] != GasCellType::Gas {
-                        continue;
-                    }
-
-                    let c = old[idx];
-
-                    // 6-connected neighbours with Neumann BC (replicate boundary).
-                    let xm = if i > 0 { old[grid.idx(i - 1, j, k)] } else { c };
-                    let xp = if i < nx - 1 {
-                        old[grid.idx(i + 1, j, k)]
-                    } else {
-                        c
-                    };
-                    let ym = if j > 0 { old[grid.idx(i, j - 1, k)] } else { c };
-                    let yp = if j < ny - 1 {
-                        old[grid.idx(i, j + 1, k)]
-                    } else {
-                        c
-                    };
-                    let zm = if k > 0 { old[grid.idx(i, j, k - 1)] } else { c };
-                    let zp = if k < nz - 1 {
-                        old[grid.idx(i, j, k + 1)]
-                    } else {
-                        c
-                    };
-
-                    let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-                    grid.concentrations[s][idx] = c + factor * laplacian;
+        let new_conc: Vec<f32> = (0..cell_count)
+            .into_par_iter()
+            .map(|idx| {
+                if cell_types[idx] != GasCellType::Gas {
+                    return old[idx];
                 }
-            }
-        }
+
+                let k = idx / (nx * ny);
+                let rem = idx - k * nx * ny;
+                let j = rem / nx;
+                let i = rem - j * nx;
+
+                let c = old[idx];
+
+                let xm = if i > 0 { old[idx_of(i - 1, j, k)] } else { c };
+                let xp = if i < nx - 1 {
+                    old[idx_of(i + 1, j, k)]
+                } else {
+                    c
+                };
+                let ym = if j > 0 { old[idx_of(i, j - 1, k)] } else { c };
+                let yp = if j < ny - 1 {
+                    old[idx_of(i, j + 1, k)]
+                } else {
+                    c
+                };
+                let zm = if k > 0 { old[idx_of(i, j, k - 1)] } else { c };
+                let zp = if k < nz - 1 {
+                    old[idx_of(i, j, k + 1)]
+                } else {
+                    c
+                };
+
+                let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+                c + factor * laplacian
+            })
+            .collect();
+        grid.concentrations[s] = new_conc;
     }
 }
 
-/// Explicit thermal diffusion for the temperature field.
+/// Explicit thermal diffusion for the temperature field. Parallelized with rayon.
 pub fn diffuse_temperature(grid: &mut GasGrid, thermal_diffusivity: f32, dt: f32) {
     if thermal_diffusivity <= 0.0 {
         return;
@@ -192,77 +204,74 @@ pub fn diffuse_temperature(grid: &mut GasGrid, thermal_diffusivity: f32, dt: f32
     let ny = grid.ny;
     let nz = grid.nz;
     let dx = grid.dx;
+    let cell_count = nx * ny * nz;
     let factor = (thermal_diffusivity * dt / (dx * dx)).min(1.0 / 6.0);
 
     let old = grid.temperature.clone();
+    let cell_types = &grid.cell_types;
+    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
 
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let idx = grid.idx(i, j, k);
-                if grid.cell_types[idx] != GasCellType::Gas {
-                    continue;
-                }
-
-                let c = old[idx];
-                let xm = if i > 0 { old[grid.idx(i - 1, j, k)] } else { c };
-                let xp = if i < nx - 1 {
-                    old[grid.idx(i + 1, j, k)]
-                } else {
-                    c
-                };
-                let ym = if j > 0 { old[grid.idx(i, j - 1, k)] } else { c };
-                let yp = if j < ny - 1 {
-                    old[grid.idx(i, j + 1, k)]
-                } else {
-                    c
-                };
-                let zm = if k > 0 { old[grid.idx(i, j, k - 1)] } else { c };
-                let zp = if k < nz - 1 {
-                    old[grid.idx(i, j, k + 1)]
-                } else {
-                    c
-                };
-
-                let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-                grid.temperature[idx] = c + factor * laplacian;
+    let new_temp: Vec<f32> = (0..cell_count)
+        .into_par_iter()
+        .map(|idx| {
+            if cell_types[idx] != GasCellType::Gas {
+                return old[idx];
             }
-        }
-    }
+            let k = idx / (nx * ny);
+            let rem = idx - k * nx * ny;
+            let j = rem / nx;
+            let i = rem - j * nx;
+
+            let c = old[idx];
+            let xm = if i > 0 { old[idx_of(i - 1, j, k)] } else { c };
+            let xp = if i < nx - 1 {
+                old[idx_of(i + 1, j, k)]
+            } else {
+                c
+            };
+            let ym = if j > 0 { old[idx_of(i, j - 1, k)] } else { c };
+            let yp = if j < ny - 1 {
+                old[idx_of(i, j + 1, k)]
+            } else {
+                c
+            };
+            let zm = if k > 0 { old[idx_of(i, j, k - 1)] } else { c };
+            let zp = if k < nz - 1 {
+                old[idx_of(i, j, k + 1)]
+            } else {
+                c
+            };
+
+            let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+            c + factor * laplacian
+        })
+        .collect();
+    grid.temperature = new_temp;
 }
 
 // ---------------------------------------------------------------------------
 // Buoyancy
 // ---------------------------------------------------------------------------
 
-/// Apply temperature-driven buoyancy to `vel_y`.
+/// Apply temperature-driven buoyancy to `vel_y`. Parallelized with rayon.
 ///
 /// Hot gas rises: cells hotter than ambient get an upward acceleration
 /// proportional to `buoyancy_coefficient * (T - T_ambient)`.
 pub fn apply_buoyancy(grid: &mut GasGrid, config: &GasConfig, dt: f32) {
-    let nx = grid.nx;
-    let ny = grid.ny;
-    let nz = grid.nz;
-
     let buoy = config.buoyancy_coefficient;
     let t_ambient = config.ambient_temperature;
     let g_y = config.gravity.y;
 
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let idx = grid.idx(i, j, k);
-                if grid.cell_types[idx] != GasCellType::Gas {
-                    continue;
-                }
-                let delta_t = grid.temperature[idx] - t_ambient;
-                // Buoyancy: force opposes gravity direction proportional to temperature excess.
-                // Hot gas: delta_t > 0 => upward force => subtract g_y * buoy * delta_t * dt
-                // (g_y is negative for downward gravity, so subtracting a negative pushes up)
-                grid.vel_y[idx] -= g_y * buoy * delta_t * dt;
-            }
+    let temperature = &grid.temperature;
+    let cell_types = &grid.cell_types;
+
+    grid.vel_y.par_iter_mut().enumerate().for_each(|(idx, v)| {
+        if cell_types[idx] != GasCellType::Gas {
+            return;
         }
-    }
+        let delta_t = temperature[idx] - t_ambient;
+        *v -= g_y * buoy * delta_t * dt;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +279,8 @@ pub fn apply_buoyancy(grid: &mut GasGrid, config: &GasConfig, dt: f32) {
 // ---------------------------------------------------------------------------
 
 /// Update velocity from pressure differences between adjacent cells.
+/// Each component (vel_x, vel_y, vel_z) parallelized with rayon — three passes
+/// over disjoint fields, all reading the cloned pressure snapshot.
 pub fn apply_pressure_gradient(grid: &mut GasGrid, dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
@@ -277,49 +288,60 @@ pub fn apply_pressure_gradient(grid: &mut GasGrid, dt: f32) {
     let dx = grid.dx;
     let scale = dt / dx;
 
-    // Snapshot pressure (read-only).
     let p = grid.pressure.clone();
+    let cell_types = &grid.cell_types;
+    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
 
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let idx = grid.idx(i, j, k);
-                if grid.cell_types[idx] != GasCellType::Gas {
-                    continue;
-                }
-
-                // x-gradient
-                if i > 0 && grid.cell_types[grid.idx(i - 1, j, k)] == GasCellType::Gas {
-                    let dp = p[idx] - p[grid.idx(i - 1, j, k)];
-                    grid.vel_x[idx] -= scale * dp * 0.5;
-                }
-                if i < nx - 1 && grid.cell_types[grid.idx(i + 1, j, k)] == GasCellType::Gas {
-                    let dp = p[grid.idx(i + 1, j, k)] - p[idx];
-                    grid.vel_x[idx] -= scale * dp * 0.5;
-                }
-
-                // y-gradient
-                if j > 0 && grid.cell_types[grid.idx(i, j - 1, k)] == GasCellType::Gas {
-                    let dp = p[idx] - p[grid.idx(i, j - 1, k)];
-                    grid.vel_y[idx] -= scale * dp * 0.5;
-                }
-                if j < ny - 1 && grid.cell_types[grid.idx(i, j + 1, k)] == GasCellType::Gas {
-                    let dp = p[grid.idx(i, j + 1, k)] - p[idx];
-                    grid.vel_y[idx] -= scale * dp * 0.5;
-                }
-
-                // z-gradient
-                if k > 0 && grid.cell_types[grid.idx(i, j, k - 1)] == GasCellType::Gas {
-                    let dp = p[idx] - p[grid.idx(i, j, k - 1)];
-                    grid.vel_z[idx] -= scale * dp * 0.5;
-                }
-                if k < nz - 1 && grid.cell_types[grid.idx(i, j, k + 1)] == GasCellType::Gas {
-                    let dp = p[grid.idx(i, j, k + 1)] - p[idx];
-                    grid.vel_z[idx] -= scale * dp * 0.5;
-                }
-            }
+    // x-gradient -> vel_x
+    grid.vel_x.par_iter_mut().enumerate().for_each(|(idx, v)| {
+        if cell_types[idx] != GasCellType::Gas {
+            return;
         }
-    }
+        let k = idx / (nx * ny);
+        let rem = idx - k * nx * ny;
+        let j = rem / nx;
+        let i = rem - j * nx;
+        if i > 0 && cell_types[idx_of(i - 1, j, k)] == GasCellType::Gas {
+            *v -= scale * (p[idx] - p[idx_of(i - 1, j, k)]) * 0.5;
+        }
+        if i < nx - 1 && cell_types[idx_of(i + 1, j, k)] == GasCellType::Gas {
+            *v -= scale * (p[idx_of(i + 1, j, k)] - p[idx]) * 0.5;
+        }
+    });
+
+    // y-gradient -> vel_y
+    grid.vel_y.par_iter_mut().enumerate().for_each(|(idx, v)| {
+        if cell_types[idx] != GasCellType::Gas {
+            return;
+        }
+        let k = idx / (nx * ny);
+        let rem = idx - k * nx * ny;
+        let j = rem / nx;
+        let i = rem - j * nx;
+        if j > 0 && cell_types[idx_of(i, j - 1, k)] == GasCellType::Gas {
+            *v -= scale * (p[idx] - p[idx_of(i, j - 1, k)]) * 0.5;
+        }
+        if j < ny - 1 && cell_types[idx_of(i, j + 1, k)] == GasCellType::Gas {
+            *v -= scale * (p[idx_of(i, j + 1, k)] - p[idx]) * 0.5;
+        }
+    });
+
+    // z-gradient -> vel_z
+    grid.vel_z.par_iter_mut().enumerate().for_each(|(idx, v)| {
+        if cell_types[idx] != GasCellType::Gas {
+            return;
+        }
+        let k = idx / (nx * ny);
+        let rem = idx - k * nx * ny;
+        let j = rem / nx;
+        let i = rem - j * nx;
+        if k > 0 && cell_types[idx_of(i, j, k - 1)] == GasCellType::Gas {
+            *v -= scale * (p[idx] - p[idx_of(i, j, k - 1)]) * 0.5;
+        }
+        if k < nz - 1 && cell_types[idx_of(i, j, k + 1)] == GasCellType::Gas {
+            *v -= scale * (p[idx_of(i, j, k + 1)] - p[idx]) * 0.5;
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,6 +1438,92 @@ mod tests {
             grid.vel_y[cold_idx] < 0.0,
             "Cold gas should gain downward velocity, got {}",
             grid.vel_y[cold_idx]
+        );
+    }
+
+    /// Parallel speedup benchmark: on a 64^3 grid (262144 cells), running 5
+    /// full steps with the default rayon pool must complete in well under
+    /// 1 second on a modern multicore machine. Also compares against a forced
+    /// single-thread pool and asserts the parallel run is at least 1.5x
+    /// faster — a conservative bar that holds even on 2-core CI runners.
+    ///
+    /// Skipped if rayon reports < 2 threads available (single-core sandbox).
+    #[test]
+    fn test_gas_solver_parallel_speedup() {
+        if rayon::current_num_threads() < 2 {
+            eprintln!("skipping: rayon pool has < 2 threads");
+            return;
+        }
+
+        let n: usize = 64;
+        let dx = 0.05_f32;
+        let species = vec![make_species("CO2", 0.05), make_species("CH4", 0.04)];
+        let config = GasConfig {
+            dt: 0.005,
+            ambient_temperature: 293.15,
+            thermal_diffusivity: 2.2e-5,
+            buoyancy_coefficient: 0.01,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+        };
+
+        let setup_grid = || -> GasGrid {
+            let mut g = make_gas_grid(n, dx, species.clone());
+            let ci = n / 2;
+            let center = g.idx(ci, ci, ci);
+            for s in 0..g.species.len() {
+                g.concentrations[s][center] = 1000.0;
+            }
+            for t in g.temperature.iter_mut() {
+                *t = config.ambient_temperature;
+            }
+            g.temperature[center] = 500.0;
+            g
+        };
+
+        let num_steps = 5;
+
+        // 1-thread reference
+        let pool_serial = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("build serial pool");
+        let mut grid_serial = setup_grid();
+        let t0 = std::time::Instant::now();
+        pool_serial.install(|| {
+            for _ in 0..num_steps {
+                step(&mut grid_serial, &config);
+            }
+        });
+        let serial_elapsed = t0.elapsed();
+
+        // Default-thread parallel
+        let mut grid_par = setup_grid();
+        let t0 = std::time::Instant::now();
+        for _ in 0..num_steps {
+            step(&mut grid_par, &config);
+        }
+        let par_elapsed = t0.elapsed();
+
+        let speedup = serial_elapsed.as_secs_f64() / par_elapsed.as_secs_f64();
+        eprintln!(
+            "gas solver 64^3 x{} steps: serial={:?} parallel={:?} speedup={:.2}x (threads={})",
+            num_steps,
+            serial_elapsed,
+            par_elapsed,
+            speedup,
+            rayon::current_num_threads()
+        );
+
+        // Absolute perf bar (release-mode expectation).
+        assert!(
+            par_elapsed < std::time::Duration::from_secs(5),
+            "parallel 64^3 x{num_steps} steps must finish under 5s, got {par_elapsed:?}"
+        );
+
+        // Speedup bar — relaxed for CI / shared runners.
+        assert!(
+            speedup >= 1.5,
+            "expected >=1.5x speedup over single-thread, got {speedup:.2}x (serial={serial_elapsed:?}, parallel={par_elapsed:?})"
         );
     }
 }

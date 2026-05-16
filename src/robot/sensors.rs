@@ -984,6 +984,8 @@ mod tests {
                 limit_max: std::f32::consts::PI,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             }],
             sensors: vec![SensorMount {
                 link_index: sensor_link,

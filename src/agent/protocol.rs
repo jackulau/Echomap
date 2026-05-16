@@ -75,6 +75,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5, 0.3],
             gripper_commands: vec![true, false],
+            base_velocity: [0.0, 0.0],
         };
         let msg = ClientMessage::Step { action };
         let json = serde_json::to_string(&msg).unwrap();
@@ -725,6 +726,9 @@ mod tests {
             your_robot: 0,
             opponent_health: 80.0,
             opponent_stamina: 60.0,
+            own_torso_pos: [0.0; 3],
+            opponent_link_positions: Vec::new(),
+            opponent_torso_pos: [0.0; 3],
         };
         let msg = ServerMessage::Observation {
             state,

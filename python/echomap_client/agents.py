@@ -7,6 +7,9 @@ from abc import ABC, abstractmethod
 
 NECK_LIMIT = math.pi / 4
 SHOULDER_LIMIT = math.pi
+BASE_SPEED_LIMIT = 2.0
+ENGAGE_DISTANCE = 0.7  # close enough that arm swings can land
+RETREAT_DISTANCE = 0.4  # too close — back off
 
 TRASH_TALK = [
     "Is that all you got?",
@@ -26,6 +29,26 @@ def clamp_velocities(velocities):
     """Clamp motor velocities to joint limits: [neck, left_shoulder, right_shoulder]."""
     limits = [NECK_LIMIT, SHOULDER_LIMIT, SHOULDER_LIMIT]
     return [max(-lim, min(lim, v)) for v, lim in zip(velocities, limits)]
+
+
+def clamp_base_velocity(bv):
+    """Clamp planar base velocity [vx, vz] to BASE_SPEED_LIMIT."""
+    return [max(-BASE_SPEED_LIMIT, min(BASE_SPEED_LIMIT, v)) for v in bv]
+
+
+def relative_opponent(observation, info):
+    """Return (dx, dz, distance) from own torso to opponent torso, or None."""
+    match_state = info.get("match_state") if info else None
+    if not match_state:
+        return None
+    own = match_state.get("own_torso_pos") or [0.0, 0.0, 0.0]
+    opp = match_state.get("opponent_torso_pos") or [0.0, 0.0, 0.0]
+    if all(v == 0.0 for v in opp):
+        return None
+    dx = opp[0] - own[0]
+    dz = opp[2] - own[2]
+    distance = math.hypot(dx, dz)
+    return dx, dz, distance
 
 
 class BoxingAgent(ABC):
@@ -54,6 +77,8 @@ class HeuristicBoxingAgent(BoxingAgent):
         self.trash_talk_chance = trash_talk_chance
         self._step = 0
         self._rng = random.Random()
+        self._hold_steps = 15
+        self._cached_velocities = None
 
     def decide(self, observation, info):
         self._step += 1
@@ -64,7 +89,20 @@ class HeuristicBoxingAgent(BoxingAgent):
             phase = match_state.get("phase", "")
 
         if not phase.startswith("fighting"):
-            return {"motor_velocities": [0.0, 0.0, 0.0]}, None
+            self._cached_velocities = None
+            return {
+                "motor_velocities": [0.0, 0.0, 0.0],
+                "base_velocity": [0.0, 0.0],
+            }, None
+
+        rel = relative_opponent(observation, info)
+        base_velocity = self._navigate(rel)
+
+        if self._cached_velocities and self._step % self._hold_steps != 0:
+            return {
+                "motor_velocities": self._cached_velocities,
+                "base_velocity": base_velocity,
+            }, self._maybe_trash_talk()
 
         own_health = self._get_own_health(observation)
         opp_health = self._get_opponent_health(match_state)
@@ -77,9 +115,33 @@ class HeuristicBoxingAgent(BoxingAgent):
             velocities = self._balanced_fight()
 
         velocities = clamp_velocities(velocities)
+        self._cached_velocities = velocities
         message = self._maybe_trash_talk()
 
-        return {"motor_velocities": velocities}, message
+        return {
+            "motor_velocities": velocities,
+            "base_velocity": base_velocity,
+        }, message
+
+    def _navigate(self, rel):
+        """Approach opponent until in punching range, retreat if too close, sidestep otherwise."""
+        if rel is None:
+            return [0.0, 0.0]
+        dx, dz, dist = rel
+        if dist < 1e-4:
+            return [0.0, 0.0]
+        ux, uz = dx / dist, dz / dist
+        if dist > ENGAGE_DISTANCE:
+            speed = min(BASE_SPEED_LIMIT, (dist - ENGAGE_DISTANCE + 0.1) * 4.0)
+            return clamp_base_velocity([ux * speed, uz * speed])
+        if dist < RETREAT_DISTANCE:
+            speed = (RETREAT_DISTANCE - dist) * 3.0
+            return clamp_base_velocity([-ux * speed, -uz * speed])
+        # In range: gentle sidestep so we are not a sitting duck
+        side_phase = (self._step // self._hold_steps) % 4
+        side_sign = 1.0 if side_phase < 2 else -1.0
+        side_speed = 0.6 * side_sign
+        return clamp_base_velocity([-uz * side_speed, ux * side_speed])
 
     def _get_own_health(self, observation):
         if not observation:

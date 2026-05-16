@@ -320,5 +320,68 @@ class TestLLMFullSequenceMocked(unittest.TestCase):
         self.assertEqual(mock_client.messages.create.call_count, 10)
 
 
+class TestOllamaBoxingAgent(unittest.TestCase):
+    """Tests for OllamaBoxingAgent."""
+
+    def test_fallback_when_unavailable(self):
+        from echomap_client.ollama_agent import OllamaBoxingAgent
+        agent = OllamaBoxingAgent(model="llama3.2", name="Test", base_url="http://localhost:99999")
+        obs = _make_obs()
+        info = _make_info()
+        action, msg = agent.decide(obs, info)
+        self.assertIn("motor_velocities", action)
+        self.assertEqual(len(action["motor_velocities"]), 3)
+
+    def test_parse_valid_response(self):
+        from echomap_client.ollama_agent import OllamaBoxingAgent
+        agent = OllamaBoxingAgent(model="test", name="Test")
+        action, msg = agent._parse_response(
+            '{"motor_velocities": [0.1, 1.5, -1.5], "trash_talk": "Take this!"}'
+        )
+        self.assertEqual(action["motor_velocities"], [0.1, 1.5, -1.5])
+        self.assertEqual(msg, "Take this!")
+
+    def test_parse_response_with_markdown(self):
+        from echomap_client.ollama_agent import OllamaBoxingAgent
+        agent = OllamaBoxingAgent(model="test", name="Test")
+        text = '```json\n{"motor_velocities": [0.0, 2.0, -2.0], "trash_talk": "ha"}\n```'
+        action, msg = agent._parse_response(text)
+        self.assertEqual(len(action["motor_velocities"]), 3)
+
+    def test_parse_response_with_surrounding_text(self):
+        from echomap_client.ollama_agent import OllamaBoxingAgent
+        agent = OllamaBoxingAgent(model="test", name="Test")
+        text = 'Here is my action:\n{"motor_velocities": [0.5, 1.0, -1.0], "trash_talk": "boom"}\nDone!'
+        action, msg = agent._parse_response(text)
+        self.assertEqual(action["motor_velocities"], [0.5, 1.0, -1.0])
+        self.assertEqual(msg, "boom")
+
+    def test_parse_garbage_falls_back(self):
+        from echomap_client.ollama_agent import OllamaBoxingAgent
+        agent = OllamaBoxingAgent(model="test", name="Test")
+        action, msg = agent._parse_response("I don't know what to do")
+        self.assertIn("motor_velocities", action)
+
+    def test_build_prompt(self):
+        from echomap_client.ollama_agent import OllamaBoxingAgent
+        agent = OllamaBoxingAgent(model="test", name="Test")
+        obs = _make_obs(health=75.0)
+        info = _make_info(phase="fighting", opponent_health=50.0)
+        info["messages"] = [{"content": "You're going down!"}]
+        prompt = agent._build_prompt(obs, info)
+        self.assertIn("fighting", prompt)
+        self.assertIn("75", prompt)
+        self.assertIn("going down", prompt)
+
+    def test_clamps_velocities(self):
+        from echomap_client.ollama_agent import OllamaBoxingAgent
+        agent = OllamaBoxingAgent(model="test", name="Test")
+        action, _ = agent._parse_response(
+            '{"motor_velocities": [5.0, 10.0, -10.0]}'
+        )
+        self.assertLessEqual(abs(action["motor_velocities"][0]), NECK_LIMIT + 0.001)
+        self.assertLessEqual(abs(action["motor_velocities"][1]), SHOULDER_LIMIT + 0.001)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -415,6 +415,10 @@ pub struct RobotAction {
     pub motor_velocities: Vec<f32>,
     /// Gripper commands: true = close, false = open.
     pub gripper_commands: Vec<bool>,
+    /// Planar base velocity [vx, vz] in m/s applied to base_pose translation.
+    /// Defaults to [0, 0] for backward compatibility with non-locomoting agents.
+    #[serde(default)]
+    pub base_velocity: [f32; 2],
 }
 
 /// Apply a RobotAction to a RobotState by setting actuator commands.
@@ -426,11 +430,12 @@ pub fn apply_action(def: &RobotDefinition, state: &mut RobotState, action: &Robo
     let num_motors = action.motor_velocities.len().min(num_joints);
 
     state.actuator_commands.clear();
-    state.actuator_commands.extend(
-        action.motor_velocities[..num_motors]
-            .iter()
-            .map(|&v| ActuatorCommand::Velocity(v)),
-    );
+    state
+        .actuator_commands
+        .extend(action.motor_velocities[..num_motors].iter().map(|&v| {
+            let safe = if v.is_finite() { v } else { 0.0 };
+            ActuatorCommand::Velocity(safe)
+        }));
 }
 
 #[cfg(test)]
@@ -486,6 +491,8 @@ mod tests {
                     limit_max: std::f32::consts::PI,
                     max_torque: 10.0,
                     damping: 0.1,
+                    anchor_offset: Vec3::ZERO,
+                    child_offset: Vec3::ZERO,
                 },
                 JointDefinition {
                     name: "joint_1".to_string(),
@@ -497,6 +504,8 @@ mod tests {
                     limit_max: 1.0,
                     max_torque: 5.0,
                     damping: 0.05,
+                    anchor_offset: Vec3::ZERO,
+                    child_offset: Vec3::ZERO,
                 },
             ],
             sensors: vec![SensorMount {
@@ -830,6 +839,8 @@ mod tests {
                     limit_max: std::f32::consts::PI,
                     max_torque: 10.0,
                     damping: 0.1,
+                    anchor_offset: Vec3::ZERO,
+                    child_offset: Vec3::ZERO,
                 },
                 JointDefinition {
                     name: "joint_1".to_string(),
@@ -841,6 +852,8 @@ mod tests {
                     limit_max: std::f32::consts::PI,
                     max_torque: 5.0,
                     damping: 0.05,
+                    anchor_offset: Vec3::ZERO,
+                    child_offset: Vec3::ZERO,
                 },
             ],
             sensors: vec![
@@ -984,6 +997,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.5, -2.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         apply_action(&def, &mut state, &action);
@@ -1002,6 +1016,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![0.0, 0.0],
             gripper_commands: vec![true, false],
+            base_velocity: [0.0, 0.0],
         };
 
         apply_action(&def, &mut state, &action);
@@ -1117,6 +1132,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, 2.0, 3.0, 4.0, 5.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         apply_action(&def, &mut state, &action);
@@ -1136,6 +1152,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         apply_action(&def, &mut state, &action);

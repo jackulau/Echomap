@@ -82,6 +82,10 @@ pub struct JointDefinition {
     pub limit_max: f32,
     pub max_torque: f32,
     pub damping: f32,
+    #[serde(default)]
+    pub anchor_offset: Vec3,
+    #[serde(default)]
+    pub child_offset: Vec3,
 }
 
 /// A sensor mounted on a specific link.
@@ -136,6 +140,8 @@ impl RobotDefinition {
                 limit_max: std::f32::consts::PI,
                 max_torque: 10.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             });
 
             links.push(LinkDefinition {
@@ -209,6 +215,8 @@ impl RobotDefinition {
                 limit_max: std::f32::consts::PI,
                 max_torque: 20.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             },
             JointDefinition {
                 name: "right_shoulder".to_string(),
@@ -220,6 +228,8 @@ impl RobotDefinition {
                 limit_max: std::f32::consts::PI,
                 max_torque: 20.0,
                 damping: 0.1,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::ZERO,
             },
         ];
         Self {
@@ -264,22 +274,16 @@ impl RobotDefinition {
                 name: "left_arm".to_string(),
                 mass: 2.0,
                 inertia: 0.3,
-                collision_shape: CollisionShape::Cylinder {
-                    radius: 0.05,
-                    height: 0.4,
-                },
-                parent_joint: Some(1), // connected via left_shoulder joint (joint index 1)
+                collision_shape: CollisionShape::Sphere { radius: 0.15 },
+                parent_joint: Some(1),
                 body_zone: Some(BodyZone::LeftArm),
             },
             LinkDefinition {
                 name: "right_arm".to_string(),
                 mass: 2.0,
                 inertia: 0.3,
-                collision_shape: CollisionShape::Cylinder {
-                    radius: 0.05,
-                    height: 0.4,
-                },
-                parent_joint: Some(2), // connected via right_shoulder joint (joint index 2)
+                collision_shape: CollisionShape::Sphere { radius: 0.15 },
+                parent_joint: Some(2),
                 body_zone: Some(BodyZone::RightArm),
             },
         ];
@@ -294,6 +298,8 @@ impl RobotDefinition {
                 limit_max: std::f32::consts::FRAC_PI_4,
                 max_torque: 5.0,
                 damping: 0.2,
+                anchor_offset: Vec3::new(0.0, 0.35, 0.0),
+                child_offset: Vec3::new(0.0, 0.12, 0.0),
             },
             JointDefinition {
                 name: "left_shoulder".to_string(),
@@ -305,6 +311,8 @@ impl RobotDefinition {
                 limit_max: std::f32::consts::PI,
                 max_torque: 20.0,
                 damping: 0.1,
+                anchor_offset: Vec3::new(0.0, 0.15, 0.12),
+                child_offset: Vec3::new(0.0, 0.0, 0.35),
             },
             JointDefinition {
                 name: "right_shoulder".to_string(),
@@ -316,6 +324,8 @@ impl RobotDefinition {
                 limit_max: std::f32::consts::PI,
                 max_torque: 20.0,
                 damping: 0.1,
+                anchor_offset: Vec3::new(0.0, 0.15, -0.12),
+                child_offset: Vec3::new(0.0, 0.0, -0.35),
             },
         ];
         Self {

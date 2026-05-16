@@ -36,6 +36,35 @@ pub fn fick_diffusion_1d(c0: f64, x: f64, diffusion_coeff: f64, time: f64) -> f6
     (c0 / 2.0) * erfc_approx(arg)
 }
 
+/// Hagen-Poiseuille velocity profile in a circular pipe:
+/// u(r) = (dP/dx) * (R^2 - r^2) / (4 * mu)
+/// pressure_gradient is dP/dx (positive drives flow in +x).
+pub fn hagen_poiseuille_velocity(
+    radius_from_center: f64,
+    pipe_radius: f64,
+    pressure_gradient: f64,
+    viscosity: f64,
+) -> f64 {
+    let r2 = pipe_radius * pipe_radius;
+    let rr = radius_from_center * radius_from_center;
+    pressure_gradient * (r2 - rr) / (4.0 * viscosity)
+}
+
+/// Hagen-Poiseuille volumetric flow rate: Q = pi * R^4 * (dP/dx) / (8 * mu)
+pub fn hagen_poiseuille_flow_rate(pipe_radius: f64, pressure_gradient: f64, viscosity: f64) -> f64 {
+    PI * pipe_radius.powi(4) * pressure_gradient / (8.0 * viscosity)
+}
+
+/// Speed of sound in an ideal gas: c = sqrt(gamma * R_specific * T)
+/// For dry air at 20C: gamma=1.4, R_specific=287.05 J/(kg*K), T=293.15 K -> c ~ 343.2 m/s
+pub fn speed_of_sound_ideal_gas(
+    gamma: f64,
+    specific_gas_constant: f64,
+    temperature_kelvin: f64,
+) -> f64 {
+    (gamma * specific_gas_constant * temperature_kelvin).sqrt()
+}
+
 /// Fresnel reflection at normal incidence: R = ((Z2 - Z1) / (Z2 + Z1))^2
 pub fn fresnel_reflection(z1: f64, z2: f64) -> f64 {
     let ratio = (z2 - z1) / (z2 + z1);

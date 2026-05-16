@@ -1,6 +1,24 @@
 use crate::agent::bridge::{SimBridgeServer, SimCommand, SimResponse};
 use crate::agent::protocol::{ClientMessage, ServerMessage};
+use crate::robot::boxing::BoxingMatchState;
 use crate::robot::state::{ActionSpace, ObservationSpace};
+
+fn compute_reward_done(
+    match_state: &Option<BoxingMatchState>,
+    robot_id: usize,
+) -> (f32, bool) {
+    let Some(ms) = match_state else {
+        return (0.0, false);
+    };
+    let done = ms.phase == "match_end";
+    let reward = if ms.your_robot == 0 {
+        ms.total_score_a as f32 - ms.total_score_b as f32
+    } else {
+        ms.total_score_b as f32 - ms.total_score_a as f32
+    };
+    let _ = robot_id;
+    (reward, done)
+}
 
 /// Per-connection session handler for a single agent.
 ///
@@ -109,10 +127,11 @@ impl AgentSession {
                     .as_ref()
                     .map(|c| c.recent_hits.clone())
                     .unwrap_or_default();
+                let (reward, done) = compute_reward_done(&match_state, robot_id);
                 ServerMessage::Observation {
                     state,
-                    reward: 0.0,
-                    done: false,
+                    reward,
+                    done,
                     step_count: 0,
                     messages,
                     hit_events,
@@ -154,10 +173,11 @@ impl AgentSession {
                     .as_ref()
                     .map(|c| c.recent_hits.clone())
                     .unwrap_or_default();
+                let (reward, done) = compute_reward_done(&match_state, robot_id);
                 ServerMessage::Observation {
                     state,
-                    reward: 0.0,
-                    done: false,
+                    reward,
+                    done,
                     step_count: self.step_count,
                     messages,
                     hit_events,
@@ -197,10 +217,11 @@ impl AgentSession {
                     .as_ref()
                     .map(|c| c.recent_hits.clone())
                     .unwrap_or_default();
+                let (reward, done) = compute_reward_done(&match_state, robot_id);
                 ServerMessage::Observation {
                     state,
-                    reward: 0.0,
-                    done: false,
+                    reward,
+                    done,
                     step_count: self.step_count,
                     messages,
                     hit_events,
@@ -327,6 +348,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
 
         // Step 3 times, verify step_count increments
@@ -365,6 +387,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let response = session
             .handle_message(ClientMessage::Step {
@@ -403,6 +426,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         session.handle_message(ClientMessage::Step { action }).await;
 
@@ -459,6 +483,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let response = session.handle_message(ClientMessage::Step { action }).await;
 
@@ -575,6 +600,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = session.handle_message(ClientMessage::Step { action }).await;
         match resp {
@@ -661,6 +687,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, -0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         session.handle_message(ClientMessage::Step { action }).await;
 
@@ -681,6 +708,7 @@ mod tests {
         let action2 = RobotAction {
             motor_velocities: vec![0.5, 0.5],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = session
             .handle_message(ClientMessage::Step { action: action2 })
@@ -791,6 +819,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![1.0, 1.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         for _ in 0..5 {
             session
@@ -943,6 +972,7 @@ mod tests {
         let action = RobotAction {
             motor_velocities: vec![0.0, 0.0],
             gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
         };
         let resp = s1.handle_message(ClientMessage::Step { action }).await;
         match resp {

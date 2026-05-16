@@ -1,6 +1,7 @@
 """Gym-compatible environment client for EchoMap simulation."""
 
 import json
+import time
 
 
 class EchoMapEnv:
@@ -23,17 +24,27 @@ class EchoMapEnv:
                     break
     """
 
-    def __init__(self, host="localhost", port=9002, robot_id=0):
+    def __init__(
+        self,
+        host="localhost",
+        port=9002,
+        robot_id=0,
+        read_timeout=30.0,
+    ):
         """Initialize the environment client.
 
         Args:
             host: Server hostname (default: "localhost").
             port: WebSocket server port (default: 9002).
             robot_id: Robot ID to connect to (default: 0).
+            read_timeout: Socket-level recv timeout in seconds (default: 30.0).
+                Matches the server's default read timeout — if the simulation
+                stalls, the client raises rather than blocking indefinitely.
         """
         self._host = host
         self._port = port
         self._robot_id = robot_id
+        self._read_timeout = read_timeout
         self._ws = None
         self._observation_space = None
         self._action_space = None
@@ -66,7 +77,7 @@ class EchoMapEnv:
             )
 
         url = f"ws://{self._host}:{self._port}"
-        self._ws = websocket.create_connection(url)
+        self._ws = websocket.create_connection(url, timeout=self._read_timeout)
 
         # Send Connect message
         connect_msg = json.dumps({"type": "connect", "robot_id": self._robot_id})
@@ -85,6 +96,53 @@ class EchoMapEnv:
 
         self._observation_space = response.get("observation_space")
         self._action_space = response.get("action_space")
+
+    def connect_with_reconnect(
+        self,
+        max_attempts=5,
+        initial_delay=0.5,
+        max_delay=10.0,
+        backoff=2.0,
+    ):
+        """Connect with retry + exponential backoff.
+
+        Retries `connect()` up to `max_attempts` times. After each failure,
+        sleeps for `min(initial_delay * backoff**attempt, max_delay)` seconds
+        before the next try. Raises the last error if every attempt fails.
+
+        Args:
+            max_attempts: Total number of connection attempts (default: 5).
+            initial_delay: Seconds to wait before the second attempt.
+            max_delay: Upper bound on the per-attempt sleep.
+            backoff: Multiplier between successive delays.
+
+        Returns:
+            None on success.
+
+        Raises:
+            ConnectionError: If all attempts fail. Wraps the last underlying error.
+        """
+        last_err = None
+        for attempt in range(max_attempts):
+            try:
+                self.connect()
+                return
+            except Exception as e:
+                last_err = e
+                # Reset _ws so a partially-opened socket doesn't leak.
+                try:
+                    if self._ws is not None:
+                        self._ws.close()
+                except Exception:
+                    pass
+                self._ws = None
+                if attempt + 1 >= max_attempts:
+                    break
+                delay = min(initial_delay * (backoff ** attempt), max_delay)
+                time.sleep(delay)
+        raise ConnectionError(
+            f"Failed to connect after {max_attempts} attempts: {last_err}"
+        )
 
     def reset(self):
         """Reset the environment and return the initial observation.
@@ -141,6 +199,10 @@ class EchoMapEnv:
             action_payload["gripper_commands"] = action["gripper_commands"]
         else:
             action_payload["gripper_commands"] = []
+        bv = action.get("base_velocity")
+        if bv is not None:
+            if isinstance(bv, (list, tuple)) and len(bv) == 2:
+                action_payload["base_velocity"] = [float(bv[0]), float(bv[1])]
 
         step_msg = json.dumps({"type": "step", "action": action_payload})
         self._ws.send(step_msg)
@@ -160,6 +222,7 @@ class EchoMapEnv:
             "step_count": response.get("step_count", 0),
             "messages": response.get("messages", []),
             "match_state": response.get("match_state"),
+            "hit_events": response.get("hit_events", []),
         }
 
         return observation, reward, done, info

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "echomap-plugin-example"
+version = "0.1.0"
+description = "Reference EchoMap plugin — no-op agent + a custom scenario."
+requires-python = ">=3.9"
+
+[project.entry-points."echomap.plugins.agents"]
+example_agent = "echomap_plugin_example:NoOpAgent"
+
+[project.entry-points."echomap.plugins.scenarios"]
+example_scenario = "echomap_plugin_example:make_example_scenario"
+
+[tool.setuptools.packages.find]
+where = ["src"]

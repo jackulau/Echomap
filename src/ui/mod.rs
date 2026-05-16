@@ -9,8 +9,9 @@ use crate::agent::{AgentServerConfig, AgentServerHandle};
 use crate::fluids::FluidSimulation;
 use crate::gas::GasSimulation;
 use crate::renderer::{
-    energy_to_color, project_3d, ray_ground_intersect, render_fluid_slice, render_gas_slice,
-    screen_to_ray, Camera, FluidVisualizationMode, GasVisualizationMode,
+    energy_to_color, ground_shadow_polygon, project_3d, ray_ground_intersect, render_fluid_slice,
+    render_gas_slice, scene_light_dir, screen_to_ray, shade_color, Camera, CameraView,
+    FluidVisualizationMode, GasVisualizationMode,
 };
 use crate::robot::definition::{CollisionShape, RobotDefinition, SensorDefinition};
 use crate::robot::sensors::sensor_world_pose;
@@ -33,6 +34,54 @@ pub enum Selection {
     Source(usize),
     Listener(usize),
     Object(usize),
+    Robot(usize),
+    RobotLink(usize, usize),
+}
+
+impl Selection {
+    /// Human-readable breadcrumb path for the status bar / tooltips.
+    pub fn breadcrumb(&self, scene: &Scene, robot_manager: &RobotManager) -> String {
+        match self {
+            Selection::None => "Scene".to_string(),
+            Selection::Source(i) => format!("Scene > Source {}", i + 1),
+            Selection::Listener(i) => {
+                let name = scene
+                    .listeners
+                    .get(*i)
+                    .map(|l| l.name.as_str())
+                    .unwrap_or("?");
+                format!("Scene > {}", name)
+            }
+            Selection::Object(i) => {
+                let name = scene.meshes.get(*i).map(|m| m.name.as_str()).unwrap_or("?");
+                format!("Scene > {}", name)
+            }
+            Selection::Robot(r) => {
+                let name = robot_manager
+                    .robots
+                    .get(*r)
+                    .map(|rb| rb.definition.name.as_str())
+                    .unwrap_or("?");
+                format!("Scene > Robot {} ({})", r, name)
+            }
+            Selection::RobotLink(r, l) => {
+                let (rname, lname) = robot_manager
+                    .robots
+                    .get(*r)
+                    .map(|rb| {
+                        let ln = rb
+                            .definition
+                            .links
+                            .get(*l)
+                            .map(|ld| ld.name.as_str())
+                            .unwrap_or("?");
+                        (rb.definition.name.as_str(), ln)
+                    })
+                    .unwrap_or(("?", "?"));
+                format!("Scene > Robot {} ({}) > {}", r, rname, lname)
+            }
+        }
+    }
 }
 
 pub struct ViewportState {
@@ -60,6 +109,22 @@ pub struct ViewportState {
     pub camera_auto_track: bool,
     pub show_boxing_hud: bool,
     pub boxing_messages: Vec<(f32, String, usize)>,
+    /// FPS-style fly camera mode (WASD + right-drag look).
+    pub fly_mode: bool,
+    /// Movement speed (units/sec) while in fly mode.
+    pub fly_speed: f32,
+    /// Current named viewpoint; updated when user picks a preset.
+    pub current_view: CameraView,
+    /// Shaded surface rendering toggle (Lambert fills + drop shadow).
+    pub shaded: bool,
+    /// Visibility toggles per outliner category.
+    pub show_meshes: bool,
+    pub show_sources: bool,
+    pub show_listeners: bool,
+    /// Last hover tooltip target — populated by hit_test_hover each frame.
+    pub hover_label: Option<(egui::Pos2, String)>,
+    /// Outliner search filter (case-insensitive substring).
+    pub outliner_filter: String,
 }
 
 impl Default for ViewportState {
@@ -89,6 +154,15 @@ impl Default for ViewportState {
             camera_auto_track: false,
             show_boxing_hud: true,
             boxing_messages: Vec::new(),
+            fly_mode: false,
+            fly_speed: 4.0,
+            current_view: CameraView::Perspective,
+            shaded: true,
+            show_meshes: true,
+            show_sources: true,
+            show_listeners: true,
+            hover_label: None,
+            outliner_filter: String::new(),
         }
     }
 }
@@ -181,6 +255,32 @@ pub fn menu_bar(
                 ui.checkbox(&mut vp.show_rays, "Show Ray Paths");
                 ui.checkbox(&mut vp.show_robots, "Show Robots");
                 ui.checkbox(&mut vp.show_sensor_rays, "Show Sensor Rays");
+                ui.checkbox(&mut vp.shaded, "Shaded Surfaces");
+                ui.separator();
+                ui.menu_button("Camera Presets", |ui| {
+                    let presets = [
+                        ("Perspective (0)", CameraView::Perspective),
+                        ("Top (7)", CameraView::Top),
+                        ("Front (1)", CameraView::Front),
+                        ("Side (3)", CameraView::Side),
+                        ("Isometric (5)", CameraView::Isometric),
+                        ("Ringside A ([)", CameraView::RingsideA),
+                        ("Ringside B (])", CameraView::RingsideB),
+                    ];
+                    for (label, view) in presets {
+                        if ui.button(label).clicked() {
+                            vp.camera.set_view(view);
+                            vp.current_view = view;
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.checkbox(&mut vp.fly_mode, "Fly Mode (Tab)");
+                ui.add(
+                    egui::Slider::new(&mut vp.fly_speed, 0.5..=20.0)
+                        .text("Fly Speed")
+                        .clamping(egui::SliderClamping::Always),
+                );
                 ui.separator();
                 if ui.button("Reset Camera").clicked() {
                     vp.camera = Camera::default();
@@ -189,7 +289,7 @@ pub fn menu_bar(
                     }
                     ui.close_menu();
                 }
-                if ui.button("Focus on Scene").clicked() {
+                if ui.button("Focus on Scene (F)").clicked() {
                     focus_on_scene(&mut vp.camera, scene);
                     ui.close_menu();
                 }
@@ -220,10 +320,433 @@ pub fn toolbar(ctx: &egui::Context, vp: &mut ViewportState) {
             );
 
             ui.separator();
+            ui.label("View:");
+            let presets = [
+                ("Persp", CameraView::Perspective),
+                ("Top", CameraView::Top),
+                ("Front", CameraView::Front),
+                ("Side", CameraView::Side),
+                ("Iso", CameraView::Isometric),
+                ("Ring-A", CameraView::RingsideA),
+                ("Ring-B", CameraView::RingsideB),
+            ];
+            for (label, view) in presets {
+                let selected = vp.current_view == view;
+                if ui.selectable_label(selected, label).clicked() {
+                    vp.camera.set_view(view);
+                    vp.current_view = view;
+                }
+            }
 
-            ui.label("Navigate: Alt+Drag=Orbit  RightDrag=Pan  Scroll=Zoom");
+            ui.separator();
+            if ui
+                .selectable_label(vp.fly_mode, "Fly (Tab)")
+                .on_hover_text("WASD move, QE up/down, Right-drag look")
+                .clicked()
+            {
+                vp.fly_mode = !vp.fly_mode;
+            }
+
+            ui.separator();
+            let hint = if vp.fly_mode {
+                "Fly: WASD=Move  QE=Up/Down  Shift=Sprint  Right-drag=Look  Tab=Exit"
+            } else {
+                "Orbit: Alt/MMB drag   Pan: Right-drag   Zoom: Scroll   Focus: F   Frame: Home"
+            };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(hint);
+            });
         });
     });
+}
+
+/// Inspector for whatever is currently selected: shows world position, joint
+/// values for robot links, HP/stamina for combat, position editors for sources.
+fn render_inspector(
+    ui: &mut egui::Ui,
+    scene: &mut Scene,
+    vp: &mut ViewportState,
+    robot_manager: &RobotManager,
+) {
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!(
+            "Inspector — {}",
+            vp.selection.breadcrumb(scene, robot_manager)
+        ))
+        .strong(),
+    )
+    .id_salt("inspector_section")
+    .default_open(true)
+    .show(ui, |ui| match vp.selection {
+        Selection::None => {
+            ui.label("Nothing selected. Click an object or use the outliner.");
+        }
+        Selection::Source(i) if i < scene.sound_sources.len() => {
+            let src = &mut scene.sound_sources[i];
+            ui.label(format!("Source {}", i + 1));
+            ui.horizontal(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut src.position.x).speed(0.05));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut src.position.y).speed(0.05));
+                ui.label("Z");
+                ui.add(egui::DragValue::new(&mut src.position.z).speed(0.05));
+            });
+            ui.checkbox(&mut src.enabled, "Enabled");
+            if ui.button("📍 Focus camera").clicked() {
+                vp.camera.smooth_focus(src.position, 1.5);
+            }
+        }
+        Selection::Listener(i) if i < scene.listeners.len() => {
+            let lis = &mut scene.listeners[i];
+            ui.label(&lis.name);
+            ui.horizontal(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut lis.position.x).speed(0.05));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut lis.position.y).speed(0.05));
+                ui.label("Z");
+                ui.add(egui::DragValue::new(&mut lis.position.z).speed(0.05));
+            });
+            if ui.button("📍 Focus camera").clicked() {
+                vp.camera.smooth_focus(lis.position, 1.5);
+            }
+        }
+        Selection::Object(i) if i < scene.meshes.len() => {
+            let obj = &scene.meshes[i];
+            ui.label(&obj.name);
+            ui.label(format!("Material: {}", obj.material.name));
+            let tris = obj.mesh.triangles.len();
+            ui.label(format!("Triangles: {tris}"));
+            let (mn, mx) = obj.mesh.bounds();
+            ui.label(format!(
+                "AABB: ({:.2},{:.2},{:.2}) → ({:.2},{:.2},{:.2})",
+                mn.x, mn.y, mn.z, mx.x, mx.y, mx.z
+            ));
+        }
+        Selection::Robot(ri) => {
+            if let Some(robot) = robot_manager.robots.get(ri) {
+                inspector_robot_summary(ui, ri, robot, &mut vp.camera);
+            }
+        }
+        Selection::RobotLink(ri, li) => {
+            if let Some(robot) = robot_manager.robots.get(ri) {
+                inspector_robot_link(ui, ri, li, robot, &mut vp.camera);
+            }
+        }
+        _ => {
+            ui.label("Selection out of range.");
+        }
+    });
+}
+
+fn inspector_robot_summary(
+    ui: &mut egui::Ui,
+    ri: usize,
+    robot: &crate::robot::ManagedRobot,
+    cam: &mut Camera,
+) {
+    ui.colored_label(
+        robot_color(ri),
+        format!("Robot {} — {}", ri, robot.definition.name),
+    );
+    let poses = robot.state.link_poses_as_mat4();
+    if let Some(p) = poses.first() {
+        ui.label(format!(
+            "Root: ({:.2}, {:.2}, {:.2})",
+            p.w_axis.x, p.w_axis.y, p.w_axis.z
+        ));
+    }
+    ui.label(format!("Links: {}", robot.definition.links.len()));
+    ui.label(format!("Joints: {}", robot.definition.joints.len()));
+    if let Some(ref combat) = robot.state.combat {
+        ui.horizontal(|ui| {
+            ui.label("HP");
+            let frac = (combat.health / combat.max_health).clamp(0.0, 1.0);
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .text(format!("{:.0}/{:.0}", combat.health, combat.max_health))
+                    .desired_width(140.0),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Stam");
+            let frac = (combat.stamina / combat.max_stamina).clamp(0.0, 1.0);
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .text(format!("{:.0}/{:.0}", combat.stamina, combat.max_stamina))
+                    .desired_width(140.0),
+            );
+        });
+    }
+    if ui.button("📍 Focus camera").clicked() {
+        if let Some(p) = poses.first() {
+            cam.smooth_focus(Vec3::new(p.w_axis.x, p.w_axis.y, p.w_axis.z), 2.0);
+        }
+    }
+}
+
+fn inspector_robot_link(
+    ui: &mut egui::Ui,
+    ri: usize,
+    li: usize,
+    robot: &crate::robot::ManagedRobot,
+    cam: &mut Camera,
+) {
+    let link_def = match robot.definition.links.get(li) {
+        Some(l) => l,
+        None => {
+            ui.label("Link out of range.");
+            return;
+        }
+    };
+    let poses = robot.state.link_poses_as_mat4();
+    let pose = poses.get(li);
+    ui.colored_label(robot_color(ri), format!("R{} · {}", ri, link_def.name));
+    if let Some(p) = pose {
+        ui.label(format!(
+            "World pos: ({:.3}, {:.3}, {:.3})",
+            p.w_axis.x, p.w_axis.y, p.w_axis.z
+        ));
+    }
+    let shape_str = match &link_def.collision_shape {
+        crate::robot::definition::CollisionShape::Cuboid { half_extents } => format!(
+            "Cuboid {:.2}×{:.2}×{:.2}",
+            half_extents.x * 2.0,
+            half_extents.y * 2.0,
+            half_extents.z * 2.0
+        ),
+        crate::robot::definition::CollisionShape::Cylinder { radius, height } => {
+            format!("Cylinder r={:.2} h={:.2}", radius, height)
+        }
+        crate::robot::definition::CollisionShape::Sphere { radius } => {
+            format!("Sphere r={:.2}", radius)
+        }
+    };
+    ui.label(format!("Shape: {}", shape_str));
+
+    // Show parent joint info if any.
+    let parent_joint = robot
+        .definition
+        .joints
+        .iter()
+        .enumerate()
+        .find(|(_, j)| j.child_link == li);
+    if let Some((ji, joint_def)) = parent_joint {
+        ui.separator();
+        ui.label(format!("Joint #{}: {}", ji, joint_def.name));
+        if let Some(&q) = robot.state.joint_positions.get(ji) {
+            ui.label(format!("  position: {:.3} rad ({:.1}°)", q, q.to_degrees()));
+        }
+        if let Some(&qd) = robot.state.joint_velocities.get(ji) {
+            ui.label(format!("  velocity: {:.3} rad/s", qd));
+        }
+    }
+    if ui.button("📍 Focus camera").clicked() {
+        if let Some(p) = pose {
+            cam.smooth_focus(Vec3::new(p.w_axis.x, p.w_axis.y, p.w_axis.z), 1.0);
+        }
+    }
+}
+
+/// Scene outliner — tree view of everything pickable in the scene, with search,
+/// visibility toggles, and click-to-select that smooth-focuses the camera.
+pub fn outliner_panel(
+    ctx: &egui::Context,
+    scene: &mut Scene,
+    vp: &mut ViewportState,
+    robot_manager: &RobotManager,
+) {
+    egui::SidePanel::left("outliner_panel")
+        .default_width(240.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.heading("Outliner");
+            ui.horizontal(|ui| {
+                ui.label("Find:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut vp.outliner_filter)
+                        .hint_text("name…")
+                        .desired_width(ui.available_width() - 30.0),
+                );
+                if ui.small_button("×").clicked() {
+                    vp.outliner_filter.clear();
+                }
+            });
+            ui.separator();
+
+            // --- Inspector for current selection ---
+            render_inspector(ui, scene, vp, robot_manager);
+            ui.separator();
+
+            let filter = vp.outliner_filter.to_lowercase();
+            let matches = |name: &str| -> bool {
+                filter.is_empty() || name.to_lowercase().contains(filter.as_str())
+            };
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // --- Robots ---
+                ui.horizontal(|ui| {
+                    let eye = if vp.show_robots { "●" } else { "○" };
+                    if ui
+                        .small_button(eye)
+                        .on_hover_text("Toggle robot visibility")
+                        .clicked()
+                    {
+                        vp.show_robots = !vp.show_robots;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("Robots ({})", robot_manager.robots.len()))
+                            .strong(),
+                    );
+                });
+                for (ri, robot) in robot_manager.robots.iter().enumerate() {
+                    let robot_label = format!("R{}  {}", ri, robot.definition.name);
+                    let visible = matches(&robot_label)
+                        || robot.definition.links.iter().any(|l| matches(&l.name));
+                    if !visible {
+                        continue;
+                    }
+                    let robot_selected = vp.selection == Selection::Robot(ri)
+                        || matches!(vp.selection, Selection::RobotLink(r, _) if r == ri);
+                    egui::CollapsingHeader::new(
+                        egui::RichText::new(&robot_label).color(robot_color(ri)),
+                    )
+                    .id_salt(format!("outliner_robot_{}", ri))
+                    .default_open(robot_selected)
+                    .show(ui, |ui| {
+                        if ui
+                            .selectable_label(vp.selection == Selection::Robot(ri), "📍 Focus body")
+                            .clicked()
+                        {
+                            vp.selection = Selection::Robot(ri);
+                            if let Some(p) = robot.state.link_poses_as_mat4().first() {
+                                vp.camera.smooth_focus(
+                                    Vec3::new(p.w_axis.x, p.w_axis.y, p.w_axis.z),
+                                    2.0,
+                                );
+                            }
+                        }
+                        let poses = robot.state.link_poses_as_mat4();
+                        for (li, link_def) in robot.definition.links.iter().enumerate() {
+                            if !matches(&link_def.name) && !matches(&robot_label) {
+                                continue;
+                            }
+                            let sel = vp.selection == Selection::RobotLink(ri, li);
+                            let label = format!("  • {}", link_def.name);
+                            if ui.selectable_label(sel, label).clicked() {
+                                vp.selection = Selection::RobotLink(ri, li);
+                                if let Some(p) = poses.get(li) {
+                                    vp.camera.smooth_focus(
+                                        Vec3::new(p.w_axis.x, p.w_axis.y, p.w_axis.z),
+                                        1.0,
+                                    );
+                                }
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+
+                // --- Sources ---
+                ui.horizontal(|ui| {
+                    let eye = if vp.show_sources { "●" } else { "○" };
+                    if ui.small_button(eye).clicked() {
+                        vp.show_sources = !vp.show_sources;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Sound Sources ({})",
+                            scene.sound_sources.len()
+                        ))
+                        .strong(),
+                    );
+                });
+                let mut to_select: Option<Selection> = None;
+                for (i, _) in scene.sound_sources.iter().enumerate() {
+                    let label = format!("Source {}", i + 1);
+                    if !matches(&label) {
+                        continue;
+                    }
+                    let sel = vp.selection == Selection::Source(i);
+                    if ui.selectable_label(sel, &label).clicked() {
+                        to_select = Some(Selection::Source(i));
+                    }
+                }
+                if let Some(Selection::Source(i)) = to_select {
+                    vp.selection = Selection::Source(i);
+                    if let Some(s) = scene.sound_sources.get(i) {
+                        vp.camera.smooth_focus(s.position, 1.5);
+                    }
+                }
+                ui.separator();
+
+                // --- Listeners ---
+                ui.horizontal(|ui| {
+                    let eye = if vp.show_listeners { "●" } else { "○" };
+                    if ui.small_button(eye).clicked() {
+                        vp.show_listeners = !vp.show_listeners;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("Listeners ({})", scene.listeners.len()))
+                            .strong(),
+                    );
+                });
+                let mut focus_listener: Option<usize> = None;
+                for (i, listener) in scene.listeners.iter().enumerate() {
+                    if !matches(&listener.name) {
+                        continue;
+                    }
+                    let sel = vp.selection == Selection::Listener(i);
+                    if ui.selectable_label(sel, &listener.name).clicked() {
+                        vp.selection = Selection::Listener(i);
+                        focus_listener = Some(i);
+                    }
+                }
+                if let Some(i) = focus_listener {
+                    if let Some(l) = scene.listeners.get(i) {
+                        vp.camera.smooth_focus(l.position, 1.5);
+                    }
+                }
+                ui.separator();
+
+                // --- Objects (meshes) ---
+                ui.horizontal(|ui| {
+                    let eye = if vp.show_meshes { "●" } else { "○" };
+                    if ui.small_button(eye).clicked() {
+                        vp.show_meshes = !vp.show_meshes;
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("Objects ({})", scene.meshes.len())).strong(),
+                    );
+                });
+                let mut focus_obj: Option<usize> = None;
+                for (i, obj) in scene.meshes.iter_mut().enumerate() {
+                    if !matches(&obj.name) {
+                        continue;
+                    }
+                    ui.horizontal(|ui| {
+                        let eye = if obj.visible { "●" } else { "○" };
+                        if ui.small_button(eye).clicked() {
+                            obj.visible = !obj.visible;
+                        }
+                        let sel = vp.selection == Selection::Object(i);
+                        if ui.selectable_label(sel, &obj.name).clicked() {
+                            vp.selection = Selection::Object(i);
+                            focus_obj = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = focus_obj {
+                    if let Some(obj) = scene.meshes.get(i) {
+                        let (mn, mx) = obj.mesh.bounds();
+                        let c = (mn + mx) * 0.5;
+                        let r = (mx - mn).length() * 0.5;
+                        vp.camera.smooth_focus(c, r.max(0.5));
+                    }
+                }
+            });
+        });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1148,8 +1671,21 @@ pub fn viewport_3d(
         let cam = &mut vp.camera;
         let center = rect.center();
 
+        // --- Smooth focus interpolation tick ---
+        let dt = ctx.input(|i| i.predicted_dt).max(1e-3);
+        cam.tick_focus(dt);
+
         // --- Keyboard shortcuts ---
         let modifiers = ui.input(|i| i.modifiers);
+        let robot_link_focus =
+            |cam: &mut Camera, robot_manager: &RobotManager, ri: usize, li: usize| {
+                if let Some(robot) = robot_manager.robots.get(ri) {
+                    let poses = robot.state.link_poses_as_mat4();
+                    if let Some(p) = poses.get(li) {
+                        cam.smooth_focus(Vec3::new(p.w_axis.x, p.w_axis.y, p.w_axis.z), 1.5);
+                    }
+                }
+            };
         ui.input(|i| {
             if i.key_pressed(egui::Key::Num1) {
                 vp.mode = InteractionMode::Select;
@@ -1162,6 +1698,36 @@ pub fn viewport_3d(
             }
             if i.key_pressed(egui::Key::Escape) {
                 vp.selection = Selection::None;
+            }
+            if i.key_pressed(egui::Key::Tab) {
+                vp.fly_mode = !vp.fly_mode;
+            }
+            // Camera view presets (Blender-style numpad)
+            let view_keys = [
+                (egui::Key::Num0, CameraView::Perspective),
+                (egui::Key::Num7, CameraView::Top),
+                (egui::Key::Num5, CameraView::Isometric),
+                (egui::Key::OpenBracket, CameraView::RingsideA),
+                (egui::Key::CloseBracket, CameraView::RingsideB),
+            ];
+            // Note: Num1/3 are bound to interaction modes above; we use them only
+            // when modifiers.ctrl is held to disambiguate as Front/Side.
+            for (k, v) in view_keys {
+                if i.key_pressed(k) {
+                    cam.set_view(v);
+                    vp.current_view = v;
+                }
+            }
+            if modifiers.ctrl && i.key_pressed(egui::Key::Num1) {
+                cam.set_view(CameraView::Front);
+                vp.current_view = CameraView::Front;
+            }
+            if modifiers.ctrl && i.key_pressed(egui::Key::Num3) {
+                cam.set_view(CameraView::Side);
+                vp.current_view = CameraView::Side;
+            }
+            if i.key_pressed(egui::Key::Home) {
+                focus_on_scene(cam, scene);
             }
             if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 match vp.selection {
@@ -1183,22 +1749,68 @@ pub fn viewport_3d(
             if i.key_pressed(egui::Key::F) {
                 match vp.selection {
                     Selection::Source(idx) if idx < scene.sound_sources.len() => {
-                        cam.focus_on(scene.sound_sources[idx].position, 3.0);
+                        cam.smooth_focus(scene.sound_sources[idx].position, 1.5);
                     }
                     Selection::Listener(idx) if idx < scene.listeners.len() => {
-                        cam.focus_on(scene.listeners[idx].position, 3.0);
+                        cam.smooth_focus(scene.listeners[idx].position, 1.5);
+                    }
+                    Selection::Robot(ri) => {
+                        if let Some(robot) = robot_manager.robots.get(ri) {
+                            let poses = robot.state.link_poses_as_mat4();
+                            if let Some(p) = poses.first() {
+                                cam.smooth_focus(
+                                    Vec3::new(p.w_axis.x, p.w_axis.y, p.w_axis.z),
+                                    2.0,
+                                );
+                            }
+                        }
+                    }
+                    Selection::RobotLink(ri, li) => {
+                        robot_link_focus(cam, robot_manager, ri, li);
                     }
                     _ => {
                         focus_on_scene(cam, scene);
                     }
                 }
             }
+
+            // --- Fly-mode movement ---
+            if vp.fly_mode {
+                let mut fwd = 0.0;
+                let mut rt = 0.0;
+                let mut up = 0.0;
+                if i.key_down(egui::Key::W) {
+                    fwd += 1.0;
+                }
+                if i.key_down(egui::Key::S) {
+                    fwd -= 1.0;
+                }
+                if i.key_down(egui::Key::D) {
+                    rt += 1.0;
+                }
+                if i.key_down(egui::Key::A) {
+                    rt -= 1.0;
+                }
+                if i.key_down(egui::Key::E) {
+                    up += 1.0;
+                }
+                if i.key_down(egui::Key::Q) {
+                    up -= 1.0;
+                }
+                let sprint = if modifiers.shift { 3.0 } else { 1.0 };
+                let step = vp.fly_speed * dt * sprint;
+                if fwd != 0.0 || rt != 0.0 || up != 0.0 {
+                    cam.fly(fwd * step, rt * step, up * step);
+                }
+            }
         });
 
         // --- Camera controls ---
-        let is_orbit = response.dragged_by(egui::PointerButton::Middle)
-            || (response.dragged_by(egui::PointerButton::Primary) && modifiers.alt);
-        let is_pan = response.dragged_by(egui::PointerButton::Secondary);
+        let is_orbit = !vp.fly_mode
+            && (response.dragged_by(egui::PointerButton::Middle)
+                || (response.dragged_by(egui::PointerButton::Primary) && modifiers.alt));
+        let is_pan = !vp.fly_mode && response.dragged_by(egui::PointerButton::Secondary);
+        let is_fly_look = vp.fly_mode && response.dragged_by(egui::PointerButton::Secondary);
 
         if is_orbit {
             let d = response.drag_delta();
@@ -1208,28 +1820,47 @@ pub fn viewport_3d(
             let d = response.drag_delta();
             cam.pan(d.x, d.y);
         }
+        if is_fly_look {
+            let d = response.drag_delta();
+            cam.look(d.x, d.y);
+        }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                cam.zoom(scroll * 0.1);
+                // Zoom-to-cursor when we have a valid ground hover point.
+                let prev_scale = rect.height() * 0.4 / cam.distance;
+                let pivot = response.hover_pos().and_then(|hp| {
+                    let (origin, dir) = screen_to_ray(hp, cam, center, prev_scale);
+                    ray_ground_intersect(origin, dir)
+                });
+                match pivot {
+                    Some(p) => cam.zoom_toward(p, scroll * 0.1),
+                    None => cam.zoom(scroll * 0.1),
+                }
             }
         }
 
         // Recalculate scale after camera changes
         let scale = rect.height() * 0.4 / cam.distance;
 
-        // --- Hover world position ---
+        // --- Hover world position + hover label ---
         vp.hover_world = None;
+        vp.hover_label = None;
         if let Some(hover_pos) = response.hover_pos() {
             let (origin, dir) = screen_to_ray(hover_pos, cam, center, scale);
             vp.hover_world = ray_ground_intersect(origin, dir);
+            if let Some(label) =
+                hover_label_test(hover_pos, scene, robot_manager, cam, center, scale)
+            {
+                vp.hover_label = Some((hover_pos, label));
+            }
         }
 
         // --- Object interaction ---
-        if !is_orbit && !is_pan {
+        if !is_orbit && !is_pan && !is_fly_look {
             if response.drag_started_by(egui::PointerButton::Primary) && !modifiers.alt {
                 if let Some(hover) = response.hover_pos() {
-                    let sel = hit_test(hover, scene, cam, center, scale);
+                    let sel = hit_test(hover, scene, robot_manager, cam, center, scale);
                     if sel != Selection::None {
                         vp.selection = sel;
                         vp.dragging = true;
@@ -1263,7 +1894,8 @@ pub fn viewport_3d(
 
                     match vp.mode {
                         InteractionMode::Select => {
-                            vp.selection = hit_test(hover, scene, cam, center, scale);
+                            vp.selection =
+                                hit_test(hover, scene, robot_manager, cam, center, scale);
                         }
                         InteractionMode::PlaceSource => {
                             if let Some(gp) = ground {
@@ -1295,47 +1927,83 @@ pub fn viewport_3d(
 
         // --- Drawing ---
 
-        // Grid
+        // Grid (distance-faded, axis-tinted)
         if vp.show_grid {
-            let grid_color = egui::Color32::from_rgba_premultiplied(80, 80, 80, 40);
-            let axis_color = egui::Color32::from_rgba_premultiplied(120, 120, 120, 60);
-            for i in -10..=10 {
+            let half = 12i32;
+            let cam_xz = glam::Vec2::new(cam.target.x, cam.target.z);
+            let alpha_for = |w: glam::Vec2| -> u8 {
+                let d = (w - cam_xz).length();
+                let max_d = (half as f32) * 1.2;
+                let t = (1.0 - (d / max_d)).clamp(0.0, 1.0);
+                (t * 75.0) as u8
+            };
+            for i in -half..=half {
                 let f = i as f32;
-                let color = if i == 0 { axis_color } else { grid_color };
-                let p1 = project_3d(Vec3::new(f, 0.0, -10.0), cam, center, scale);
-                let p2 = project_3d(Vec3::new(f, 0.0, 10.0), cam, center, scale);
-                painter.line_segment([p1, p2], egui::Stroke::new(0.5, color));
-
-                let p3 = project_3d(Vec3::new(-10.0, 0.0, f), cam, center, scale);
-                let p4 = project_3d(Vec3::new(10.0, 0.0, f), cam, center, scale);
-                painter.line_segment([p3, p4], egui::Stroke::new(0.5, color));
+                // X-axis line (red tint when i==0)
+                let is_axis = i == 0;
+                let base_x = if is_axis {
+                    egui::Color32::from_rgb(220, 80, 80)
+                } else {
+                    egui::Color32::from_rgb(120, 120, 130)
+                };
+                let base_z = if is_axis {
+                    egui::Color32::from_rgb(80, 140, 220)
+                } else {
+                    egui::Color32::from_rgb(120, 120, 130)
+                };
+                let wp1 = glam::Vec2::new(f, -half as f32);
+                let wp2 = glam::Vec2::new(f, half as f32);
+                let wp3 = glam::Vec2::new(-half as f32, f);
+                let wp4 = glam::Vec2::new(half as f32, f);
+                let a_z = alpha_for(wp1).min(alpha_for(wp2));
+                let a_x = alpha_for(wp3).min(alpha_for(wp4));
+                let stroke_w = if is_axis { 1.5 } else { 0.6 };
+                let cz =
+                    egui::Color32::from_rgba_unmultiplied(base_z.r(), base_z.g(), base_z.b(), a_z);
+                let cx =
+                    egui::Color32::from_rgba_unmultiplied(base_x.r(), base_x.g(), base_x.b(), a_x);
+                let p1 = project_3d(Vec3::new(f, 0.0, -half as f32), cam, center, scale);
+                let p2 = project_3d(Vec3::new(f, 0.0, half as f32), cam, center, scale);
+                painter.line_segment([p1, p2], egui::Stroke::new(stroke_w, cz));
+                let p3 = project_3d(Vec3::new(-half as f32, 0.0, f), cam, center, scale);
+                let p4 = project_3d(Vec3::new(half as f32, 0.0, f), cam, center, scale);
+                painter.line_segment([p3, p4], egui::Stroke::new(stroke_w, cx));
             }
+            // Origin marker
+            let o = project_3d(Vec3::ZERO, cam, center, scale);
+            painter.circle_stroke(
+                o,
+                3.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(180, 180, 180)),
+            );
         }
 
         // Scene meshes (wireframe)
-        for (i, obj) in scene.meshes.iter().enumerate() {
-            if !obj.visible {
-                continue;
-            }
-            let is_selected = vp.selection == Selection::Object(i);
-            let base_color = egui::Color32::from_rgb(
-                (obj.material.color[0] * 255.0) as u8,
-                (obj.material.color[1] * 255.0) as u8,
-                (obj.material.color[2] * 255.0) as u8,
-            );
-            let stroke_width = if is_selected { 2.0 } else { 1.0 };
-            let color = if is_selected {
-                egui::Color32::from_rgb(100, 200, 255)
-            } else {
-                base_color
-            };
-            for tri in &obj.mesh.triangles {
-                let p0 = project_3d(tri.vertices[0].position, cam, center, scale);
-                let p1 = project_3d(tri.vertices[1].position, cam, center, scale);
-                let p2 = project_3d(tri.vertices[2].position, cam, center, scale);
-                painter.line_segment([p0, p1], egui::Stroke::new(stroke_width, color));
-                painter.line_segment([p1, p2], egui::Stroke::new(stroke_width, color));
-                painter.line_segment([p2, p0], egui::Stroke::new(stroke_width, color));
+        if vp.show_meshes {
+            for (i, obj) in scene.meshes.iter().enumerate() {
+                if !obj.visible {
+                    continue;
+                }
+                let is_selected = vp.selection == Selection::Object(i);
+                let base_color = egui::Color32::from_rgb(
+                    (obj.material.color[0] * 255.0) as u8,
+                    (obj.material.color[1] * 255.0) as u8,
+                    (obj.material.color[2] * 255.0) as u8,
+                );
+                let stroke_width = if is_selected { 2.0 } else { 1.0 };
+                let color = if is_selected {
+                    egui::Color32::from_rgb(100, 200, 255)
+                } else {
+                    base_color
+                };
+                for tri in &obj.mesh.triangles {
+                    let p0 = project_3d(tri.vertices[0].position, cam, center, scale);
+                    let p1 = project_3d(tri.vertices[1].position, cam, center, scale);
+                    let p2 = project_3d(tri.vertices[2].position, cam, center, scale);
+                    painter.line_segment([p0, p1], egui::Stroke::new(stroke_width, color));
+                    painter.line_segment([p1, p2], egui::Stroke::new(stroke_width, color));
+                    painter.line_segment([p2, p0], egui::Stroke::new(stroke_width, color));
+                }
             }
         }
 
@@ -1403,6 +2071,8 @@ pub fn viewport_3d(
                 &painter,
                 robot_manager,
                 vp.show_sensor_rays,
+                vp.shaded,
+                vp.selection,
                 activity_log,
                 cam,
                 center,
@@ -1501,40 +2171,63 @@ pub fn viewport_3d(
         }
 
         // Sound sources
-        for (i, source) in scene.sound_sources.iter().enumerate() {
-            if !source.enabled {
-                continue;
+        if vp.show_sources {
+            for (i, source) in scene.sound_sources.iter().enumerate() {
+                if !source.enabled {
+                    continue;
+                }
+                let p = project_3d(source.position, cam, center, scale);
+                let is_selected = vp.selection == Selection::Source(i);
+                if is_selected {
+                    painter.circle_stroke(
+                        p,
+                        12.0,
+                        egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 220, 80)),
+                    );
+                }
+                // Glow
+                painter.circle_filled(
+                    p,
+                    9.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 100, 50, 70),
+                );
+                painter.circle_filled(p, 6.0, egui::Color32::from_rgb(255, 100, 50));
+                painter.text(
+                    p + egui::vec2(10.0, -10.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("S{}", i + 1),
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::WHITE,
+                );
             }
-            let p = project_3d(source.position, cam, center, scale);
-            let is_selected = vp.selection == Selection::Source(i);
-            if is_selected {
-                painter.circle_stroke(p, 10.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
-            }
-            painter.circle_filled(p, 6.0, egui::Color32::from_rgb(255, 100, 50));
-            painter.text(
-                p + egui::vec2(10.0, -10.0),
-                egui::Align2::LEFT_BOTTOM,
-                format!("S{}", i + 1),
-                egui::FontId::proportional(12.0),
-                egui::Color32::WHITE,
-            );
         }
 
         // Listeners
-        for (i, listener) in scene.listeners.iter().enumerate() {
-            let p = project_3d(listener.position, cam, center, scale);
-            let is_selected = vp.selection == Selection::Listener(i);
-            if is_selected {
-                painter.circle_stroke(p, 9.0, egui::Stroke::new(2.0, egui::Color32::WHITE));
+        if vp.show_listeners {
+            for (i, listener) in scene.listeners.iter().enumerate() {
+                let p = project_3d(listener.position, cam, center, scale);
+                let is_selected = vp.selection == Selection::Listener(i);
+                if is_selected {
+                    painter.circle_stroke(
+                        p,
+                        11.0,
+                        egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 220, 80)),
+                    );
+                }
+                painter.circle_filled(
+                    p,
+                    8.0,
+                    egui::Color32::from_rgba_unmultiplied(50, 150, 255, 70),
+                );
+                painter.circle_filled(p, 5.0, egui::Color32::from_rgb(50, 150, 255));
+                painter.text(
+                    p + egui::vec2(10.0, -10.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    &listener.name,
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::WHITE,
+                );
             }
-            painter.circle_filled(p, 5.0, egui::Color32::from_rgb(50, 150, 255));
-            painter.text(
-                p + egui::vec2(10.0, -10.0),
-                egui::Align2::LEFT_BOTTOM,
-                &listener.name,
-                egui::FontId::proportional(12.0),
-                egui::Color32::WHITE,
-            );
         }
 
         // Placement preview
@@ -1569,6 +2262,42 @@ pub fn viewport_3d(
             }
         }
 
+        // Hover tooltip
+        if let Some((pos, label)) = &vp.hover_label {
+            let offset = egui::vec2(14.0, -8.0);
+            let pad = egui::vec2(6.0, 3.0);
+            let font = egui::FontId::proportional(11.0);
+            let galley = painter.layout_no_wrap(label.clone(), font.clone(), egui::Color32::WHITE);
+            let text_size = galley.size();
+            let anchor = *pos + offset;
+            let bg = egui::Rect::from_min_size(anchor, text_size + pad * 2.0);
+            painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 200));
+            painter.rect_stroke(
+                bg,
+                3.0,
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_unmultiplied(255, 220, 80, 160),
+                ),
+                egui::StrokeKind::Outside,
+            );
+            painter.galley(anchor + pad, galley, egui::Color32::WHITE);
+        }
+
+        // Camera/mode indicator (top-left)
+        let cam_info = if vp.fly_mode {
+            format!("FLY · speed {:.1} · {:?}", vp.fly_speed, vp.current_view)
+        } else {
+            format!("{:?}", vp.current_view)
+        };
+        painter.text(
+            rect.min + egui::vec2(8.0, 6.0),
+            egui::Align2::LEFT_TOP,
+            cam_info,
+            egui::FontId::proportional(11.0),
+            egui::Color32::from_rgba_unmultiplied(200, 200, 210, 180),
+        );
+
         // Empty state
         if scene.meshes.is_empty() && scene.sound_sources.is_empty() && scene.listeners.is_empty() {
             painter.text(
@@ -1582,7 +2311,12 @@ pub fn viewport_3d(
     });
 }
 
-pub fn status_bar(ctx: &egui::Context, vp: &ViewportState, scene: &Scene) {
+pub fn status_bar(
+    ctx: &egui::Context,
+    vp: &ViewportState,
+    scene: &Scene,
+    robot_manager: &RobotManager,
+) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             let mode_str = match vp.mode {
@@ -1593,16 +2327,22 @@ pub fn status_bar(ctx: &egui::Context, vp: &ViewportState, scene: &Scene) {
             ui.label(format!("Mode: {mode_str}"));
             ui.separator();
 
+            // Breadcrumb of current selection
+            let crumb = vp.selection.breadcrumb(scene, robot_manager);
+            ui.colored_label(egui::Color32::from_rgb(255, 220, 120), &crumb);
+            ui.separator();
+
             if let Some(pos) = vp.hover_world {
                 ui.label(format!("World: ({:.2}, {:.2})", pos.x, pos.z));
                 ui.separator();
             }
 
             ui.label(format!(
-                "Objects: {} | Sources: {} | Listeners: {}",
+                "Objects: {} | Sources: {} | Listeners: {} | Robots: {}",
                 scene.meshes.len(),
                 scene.sound_sources.len(),
-                scene.listeners.len()
+                scene.listeners.len(),
+                robot_manager.robots.len()
             ));
         });
     });
@@ -1949,6 +2689,7 @@ pub fn settings_window(
 fn hit_test(
     screen_pos: egui::Pos2,
     scene: &Scene,
+    robot_manager: &RobotManager,
     cam: &Camera,
     center: egui::Pos2,
     scale: f32,
@@ -1969,7 +2710,74 @@ fn hit_test(
         }
     }
 
+    // Robot link hit-testing: pick closest link within radius (camera-depth aware).
+    let mut best: Option<(f32, Selection)> = None;
+    for (ri, robot) in robot_manager.robots.iter().enumerate() {
+        let poses = robot.state.link_poses_as_mat4();
+        for (li, pose) in poses.iter().enumerate() {
+            let world = Vec3::new(pose.w_axis.x, pose.w_axis.y, pose.w_axis.z);
+            let p = project_3d(world, cam, center, scale);
+            let d = p.distance(screen_pos);
+            if d < hit_radius * 1.3 {
+                let depth = (world - cam.position).length();
+                let cand = (depth, Selection::RobotLink(ri, li));
+                if best.as_ref().is_none_or(|b| depth < b.0) {
+                    best = Some(cand);
+                }
+            }
+        }
+    }
+    if let Some((_, sel)) = best {
+        return sel;
+    }
+
     Selection::None
+}
+
+/// Lightweight hover hit test: returns (Selection, label) of closest pickable.
+fn hover_label_test(
+    screen_pos: egui::Pos2,
+    scene: &Scene,
+    robot_manager: &RobotManager,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+) -> Option<String> {
+    let hit_radius = 16.0;
+    for (i, source) in scene.sound_sources.iter().enumerate() {
+        let p = project_3d(source.position, cam, center, scale);
+        if p.distance(screen_pos) < hit_radius {
+            return Some(format!("Source {}", i + 1));
+        }
+    }
+    for listener in &scene.listeners {
+        let p = project_3d(listener.position, cam, center, scale);
+        if p.distance(screen_pos) < hit_radius {
+            return Some(listener.name.clone());
+        }
+    }
+    let mut best: Option<(f32, String)> = None;
+    for (ri, robot) in robot_manager.robots.iter().enumerate() {
+        let poses = robot.state.link_poses_as_mat4();
+        for (li, pose) in poses.iter().enumerate() {
+            let world = Vec3::new(pose.w_axis.x, pose.w_axis.y, pose.w_axis.z);
+            let p = project_3d(world, cam, center, scale);
+            if p.distance(screen_pos) < hit_radius * 1.3 {
+                let depth = (world - cam.position).length();
+                let link_name = robot
+                    .definition
+                    .links
+                    .get(li)
+                    .map(|l| l.name.as_str())
+                    .unwrap_or("link");
+                let lbl = format!("R{} {} · {}", ri, robot.definition.name, link_name);
+                if best.as_ref().is_none_or(|b| depth < b.0) {
+                    best = Some((depth, lbl));
+                }
+            }
+        }
+    }
+    best.map(|(_, s)| s)
 }
 
 fn focus_on_scene(cam: &mut Camera, scene: &Scene) {
@@ -2220,6 +3028,8 @@ fn render_robots(
     painter: &egui::Painter,
     robot_manager: &RobotManager,
     show_sensor_rays: bool,
+    shaded: bool,
+    selection: Selection,
     activity_log: &AgentActivityLog,
     cam: &Camera,
     center: egui::Pos2,
@@ -2231,6 +3041,28 @@ fn render_robots(
 
         let link_poses = robot.state.link_poses_as_mat4();
 
+        // Drop shadow under root link (y=0 plane)
+        if shaded && !link_poses.is_empty() {
+            let root_pos = Vec3::new(
+                link_poses[0].w_axis.x,
+                link_poses[0].w_axis.y,
+                link_poses[0].w_axis.z,
+            );
+            let shadow_radius = (root_pos.y + 0.3).max(0.4);
+            let shadow_pts = ground_shadow_polygon(root_pos, shadow_radius, cam, center, scale);
+            painter.add(egui::Shape::convex_polygon(
+                shadow_pts,
+                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 70),
+                egui::Stroke::NONE,
+            ));
+        }
+
+        let robot_selected = selection == Selection::Robot(robot_idx);
+        let selected_link = match selection {
+            Selection::RobotLink(r, l) if r == robot_idx => Some(l),
+            _ => None,
+        };
+
         if robot.definition.name == "boxing_humanoid" && link_poses.len() >= 4 {
             render_boxing_humanoid(
                 painter,
@@ -2238,6 +3070,7 @@ fn render_robots(
                 robot_idx,
                 &link_poses,
                 color,
+                robot_selected || selected_link.is_some(),
                 activity_log,
                 cam,
                 center,
@@ -2251,6 +3084,8 @@ fn render_robots(
                 robot_idx,
                 &link_poses,
                 color,
+                shaded,
+                selected_link,
                 activity_log,
                 show_sensor_rays,
                 cam,
@@ -2269,6 +3104,7 @@ fn render_boxing_humanoid(
     robot_idx: usize,
     link_poses: &[glam::Mat4],
     color: egui::Color32,
+    selected: bool,
     activity_log: &AgentActivityLog,
     cam: &Camera,
     center: egui::Pos2,
@@ -2406,6 +3242,23 @@ fn render_boxing_humanoid(
             bright,
         );
     }
+
+    // Selection halo around torso
+    if selected {
+        let halo_color = egui::Color32::from_rgb(255, 220, 80);
+        let torso_screen = proj(torso_pos);
+        let halo_radius = (0.6 * scale * 5.0).clamp(28.0, 90.0);
+        painter.circle_stroke(
+            torso_screen,
+            halo_radius,
+            egui::Stroke::new(2.5, halo_color),
+        );
+        painter.circle_stroke(
+            torso_screen,
+            halo_radius + 3.0,
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 220, 80, 90)),
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2415,6 +3268,8 @@ fn render_generic_robot(
     robot_idx: usize,
     link_poses: &[glam::Mat4],
     color: egui::Color32,
+    shaded: bool,
+    selected_link: Option<usize>,
     activity_log: &AgentActivityLog,
     show_sensor_rays: bool,
     cam: &Camera,
@@ -2433,16 +3288,37 @@ fn render_generic_robot(
             break;
         }
         let pose = link_poses[link_idx];
+        let is_selected_link = selected_link == Some(link_idx);
+        let link_color = if is_selected_link {
+            egui::Color32::from_rgb(255, 220, 80)
+        } else {
+            color
+        };
         render_link_shape(
             painter,
             &link_def.collision_shape,
             pose,
-            color,
+            link_color,
+            shaded,
             cam,
             center,
             scale,
             rect,
         );
+        if is_selected_link {
+            // Outline ring around link center
+            let p = project_3d(
+                Vec3::new(pose.w_axis.x, pose.w_axis.y, pose.w_axis.z),
+                cam,
+                center,
+                scale,
+            );
+            painter.circle_stroke(
+                p,
+                18.0,
+                egui::Stroke::new(2.5, egui::Color32::from_rgb(255, 220, 80)),
+            );
+        }
     }
 
     for joint_def in &robot.definition.joints {
@@ -2498,13 +3374,15 @@ fn render_generic_robot(
     }
 }
 
-/// Draw a single link's collision shape as a wireframe at the given world pose.
+/// Draw a single link's collision shape at the given world pose.
+/// When `shaded`, draws filled Lambert-shaded faces with depth-sort + outline.
 #[allow(clippy::too_many_arguments)]
 fn render_link_shape(
     painter: &egui::Painter,
     shape: &CollisionShape,
     pose: glam::Mat4,
     color: egui::Color32,
+    shaded: bool,
     cam: &Camera,
     center: egui::Pos2,
     scale: f32,
@@ -2514,29 +3392,234 @@ fn render_link_shape(
 
     match shape {
         CollisionShape::Cuboid { half_extents } => {
-            draw_wireframe_cuboid(
-                painter,
-                pose,
-                *half_extents,
-                color,
-                cam,
-                center,
-                scale,
-                rect,
-            );
+            if shaded {
+                draw_shaded_cuboid(
+                    painter,
+                    pose,
+                    *half_extents,
+                    color,
+                    cam,
+                    center,
+                    scale,
+                    rect,
+                );
+            } else {
+                draw_wireframe_cuboid(
+                    painter,
+                    pose,
+                    *half_extents,
+                    color,
+                    cam,
+                    center,
+                    scale,
+                    rect,
+                );
+            }
         }
         CollisionShape::Cylinder { radius, height } => {
-            draw_wireframe_cylinder(
-                painter, pose, *radius, *height, color, cam, center, scale, rect,
-            );
+            if shaded {
+                draw_shaded_cylinder(
+                    painter, pose, *radius, *height, color, cam, center, scale, rect,
+                );
+            } else {
+                draw_wireframe_cylinder(
+                    painter, pose, *radius, *height, color, cam, center, scale, rect,
+                );
+            }
         }
         CollisionShape::Sphere { radius } => {
             let sp = project_3d(origin, cam, center, scale);
             if rect.contains(sp) {
                 let screen_radius = (*radius * scale * 5.0).clamp(3.0, 40.0);
-                painter.circle_stroke(sp, screen_radius, egui::Stroke::new(1.5, color));
+                if shaded {
+                    // Approx a sphere with a radial gradient via 3 concentric disks.
+                    let lit = shade_color(color, Vec3::Y, scene_light_dir(), 0.4);
+                    let mid = shade_color(color, Vec3::ZERO, scene_light_dir(), 0.25);
+                    painter.circle_filled(sp, screen_radius, mid);
+                    painter.circle_filled(
+                        sp + egui::vec2(-screen_radius * 0.25, -screen_radius * 0.3),
+                        screen_radius * 0.55,
+                        lit,
+                    );
+                    painter.circle_stroke(sp, screen_radius, egui::Stroke::new(1.0, color));
+                } else {
+                    painter.circle_stroke(sp, screen_radius, egui::Stroke::new(1.5, color));
+                }
             }
         }
+    }
+}
+
+/// Draw a cuboid with Lambert-shaded face fills (back-to-front depth-sorted) and outline.
+#[allow(clippy::too_many_arguments)]
+fn draw_shaded_cuboid(
+    painter: &egui::Painter,
+    pose: glam::Mat4,
+    half: Vec3,
+    color: egui::Color32,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let corners_local = [
+        Vec3::new(-half.x, -half.y, -half.z),
+        Vec3::new(half.x, -half.y, -half.z),
+        Vec3::new(half.x, half.y, -half.z),
+        Vec3::new(-half.x, half.y, -half.z),
+        Vec3::new(-half.x, -half.y, half.z),
+        Vec3::new(half.x, -half.y, half.z),
+        Vec3::new(half.x, half.y, half.z),
+        Vec3::new(-half.x, half.y, half.z),
+    ];
+    let world_corners: [Vec3; 8] = std::array::from_fn(|i| pose.transform_point3(corners_local[i]));
+    let screen_corners: [egui::Pos2; 8] =
+        std::array::from_fn(|i| project_3d(world_corners[i], cam, center, scale));
+
+    if !screen_corners
+        .iter()
+        .any(|p| rect.expand(50.0).contains(*p))
+    {
+        return;
+    }
+
+    // Faces: (vertex idxs in CCW outward order, local normal)
+    let faces: [([usize; 4], Vec3); 6] = [
+        ([0, 3, 2, 1], Vec3::new(0.0, 0.0, -1.0)), // -Z
+        ([4, 5, 6, 7], Vec3::new(0.0, 0.0, 1.0)),  // +Z
+        ([0, 4, 7, 3], Vec3::new(-1.0, 0.0, 0.0)), // -X
+        ([1, 2, 6, 5], Vec3::new(1.0, 0.0, 0.0)),  // +X
+        ([0, 1, 5, 4], Vec3::new(0.0, -1.0, 0.0)), // -Y
+        ([3, 7, 6, 2], Vec3::new(0.0, 1.0, 0.0)),  // +Y
+    ];
+
+    let light = scene_light_dir();
+    let view_origin = cam.position;
+    let mut draw_list: Vec<(f32, Vec<egui::Pos2>, egui::Color32)> = Vec::with_capacity(6);
+
+    for (verts, normal_local) in faces {
+        let face_center_world = verts
+            .iter()
+            .map(|&i| world_corners[i])
+            .fold(Vec3::ZERO, |a, b| a + b)
+            / 4.0;
+        let to_cam = (view_origin - face_center_world).normalize_or_zero();
+        let normal_world = pose.transform_vector3(normal_local).normalize_or_zero();
+        // Back-face cull
+        if normal_world.dot(to_cam) <= 0.02 {
+            continue;
+        }
+        let depth = (face_center_world - view_origin).length();
+        let pts: Vec<egui::Pos2> = verts.iter().map(|&i| screen_corners[i]).collect();
+        let fill = shade_color(color, normal_world, light, 0.28);
+        draw_list.push((depth, pts, fill));
+    }
+    draw_list.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let outline =
+        egui::Color32::from_rgba_unmultiplied(color.r() / 2, color.g() / 2, color.b() / 2, 220);
+    for (_, pts, fill) in draw_list {
+        painter.add(egui::Shape::convex_polygon(
+            pts,
+            fill,
+            egui::Stroke::new(1.0, outline),
+        ));
+    }
+}
+
+/// Draw a cylinder with Lambert-shaded side quads + end caps.
+#[allow(clippy::too_many_arguments)]
+fn draw_shaded_cylinder(
+    painter: &egui::Painter,
+    pose: glam::Mat4,
+    radius: f32,
+    height: f32,
+    color: egui::Color32,
+    cam: &Camera,
+    center: egui::Pos2,
+    scale: f32,
+    rect: egui::Rect,
+) {
+    let half_h = height / 2.0;
+    let segments = 16usize;
+    let mut bottom_w = Vec::with_capacity(segments);
+    let mut top_w = Vec::with_capacity(segments);
+    let mut bottom_sp = Vec::with_capacity(segments);
+    let mut top_sp = Vec::with_capacity(segments);
+    for i in 0..segments {
+        let a = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let x = radius * a.cos();
+        let z = radius * a.sin();
+        let bw = pose.transform_point3(Vec3::new(x, -half_h, z));
+        let tw = pose.transform_point3(Vec3::new(x, half_h, z));
+        bottom_w.push(bw);
+        top_w.push(tw);
+        bottom_sp.push(project_3d(bw, cam, center, scale));
+        top_sp.push(project_3d(tw, cam, center, scale));
+    }
+    if !bottom_sp
+        .iter()
+        .chain(top_sp.iter())
+        .any(|p| rect.expand(50.0).contains(*p))
+    {
+        return;
+    }
+
+    let light = scene_light_dir();
+    let view_origin = cam.position;
+    let mut draw_list: Vec<(f32, Vec<egui::Pos2>, egui::Color32)> =
+        Vec::with_capacity(segments + 2);
+
+    // Side quads
+    for i in 0..segments {
+        let j = (i + 1) % segments;
+        let mid_w = (bottom_w[i] + bottom_w[j] + top_w[i] + top_w[j]) * 0.25;
+        let outward_local = Vec3::new(
+            (bottom_w[i] - pose.w_axis.truncate()).x,
+            0.0,
+            (bottom_w[i] - pose.w_axis.truncate()).z,
+        );
+        let normal = (mid_w - Vec3::new(pose.w_axis.x, mid_w.y, pose.w_axis.z)).normalize_or_zero();
+        let _ = outward_local; // suppress; normal already in world
+        let to_cam = (view_origin - mid_w).normalize_or_zero();
+        if normal.dot(to_cam) <= 0.0 {
+            continue;
+        }
+        let depth = (mid_w - view_origin).length();
+        let pts = vec![bottom_sp[i], bottom_sp[j], top_sp[j], top_sp[i]];
+        let fill = shade_color(color, normal, light, 0.28);
+        draw_list.push((depth, pts, fill));
+    }
+
+    // Caps
+    let cap_normal_top = pose.transform_vector3(Vec3::Y).normalize_or_zero();
+    let top_center_w = pose.transform_point3(Vec3::new(0.0, half_h, 0.0));
+    if cap_normal_top.dot((view_origin - top_center_w).normalize_or_zero()) > 0.0 {
+        let depth = (top_center_w - view_origin).length();
+        let fill = shade_color(color, cap_normal_top, light, 0.28);
+        draw_list.push((depth, top_sp.clone(), fill));
+    }
+    let bottom_center_w = pose.transform_point3(Vec3::new(0.0, -half_h, 0.0));
+    let cap_normal_bot = -cap_normal_top;
+    if cap_normal_bot.dot((view_origin - bottom_center_w).normalize_or_zero()) > 0.0 {
+        let depth = (bottom_center_w - view_origin).length();
+        let fill = shade_color(color, cap_normal_bot, light, 0.28);
+        // reverse for CCW
+        let mut pts = bottom_sp.clone();
+        pts.reverse();
+        draw_list.push((depth, pts, fill));
+    }
+
+    draw_list.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let outline =
+        egui::Color32::from_rgba_unmultiplied(color.r() / 2, color.g() / 2, color.b() / 2, 220);
+    for (_, pts, fill) in draw_list {
+        painter.add(egui::Shape::convex_polygon(
+            pts,
+            fill,
+            egui::Stroke::new(0.8, outline),
+        ));
     }
 }
 

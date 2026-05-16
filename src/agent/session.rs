@@ -3,10 +3,7 @@ use crate::agent::protocol::{ClientMessage, ServerMessage};
 use crate::robot::boxing::BoxingMatchState;
 use crate::robot::state::{ActionSpace, ObservationSpace};
 
-fn compute_reward_done(
-    match_state: &Option<BoxingMatchState>,
-    robot_id: usize,
-) -> (f32, bool) {
+fn compute_reward_done(match_state: &Option<BoxingMatchState>, robot_id: usize) -> (f32, bool) {
     let Some(ms) = match_state else {
         return (0.0, false);
     };
@@ -54,6 +51,15 @@ impl AgentSession {
     pub async fn handle_message(&mut self, msg: ClientMessage) -> ServerMessage {
         match msg {
             ClientMessage::Connect { robot_id } => self.handle_connect(robot_id).await,
+            ClientMessage::BindTarget {
+                target_id,
+                agent_type,
+                domain,
+                observe_only,
+            } => {
+                self.handle_bind_target(target_id, agent_type, domain, observe_only)
+                    .await
+            }
             ClientMessage::Reset => self.handle_reset().await,
             ClientMessage::Step { action } => self.handle_step(action).await,
             ClientMessage::Observe => self.handle_observe().await,
@@ -62,6 +68,84 @@ impl AgentSession {
                 to_robot_id,
                 content,
             } => self.handle_send_message(to_robot_id, content).await,
+        }
+    }
+
+    /// Parse an opaque target_id like `"robot/0"`, `"robot/3"`, or `"0"` into
+    /// a robot index. Returns the resolved robot_id alongside a normalized
+    /// target_id string for the response.
+    fn resolve_target(target_id: &str) -> Result<(usize, String), String> {
+        let normalized = target_id.trim();
+        if normalized.is_empty() {
+            return Err("target_id is empty".to_string());
+        }
+        let id_part = match normalized.strip_prefix("robot/") {
+            Some(rest) => rest,
+            None => normalized,
+        };
+        let robot_id: usize = id_part.parse().map_err(|_| {
+            format!(
+                "target_id '{}' not a recognized form (expected 'robot/<n>' or '<n>')",
+                target_id
+            )
+        })?;
+        Ok((robot_id, format!("robot/{}", robot_id)))
+    }
+
+    async fn handle_bind_target(
+        &mut self,
+        target_id: String,
+        _agent_type: Option<String>,
+        _domain: Option<String>,
+        _observe_only: bool,
+    ) -> ServerMessage {
+        if self.robot_id.is_some() {
+            return ServerMessage::Error {
+                message: "already bound to a target".to_string(),
+            };
+        }
+
+        let (robot_id, normalized) = match Self::resolve_target(&target_id) {
+            Ok(pair) => pair,
+            Err(message) => return ServerMessage::Error { message },
+        };
+
+        match self
+            .bridge
+            .send_command(SimCommand::GetSpaces { robot_id })
+            .await
+        {
+            Ok(SimResponse::Spaces {
+                observation_space,
+                action_space,
+            }) => {
+                self.robot_id = Some(robot_id);
+                self.step_count = 0;
+                self.observation_space = Some(observation_space.clone());
+                self.action_space = Some(action_space.clone());
+                let mut capabilities = vec!["observe".to_string(), "step".to_string()];
+                if action_space.num_motors > 0 {
+                    capabilities.push("motors".to_string());
+                }
+                if action_space.num_grippers > 0 {
+                    capabilities.push("grippers".to_string());
+                }
+                if observation_space.num_sensors > 0 {
+                    capabilities.push("sensors".to_string());
+                }
+                capabilities.push("messaging".to_string());
+                ServerMessage::Bound {
+                    target_id: normalized,
+                    observation_space,
+                    action_space,
+                    capabilities,
+                }
+            }
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(_) => ServerMessage::Error {
+                message: "unexpected response from bridge".to_string(),
+            },
+            Err(e) => ServerMessage::Error { message: e },
         }
     }
 

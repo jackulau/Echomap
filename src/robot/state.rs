@@ -940,7 +940,7 @@ mod tests {
         );
         // Gripper states
         assert_eq!(deser.gripper_states.len(), 1);
-        assert_eq!(deser.gripper_states[0].is_open, false);
+        assert!(!deser.gripper_states[0].is_open);
         assert_eq!(deser.gripper_states[0].attached_object, Some(3));
     }
 
@@ -1024,8 +1024,8 @@ mod tests {
         // Motor commands applied
         assert_eq!(state.actuator_commands.len(), 2);
         // Gripper commands are stored in the action and accessible
-        assert_eq!(action.gripper_commands[0], true);
-        assert_eq!(action.gripper_commands[1], false);
+        assert!(action.gripper_commands[0]);
+        assert!(!action.gripper_commands[1]);
     }
 
     #[test]

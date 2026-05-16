@@ -23,6 +23,18 @@ pub enum GasVisualizationMode {
     VelocityMagnitude,
 }
 
+/// Named camera viewpoints for quick framing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraView {
+    Perspective,
+    Top,
+    Front,
+    Side,
+    Isometric,
+    RingsideA,
+    RingsideB,
+}
+
 pub struct Camera {
     pub position: Vec3,
     pub target: Vec3,
@@ -30,6 +42,10 @@ pub struct Camera {
     pub distance: f32,
     pub yaw: f32,
     pub pitch: f32,
+    /// Smoothly interpolated focus target; when Some, target drifts toward it each frame.
+    pub focus_target: Option<Vec3>,
+    /// Smoothly interpolated distance; when Some, distance drifts toward it.
+    pub focus_distance: Option<f32>,
 }
 
 impl Default for Camera {
@@ -41,6 +57,8 @@ impl Default for Camera {
             distance: 12.0,
             yaw: 45.0_f32.to_radians(),
             pitch: 30.0_f32.to_radians(),
+            focus_target: None,
+            focus_distance: None,
         };
         cam.update_position();
         cam
@@ -56,6 +74,20 @@ impl Camera {
 
     pub fn zoom(&mut self, delta: f32) {
         self.distance = (self.distance - delta * 0.5).clamp(0.5, 100.0);
+        self.focus_distance = None;
+        self.update_position();
+    }
+
+    /// Zoom while biasing target toward a world point (zoom-to-cursor).
+    pub fn zoom_toward(&mut self, point: Vec3, delta: f32) {
+        let old_distance = self.distance;
+        self.distance = (self.distance - delta * 0.5).clamp(0.5, 100.0);
+        self.focus_distance = None;
+        // Bias target toward point by a fraction proportional to zoom-in amount.
+        let zoom_in_frac = ((old_distance - self.distance) / old_distance).max(0.0);
+        if zoom_in_frac > 0.0 {
+            self.target += (point - self.target) * (zoom_in_frac * 0.5);
+        }
         self.update_position();
     }
 
@@ -72,6 +104,87 @@ impl Camera {
     pub fn focus_on(&mut self, center: Vec3, radius: f32) {
         self.target = center;
         self.distance = (radius * 2.5).max(3.0);
+        self.focus_target = None;
+        self.focus_distance = None;
+        self.update_position();
+    }
+
+    /// Set up a smooth focus animation toward `center` at the given orbital `radius`.
+    pub fn smooth_focus(&mut self, center: Vec3, radius: f32) {
+        self.focus_target = Some(center);
+        self.focus_distance = Some((radius * 2.5).max(3.0));
+    }
+
+    /// Tick smooth focus interpolation. Call once per frame with the frame dt.
+    pub fn tick_focus(&mut self, dt: f32) {
+        let alpha = (dt * 8.0).min(1.0);
+        let mut changed = false;
+        if let Some(t) = self.focus_target {
+            let delta = t - self.target;
+            if delta.length() > 0.001 {
+                self.target += delta * alpha;
+                changed = true;
+            } else {
+                self.target = t;
+                self.focus_target = None;
+                changed = true;
+            }
+        }
+        if let Some(d) = self.focus_distance {
+            let dd = d - self.distance;
+            if dd.abs() > 0.001 {
+                self.distance += dd * alpha;
+                changed = true;
+            } else {
+                self.distance = d;
+                self.focus_distance = None;
+                changed = true;
+            }
+        }
+        if changed {
+            self.update_position();
+        }
+    }
+
+    /// FPS-style fly movement in camera-local frame. `forward`/`right`/`up_amt` are
+    /// movement amounts (units in scene-space) along the respective basis vectors.
+    pub fn fly(&mut self, forward: f32, right: f32, up_amt: f32) {
+        let fwd = (self.target - self.position).normalize();
+        let rt = fwd.cross(self.up).normalize();
+        let up = rt.cross(fwd).normalize();
+        let offset = fwd * forward + rt * right + up * up_amt;
+        self.position += offset;
+        self.target += offset;
+        self.focus_target = None;
+        self.focus_distance = None;
+    }
+
+    /// Mouse-look that rotates the view direction in place (target moves around position).
+    pub fn look(&mut self, delta_x: f32, delta_y: f32) {
+        self.yaw += delta_x * 0.005;
+        self.pitch = (self.pitch + delta_y * 0.005).clamp(-1.5, 1.5);
+        let dir = Vec3::new(
+            -self.pitch.cos() * self.yaw.cos(),
+            -self.pitch.sin(),
+            -self.pitch.cos() * self.yaw.sin(),
+        );
+        self.target = self.position + dir * self.distance;
+    }
+
+    pub fn set_view(&mut self, view: CameraView) {
+        let (yaw, pitch) = match view {
+            CameraView::Perspective => (45.0_f32.to_radians(), 30.0_f32.to_radians()),
+            CameraView::Top => (0.0, 89.0_f32.to_radians()),
+            CameraView::Front => (0.0_f32.to_radians(), 0.0),
+            CameraView::Side => (90.0_f32.to_radians(), 0.0),
+            CameraView::Isometric => (45.0_f32.to_radians(), 35.264_f32.to_radians()),
+            CameraView::RingsideA => (170.0_f32.to_radians(), 8.0_f32.to_radians()),
+            CameraView::RingsideB => (-10.0_f32.to_radians(), 8.0_f32.to_radians()),
+        };
+        self.yaw = yaw;
+        self.pitch = pitch;
+        self.focus_target = None;
+        self.focus_distance = None;
         self.update_position();
     }
 
@@ -133,6 +246,50 @@ pub fn ray_ground_intersect(origin: Vec3, direction: Vec3) -> Option<Vec3> {
     } else {
         None
     }
+}
+
+/// Shade a base color by a face normal under a simple Lambert + ambient model.
+/// `light_dir` should point FROM the surface TO the light (will be normalized).
+pub fn shade_color(
+    base: egui::Color32,
+    normal: Vec3,
+    light_dir: Vec3,
+    ambient: f32,
+) -> egui::Color32 {
+    let n = normal.normalize_or_zero();
+    let l = light_dir.normalize_or_zero();
+    let lambert = n.dot(l).max(0.0);
+    let intensity = (ambient + (1.0 - ambient) * lambert).clamp(0.0, 1.0);
+    egui::Color32::from_rgba_unmultiplied(
+        (base.r() as f32 * intensity) as u8,
+        (base.g() as f32 * intensity) as u8,
+        (base.b() as f32 * intensity) as u8,
+        base.a(),
+    )
+}
+
+/// Standard scene light direction (from upper-front-right).
+pub fn scene_light_dir() -> Vec3 {
+    Vec3::new(0.4, 1.0, 0.3).normalize()
+}
+
+/// Project a circular drop-shadow disk onto the y=0 ground plane and return the
+/// screen-space ellipse approximation as 12 polygon points.
+pub fn ground_shadow_polygon(
+    center: Vec3,
+    radius: f32,
+    camera: &Camera,
+    screen_center: egui::Pos2,
+    scale: f32,
+) -> Vec<egui::Pos2> {
+    let ground_c = Vec3::new(center.x, 0.0, center.z);
+    (0..12)
+        .map(|i| {
+            let a = (i as f32) * std::f32::consts::TAU / 12.0;
+            let p = ground_c + Vec3::new(a.cos() * radius, 0.0, a.sin() * radius);
+            project_3d(p, camera, screen_center, scale)
+        })
+        .collect()
 }
 
 pub fn energy_to_color(energy: f32, max_energy: f32) -> egui::Color32 {
@@ -384,6 +541,7 @@ fn sample_gas_field(
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -446,5 +604,67 @@ mod tests {
         let sp = project_3d(cam.target, &cam, screen_center, 50.0);
         assert!((sp.x - screen_center.x).abs() < 100.0);
         assert!((sp.y - screen_center.y).abs() < 100.0);
+    }
+
+    #[test]
+    fn test_camera_set_view_top_pitches_up() {
+        let mut cam = Camera::default();
+        cam.set_view(CameraView::Top);
+        assert!(cam.pitch > 1.5);
+    }
+
+    #[test]
+    fn test_camera_set_view_front_zero_pitch() {
+        let mut cam = Camera::default();
+        cam.set_view(CameraView::Front);
+        assert!(cam.pitch.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_camera_smooth_focus_then_tick() {
+        let mut cam = Camera::default();
+        cam.target = Vec3::ZERO;
+        cam.smooth_focus(Vec3::new(5.0, 0.0, 0.0), 2.0);
+        for _ in 0..200 {
+            cam.tick_focus(0.05);
+        }
+        assert!((cam.target - Vec3::new(5.0, 0.0, 0.0)).length() < 0.1);
+        assert!(cam.focus_target.is_none());
+    }
+
+    #[test]
+    fn test_camera_fly_moves_both_target_and_position() {
+        let mut cam = Camera::default();
+        let old_target = cam.target;
+        let old_position = cam.position;
+        cam.fly(1.0, 0.0, 0.0);
+        assert!((cam.target - old_target).length() > 0.5);
+        assert!((cam.position - old_position).length() > 0.5);
+    }
+
+    #[test]
+    fn test_camera_look_changes_target_direction() {
+        let mut cam = Camera::default();
+        let old_target = cam.target;
+        cam.look(100.0, 0.0);
+        assert!((cam.target - old_target).length() > 0.1);
+    }
+
+    #[test]
+    fn test_camera_zoom_toward_biases_target() {
+        let mut cam = Camera::default();
+        cam.target = Vec3::ZERO;
+        let point = Vec3::new(2.0, 0.0, 0.0);
+        cam.zoom_toward(point, 4.0);
+        assert!(cam.target.x > 0.0);
+    }
+
+    #[test]
+    fn test_shade_color_dark_when_normal_away_from_light() {
+        let base = egui::Color32::from_rgb(200, 200, 200);
+        let light = scene_light_dir();
+        let bright = shade_color(base, light, light, 0.2);
+        let dark = shade_color(base, -light, light, 0.2);
+        assert!(bright.r() > dark.r());
     }
 }

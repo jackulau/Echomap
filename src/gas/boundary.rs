@@ -337,7 +337,7 @@ mod tests {
             for j in 0..8 {
                 for i in 0..8 {
                     let idx = grid.idx(i, j, k);
-                    if i >= 2 && i < 5 && j >= 2 && j < 5 && k >= 2 && k < 5 {
+                    if (2..5).contains(&i) && (2..5).contains(&j) && (2..5).contains(&k) {
                         assert_eq!(
                             grid.cell_types[idx],
                             GasCellType::Solid,
@@ -438,9 +438,9 @@ mod tests {
             for j in 2..6 {
                 for i in 2..6 {
                     let idx = grid.idx(i, j, k);
-                    grid.vel_x[idx] = 3.14;
-                    grid.vel_y[idx] = 2.72;
-                    grid.vel_z[idx] = 1.41;
+                    grid.vel_x[idx] = 1.5;
+                    grid.vel_y[idx] = 2.5;
+                    grid.vel_z[idx] = 0.5;
                 }
             }
         }

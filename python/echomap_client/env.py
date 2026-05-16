@@ -30,24 +30,31 @@ class EchoMapEnv:
         port=9002,
         robot_id=0,
         read_timeout=30.0,
+        target_id=None,
     ):
         """Initialize the environment client.
 
         Args:
             host: Server hostname (default: "localhost").
             port: WebSocket server port (default: 9002).
-            robot_id: Robot ID to connect to (default: 0).
+            robot_id: Robot ID to connect to (default: 0). Used by the legacy
+                `connect()` path.
             read_timeout: Socket-level recv timeout in seconds (default: 30.0).
                 Matches the server's default read timeout — if the simulation
                 stalls, the client raises rather than blocking indefinitely.
+            target_id: Opaque target identifier (e.g. `"robot/0"`). When set,
+                `connect()` uses the `BindTarget` protocol path and ignores
+                `robot_id`. Falsy → legacy `Connect { robot_id }` path.
         """
         self._host = host
         self._port = port
         self._robot_id = robot_id
         self._read_timeout = read_timeout
+        self._target_id = target_id
         self._ws = None
         self._observation_space = None
         self._action_space = None
+        self._capabilities = []
 
     @property
     def observation_space(self):
@@ -58,6 +65,11 @@ class EchoMapEnv:
     def action_space(self):
         """Return the action space dict received from the server on connect."""
         return self._action_space
+
+    @property
+    def capabilities(self):
+        """Return capabilities advertised by the server on bind (or [])."""
+        return list(self._capabilities)
 
     def connect(self):
         """Connect to the EchoMap server via WebSocket.
@@ -79,20 +91,36 @@ class EchoMapEnv:
         url = f"ws://{self._host}:{self._port}"
         self._ws = websocket.create_connection(url, timeout=self._read_timeout)
 
-        # Send Connect message
-        connect_msg = json.dumps({"type": "connect", "robot_id": self._robot_id})
-        self._ws.send(connect_msg)
-
-        # Receive Connected response
-        response = json.loads(self._ws.recv())
-        if response.get("type") == "error":
-            raise ConnectionError(
-                f"Server error: {response.get('message', 'unknown error')}"
-            )
-        if response.get("type") != "connected":
-            raise ConnectionError(
-                f"Unexpected response type: {response.get('type')}"
-            )
+        # Branch: BindTarget if target_id supplied, else legacy Connect.
+        if self._target_id:
+            bind_msg = json.dumps({
+                "type": "bind_target",
+                "target_id": self._target_id,
+            })
+            self._ws.send(bind_msg)
+            response = json.loads(self._ws.recv())
+            if response.get("type") == "error":
+                raise ConnectionError(
+                    f"Server error: {response.get('message', 'unknown error')}"
+                )
+            if response.get("type") != "bound":
+                raise ConnectionError(
+                    f"Unexpected response type: {response.get('type')}"
+                )
+            self._target_id = response.get("target_id", self._target_id)
+            self._capabilities = response.get("capabilities", [])
+        else:
+            connect_msg = json.dumps({"type": "connect", "robot_id": self._robot_id})
+            self._ws.send(connect_msg)
+            response = json.loads(self._ws.recv())
+            if response.get("type") == "error":
+                raise ConnectionError(
+                    f"Server error: {response.get('message', 'unknown error')}"
+                )
+            if response.get("type") != "connected":
+                raise ConnectionError(
+                    f"Unexpected response type: {response.get('type')}"
+                )
 
         self._observation_space = response.get("observation_space")
         self._action_space = response.get("action_space")
@@ -326,3 +354,56 @@ class EchoMapEnv:
         """Context manager exit - closes the connection."""
         self.close()
         return False
+
+
+def connect_agent(
+    target_id,
+    agent=None,
+    host="localhost",
+    port=9002,
+    agent_type=None,
+    domain=None,
+    observe_only=False,
+    read_timeout=30.0,
+):
+    """One-call front door: bind any agent to any sim target.
+
+    The same call shape works whether `target_id` resolves to a boxing
+    humanoid, a generic n-DOF arm, or any future bindable object (sensors,
+    props). Server-side capability advertisement tells the caller what
+    the bound target supports.
+
+    Args:
+        target_id: Opaque server identifier, e.g. `"robot/0"`, `"robot/3"`.
+        agent: Optional agent instance with a `.decide(observation, info)`
+            method. If `None`, caller manages the loop themselves.
+        host: Server hostname.
+        port: WebSocket port.
+        agent_type: Hint (`"boxer"`, `"manipulator"`, `"observer"`). Currently
+            advisory — server may ignore.
+        domain: Domain hint (`"boxing"`, `"manipulation"`). Currently advisory.
+        observe_only: If True, no action input expected.
+        read_timeout: Socket recv timeout in seconds.
+
+    Returns:
+        Connected `EchoMapEnv`. Call `env.reset()` / `env.step(...)` or pass
+        `agent` and run your own loop. `env.capabilities` lists what the
+        target supports.
+
+    Raises:
+        ConnectionError: On bind failure (target not found, etc.).
+    """
+    env = EchoMapEnv(
+        host=host,
+        port=port,
+        read_timeout=read_timeout,
+        target_id=target_id,
+    )
+    env.connect()
+    # `agent_type` / `domain` / `observe_only` are reserved for the next
+    # protocol revision — accepted here so call sites are stable.
+    env._bound_agent = agent
+    env._agent_type = agent_type
+    env._domain = domain
+    env._observe_only = observe_only
+    return env

@@ -1,0 +1,7 @@
+pyproject.toml
+src/echomap_plugin_example/__init__.py
+src/echomap_plugin_example.egg-info/PKG-INFO
+src/echomap_plugin_example.egg-info/SOURCES.txt
+src/echomap_plugin_example.egg-info/dependency_links.txt
+src/echomap_plugin_example.egg-info/entry_points.txt
+src/echomap_plugin_example.egg-info/top_level.txt

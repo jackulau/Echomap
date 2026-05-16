@@ -188,7 +188,14 @@ mod tests {
     fn simple_robot() -> Robot {
         let base = Link::new("base", Vec3::ZERO, Quat::IDENTITY, Vec3::splat(0.1), 5.0);
         let mut robot = Robot::new("test_bot", Vec3::ZERO, Quat::IDENTITY, base);
-        let joint = Joint::new(JointType::Revolute, Vec3::Y, 0.0, 0.0, (-3.14, 3.14), 10.0);
+        let joint = Joint::new(
+            JointType::Revolute,
+            Vec3::Y,
+            0.0,
+            0.0,
+            (-std::f32::consts::PI, std::f32::consts::PI),
+            10.0,
+        );
         let link = Link::new(
             "gripper_link",
             Vec3::new(1.0, 0.0, 0.0),

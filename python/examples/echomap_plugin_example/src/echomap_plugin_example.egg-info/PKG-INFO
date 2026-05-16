@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: echomap-plugin-example
+Version: 0.1.0
+Summary: Reference EchoMap plugin — no-op agent + a custom scenario.
+Requires-Python: >=3.9

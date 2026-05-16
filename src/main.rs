@@ -83,8 +83,10 @@ mod app {
                     agent_server_config.ws_port
                 );
 
-                let mut scene = Scene::default();
-                scene.meshes = scenario.ring.meshes;
+                let scene = Scene {
+                    meshes: scenario.ring.meshes,
+                    ..Scene::default()
+                };
 
                 let mut viewport = ViewportState::default();
                 viewport.camera.distance = 3.0;
@@ -163,6 +165,12 @@ mod app {
                 &mut self.viewport,
             );
             echomap::ui::toolbar(ctx, &mut self.viewport);
+            echomap::ui::outliner_panel(
+                ctx,
+                &mut self.scene,
+                &mut self.viewport,
+                &self.robot_manager,
+            );
             echomap::ui::side_panel(
                 ctx,
                 &mut self.scene,
@@ -196,7 +204,7 @@ mod app {
                 &self.activity_log,
                 &self.bridge_client,
             );
-            echomap::ui::status_bar(ctx, &self.viewport, &self.scene);
+            echomap::ui::status_bar(ctx, &self.viewport, &self.scene, &self.robot_manager);
 
             // Step robot simulation (skip when agent server owns stepping via bridge)
             if self.agent_server_handle.is_none() {

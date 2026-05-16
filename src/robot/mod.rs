@@ -1245,7 +1245,7 @@ mod tests {
             Vec3::Y,
             0.0,
             0.0,
-            (-3.14, 3.14),
+            (-std::f32::consts::PI, std::f32::consts::PI),
             10.0,
         );
         let gripper_link = Link::new(

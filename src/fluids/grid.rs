@@ -557,9 +557,9 @@ mod tests {
         // nx=1, ny=2, nz=3 -- very non-cubic
         let g = FluidGrid::new(1, 2, 3, 0.5, Vec3::ZERO);
         assert_eq!(g.u.len(), 2 * 2 * 3); // (1+1)*2*3
-        assert_eq!(g.v.len(), 1 * 3 * 3); // 1*(2+1)*3
-        assert_eq!(g.w.len(), 1 * 2 * 4); // 1*2*(3+1)
-        assert_eq!(g.pressure.len(), 1 * 2 * 3);
+        assert_eq!(g.v.len(), 3 * 3); // 1*(2+1)*3
+        assert_eq!(g.w.len(), 2 * 4); // 1*2*(3+1)
+        assert_eq!(g.pressure.len(), 2 * 3);
     }
 
     #[test]

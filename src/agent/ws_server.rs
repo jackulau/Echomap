@@ -861,8 +861,8 @@ mod tests {
         while tokio::time::Instant::now() < deadline && !saw_timeout_error {
             match tokio::time::timeout(Duration::from_millis(500), read.next()).await {
                 Ok(Some(Ok(Message::Text(text)))) => {
-                    let msg: ServerMessage = serde_json::from_str(&text)
-                        .expect("server should send valid JSON");
+                    let msg: ServerMessage =
+                        serde_json::from_str(&text).expect("server should send valid JSON");
                     if let ServerMessage::Error { message } = msg {
                         if message.contains("timeout") {
                             saw_timeout_error = true;
@@ -924,7 +924,10 @@ mod tests {
             }
         }
 
-        assert!(saw_ping, "server should send ping frame within heartbeat interval");
+        assert!(
+            saw_ping,
+            "server should send ping frame within heartbeat interval"
+        );
 
         cancel.cancel();
         let _ = server_handle.await;

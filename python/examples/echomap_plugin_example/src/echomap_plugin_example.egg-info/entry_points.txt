@@ -1,0 +1,5 @@
+[echomap.plugins.agents]
+example_agent = echomap_plugin_example:NoOpAgent
+
+[echomap.plugins.scenarios]
+example_scenario = echomap_plugin_example:make_example_scenario

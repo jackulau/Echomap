@@ -436,7 +436,7 @@ mod tests {
             for j in 0..8 {
                 for i in 0..8 {
                     let idx = grid.idx(i, j, k);
-                    if i >= 2 && i < 5 && j >= 2 && j < 5 && k >= 2 && k < 5 {
+                    if (2..5).contains(&i) && (2..5).contains(&j) && (2..5).contains(&k) {
                         assert_eq!(
                             grid.cell_types[idx],
                             CellType::Solid,
@@ -662,7 +662,7 @@ mod tests {
             for j in 1..7 {
                 for i in 2..7 {
                     let uidx = grid.idx_u(i, j, k);
-                    grid.u[uidx] = 3.14;
+                    grid.u[uidx] = 1.5;
                 }
             }
         }

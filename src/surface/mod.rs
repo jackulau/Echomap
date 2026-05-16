@@ -519,7 +519,7 @@ mod tests {
             let mat = lib
                 .materials
                 .get(*name)
-                .expect(&format!("Missing preset: {name}"));
+                .unwrap_or_else(|| panic!("Missing preset: {name}"));
             let si = SurfaceInteraction::from_material(mat);
 
             // Verify all fields transferred correctly

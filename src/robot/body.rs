@@ -212,7 +212,14 @@ mod tests {
         let base = Link::new("base", Vec3::ZERO, Quat::IDENTITY, Vec3::splat(0.1), 5.0);
         let mut robot = Robot::new("test_arm", Vec3::ZERO, Quat::IDENTITY, base);
 
-        let joint1 = Joint::new(JointType::Revolute, Vec3::Y, 0.0, 0.0, (-3.14, 3.14), 10.0);
+        let joint1 = Joint::new(
+            JointType::Revolute,
+            Vec3::Y,
+            0.0,
+            0.0,
+            (-std::f32::consts::PI, std::f32::consts::PI),
+            10.0,
+        );
         let link1 = Link::new(
             "link1",
             Vec3::new(0.0, 0.5, 0.0),
@@ -222,7 +229,14 @@ mod tests {
         );
         robot.add_joint_and_link(joint1, link1);
 
-        let joint2 = Joint::new(JointType::Revolute, Vec3::Y, 0.0, 0.0, (-3.14, 3.14), 10.0);
+        let joint2 = Joint::new(
+            JointType::Revolute,
+            Vec3::Y,
+            0.0,
+            0.0,
+            (-std::f32::consts::PI, std::f32::consts::PI),
+            10.0,
+        );
         let link2 = Link::new(
             "link2",
             Vec3::new(0.0, 0.5, 0.0),

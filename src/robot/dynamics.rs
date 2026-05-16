@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_zero_inertia_no_nan() {
-        let mut def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let mut def = one_joint_robot(10.0, 0.1, -std::f32::consts::PI, std::f32::consts::PI);
         def.links[1].inertia = 0.0;
         let mut state = RobotState::new(&def);
         state.actuator_commands = vec![ActuatorCommand::Torque(5.0)];
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_zero_dt_is_noop() {
-        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let def = one_joint_robot(10.0, 0.1, -std::f32::consts::PI, std::f32::consts::PI);
         let mut state = RobotState::new(&def);
         state.actuator_commands = vec![ActuatorCommand::Torque(100.0)];
         let pos_before = state.joint_positions[0];
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn test_negative_dt_is_noop() {
-        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let def = one_joint_robot(10.0, 0.1, -std::f32::consts::PI, std::f32::consts::PI);
         let mut state = RobotState::new(&def);
         state.actuator_commands = vec![ActuatorCommand::Torque(100.0)];
         step_dynamics(&def, &mut state, -0.01);
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn test_large_dt_finite() {
-        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let def = one_joint_robot(10.0, 0.1, -std::f32::consts::PI, std::f32::consts::PI);
         let mut state = RobotState::new(&def);
         state.actuator_commands = vec![ActuatorCommand::Velocity(10.0)];
 
@@ -372,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_zero_max_torque() {
-        let def = one_joint_robot(0.0, 0.0, -3.14, 3.14);
+        let def = one_joint_robot(0.0, 0.0, -std::f32::consts::PI, std::f32::consts::PI);
         let mut state = RobotState::new(&def);
         state.actuator_commands = vec![ActuatorCommand::Torque(999.0)];
 
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn test_nan_command_produces_finite() {
-        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let def = one_joint_robot(10.0, 0.1, -std::f32::consts::PI, std::f32::consts::PI);
         let mut state = RobotState::new(&def);
         state.actuator_commands = vec![ActuatorCommand::Torque(f32::NAN)];
 
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_more_commands_than_joints() {
-        let def = one_joint_robot(10.0, 0.1, -3.14, 3.14);
+        let def = one_joint_robot(10.0, 0.1, -std::f32::consts::PI, std::f32::consts::PI);
         let mut state = RobotState::new(&def);
         state.actuator_commands = vec![
             ActuatorCommand::Velocity(1.0),
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_high_damping_stabilizes() {
-        let def = one_joint_robot(100.0, 100.0, -3.14, 3.14);
+        let def = one_joint_robot(100.0, 100.0, -std::f32::consts::PI, std::f32::consts::PI);
         let mut state = RobotState::new(&def);
         state.joint_velocities[0] = 10.0;
 

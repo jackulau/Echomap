@@ -1,4 +1,4 @@
-"""CLI entry point for running boxing matches."""
+"""CLI entry point for running boxing matches + plugin management."""
 
 import argparse
 import sys
@@ -20,6 +20,36 @@ def parse_args(args=None):
     parser.add_argument("--rounds", type=int, default=3, help="Number of rounds")
     parser.add_argument("--verbose", action="store_true", help="Print match progress")
     return parser.parse_args(args)
+
+
+def list_plugins_cmd(argv):
+    """Print discovered plugins. `argv` reserved for future flags (e.g. --json)."""
+    from .plugins import load_all
+    parser = argparse.ArgumentParser(
+        prog="echomap_client.cli list-plugins",
+        description="List installed EchoMap plugins (agents / sensors / scenarios / visualizations / hardware)",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    opts = parser.parse_args(argv)
+    reg = load_all()
+    if opts.json:
+        import json
+        payload = {
+            group: {name: f"{getattr(obj, '__module__', '?')}:{getattr(obj, '__qualname__', repr(obj))}"
+                    for name, obj in reg.get(group).items()}
+            for group in [
+                "echomap.plugins.agents",
+                "echomap.plugins.sensors",
+                "echomap.plugins.scenarios",
+                "echomap.plugins.visualizations",
+                "echomap.plugins.hardware",
+            ]
+        }
+        payload["_errors"] = reg.errors
+        print(json.dumps(payload, indent=2))
+    else:
+        print(reg.summary())
+    return 0
 
 
 def create_agents(mode, model=None):
@@ -57,6 +87,13 @@ def create_agents(mode, model=None):
 
 
 def main(args=None):
+    raw = sys.argv[1:] if args is None else list(args)
+    # Subcommand dispatch — first positional decides. Backwards compat: any
+    # invocation without a recognized subcommand falls through to the match
+    # runner.
+    if raw and raw[0] == "list-plugins":
+        return list_plugins_cmd(raw[1:])
+
     parsed = parse_args(args)
 
     if parsed.rounds < 1:

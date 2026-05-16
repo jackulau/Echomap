@@ -1289,8 +1289,7 @@ mod tests {
             gripper_commands: vec![],
             base_velocity: [0.0, 0.0],
         };
-        let resp =
-            tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: nan_action }).await;
+        let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: nan_action }).await;
         assert!(
             matches!(resp, ServerMessage::Error { .. }),
             "NaN over JSON should be rejected at parse layer. Got {:?}",
@@ -2395,10 +2394,7 @@ mod tests {
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
         match resp {
             ServerMessage::Observation { match_state, .. } => {
-                assert!(
-                    match_state.is_some(),
-                    "boxing match should be auto-wired"
-                );
+                assert!(match_state.is_some(), "boxing match should be auto-wired");
             }
             other => panic!("Expected Observation with match_state, got {:?}", other),
         }

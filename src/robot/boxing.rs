@@ -847,7 +847,7 @@ mod tests {
                     "Step {}: {} collisions, joints=[{:.2}, {:.2}, {:.2}]",
                     step,
                     collisions.len(),
-                    jp.get(0).unwrap_or(&0.0),
+                    jp.first().unwrap_or(&0.0),
                     jp.get(1).unwrap_or(&0.0),
                     jp.get(2).unwrap_or(&0.0),
                 );

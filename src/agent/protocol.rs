@@ -14,12 +14,32 @@ pub struct AgentMessage {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
-    Connect { robot_id: usize },
+    Connect {
+        robot_id: usize,
+    },
+    /// Generic agent-to-object binding. `target_id` is an opaque string
+    /// (e.g. `"robot/0"`, `"robot/boxer_a"`) resolved server-side.
+    /// Preferred over `Connect`; non-robot targets (sensors, props) can
+    /// reuse this surface as scenarios register them.
+    BindTarget {
+        target_id: String,
+        #[serde(default)]
+        agent_type: Option<String>,
+        #[serde(default)]
+        domain: Option<String>,
+        #[serde(default)]
+        observe_only: bool,
+    },
     Reset,
-    Step { action: RobotAction },
+    Step {
+        action: RobotAction,
+    },
     Observe,
     Close,
-    SendMessage { to_robot_id: usize, content: String },
+    SendMessage {
+        to_robot_id: usize,
+        content: String,
+    },
 }
 
 /// Messages sent from the server to the client (agent).
@@ -30,6 +50,16 @@ pub enum ServerMessage {
     Connected {
         observation_space: ObservationSpace,
         action_space: ActionSpace,
+    },
+    /// Response to `BindTarget`. Carries the resolved target identity plus
+    /// advertised capabilities so the client can adapt (motor-less targets
+    /// advertise `capabilities` without `"motors"`).
+    Bound {
+        target_id: String,
+        observation_space: ObservationSpace,
+        action_space: ActionSpace,
+        #[serde(default)]
+        capabilities: Vec<String>,
     },
     Observation {
         state: GymRobotState,
@@ -67,6 +97,54 @@ mod tests {
         match deser {
             ClientMessage::Connect { robot_id } => assert_eq!(robot_id, 0),
             other => panic!("Expected Connect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_client_message_bind_target_roundtrip() {
+        let msg = ClientMessage::BindTarget {
+            target_id: "robot/0".to_string(),
+            agent_type: Some("boxer".to_string()),
+            domain: Some("boxing".to_string()),
+            observe_only: false,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("bind_target"));
+        let deser: ClientMessage = serde_json::from_str(&json).unwrap();
+        match deser {
+            ClientMessage::BindTarget {
+                target_id,
+                agent_type,
+                domain,
+                observe_only,
+            } => {
+                assert_eq!(target_id, "robot/0");
+                assert_eq!(agent_type.as_deref(), Some("boxer"));
+                assert_eq!(domain.as_deref(), Some("boxing"));
+                assert!(!observe_only);
+            }
+            other => panic!("Expected BindTarget, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_client_message_bind_target_minimal_roundtrip() {
+        // Minimal payload — only target_id required, other fields default.
+        let json = r#"{"type":"bind_target","target_id":"robot/0"}"#;
+        let deser: ClientMessage = serde_json::from_str(json).unwrap();
+        match deser {
+            ClientMessage::BindTarget {
+                target_id,
+                agent_type,
+                domain,
+                observe_only,
+            } => {
+                assert_eq!(target_id, "robot/0");
+                assert!(agent_type.is_none());
+                assert!(domain.is_none());
+                assert!(!observe_only);
+            }
+            other => panic!("Expected BindTarget, got {:?}", other),
         }
     }
 

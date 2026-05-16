@@ -44,6 +44,13 @@ futures-util = "0.3"
 # Signal handling (headless server)
 ctrlc = "3"
 
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "physics"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -44,6 +44,11 @@ pub struct GasGrid {
     pub vel_y: Vec<f32>,
     pub vel_z: Vec<f32>,
     pub cell_types: Vec<GasCellType>,
+    /// Per-step scratch buffer (length nx*ny*nz). Owned by the grid so solvers
+    /// can swap with `concentrations[s]` / `temperature` instead of allocating
+    /// a fresh Vec each call.
+    #[doc(hidden)]
+    pub scratch_scalar: Vec<f32>,
 }
 
 impl GasGrid {
@@ -84,6 +89,7 @@ impl GasGrid {
             vel_y: vec![0.0; cell_count],
             vel_z: vec![0.0; cell_count],
             cell_types: vec![GasCellType::Empty; cell_count],
+            scratch_scalar: vec![0.0; cell_count],
         }
     }
 

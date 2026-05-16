@@ -141,8 +141,13 @@ pub fn diffuse_concentrations(grid: &mut GasGrid, dt: f32) {
     let cell_count = nx * ny * nz;
     let num_species = grid.species.len();
 
-    let cell_types = &grid.cell_types;
     let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
+
+    // Ensure scratch buffer is right-sized (lazy migration for grids built
+    // before scratch_scalar existed).
+    if grid.scratch_scalar.len() != cell_count {
+        grid.scratch_scalar.resize(cell_count, 0.0);
+    }
 
     for s in 0..num_species {
         let diff_coeff = grid.species[s].diffusion_coefficient;
@@ -151,72 +156,21 @@ pub fn diffuse_concentrations(grid: &mut GasGrid, dt: f32) {
         }
 
         let factor = (diff_coeff * dt / (dx * dx)).min(1.0 / 6.0);
-        let old = grid.concentrations[s].clone();
 
-        let new_conc: Vec<f32> = (0..cell_count)
-            .into_par_iter()
-            .map(|idx| {
-                if cell_types[idx] != GasCellType::Gas {
-                    return old[idx];
-                }
+        // Swap concentrations[s] into scratch_scalar so we read old values
+        // from scratch and write new values directly into concentrations[s]
+        // — no per-step heap allocation.
+        std::mem::swap(&mut grid.scratch_scalar, &mut grid.concentrations[s]);
+        let old: &[f32] = &grid.scratch_scalar;
+        let cell_types_ref = &grid.cell_types;
+        let dst: &mut [f32] = &mut grid.concentrations[s];
 
-                let k = idx / (nx * ny);
-                let rem = idx - k * nx * ny;
-                let j = rem / nx;
-                let i = rem - j * nx;
-
-                let c = old[idx];
-
-                let xm = if i > 0 { old[idx_of(i - 1, j, k)] } else { c };
-                let xp = if i < nx - 1 {
-                    old[idx_of(i + 1, j, k)]
-                } else {
-                    c
-                };
-                let ym = if j > 0 { old[idx_of(i, j - 1, k)] } else { c };
-                let yp = if j < ny - 1 {
-                    old[idx_of(i, j + 1, k)]
-                } else {
-                    c
-                };
-                let zm = if k > 0 { old[idx_of(i, j, k - 1)] } else { c };
-                let zp = if k < nz - 1 {
-                    old[idx_of(i, j, k + 1)]
-                } else {
-                    c
-                };
-
-                let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-                c + factor * laplacian
-            })
-            .collect();
-        grid.concentrations[s] = new_conc;
-    }
-}
-
-/// Explicit thermal diffusion for the temperature field. Parallelized with rayon.
-pub fn diffuse_temperature(grid: &mut GasGrid, thermal_diffusivity: f32, dt: f32) {
-    if thermal_diffusivity <= 0.0 {
-        return;
-    }
-
-    let nx = grid.nx;
-    let ny = grid.ny;
-    let nz = grid.nz;
-    let dx = grid.dx;
-    let cell_count = nx * ny * nz;
-    let factor = (thermal_diffusivity * dt / (dx * dx)).min(1.0 / 6.0);
-
-    let old = grid.temperature.clone();
-    let cell_types = &grid.cell_types;
-    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
-
-    let new_temp: Vec<f32> = (0..cell_count)
-        .into_par_iter()
-        .map(|idx| {
-            if cell_types[idx] != GasCellType::Gas {
-                return old[idx];
+        dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
+            if cell_types_ref[idx] != GasCellType::Gas {
+                *out = old[idx];
+                return;
             }
+
             let k = idx / (nx * ny);
             let rem = idx - k * nx * ny;
             let j = rem / nx;
@@ -243,10 +197,67 @@ pub fn diffuse_temperature(grid: &mut GasGrid, thermal_diffusivity: f32, dt: f32
             };
 
             let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-            c + factor * laplacian
-        })
-        .collect();
-    grid.temperature = new_temp;
+            *out = c + factor * laplacian;
+        });
+    }
+}
+
+/// Explicit thermal diffusion for the temperature field. Parallelized with rayon.
+pub fn diffuse_temperature(grid: &mut GasGrid, thermal_diffusivity: f32, dt: f32) {
+    if thermal_diffusivity <= 0.0 {
+        return;
+    }
+
+    let nx = grid.nx;
+    let ny = grid.ny;
+    let nz = grid.nz;
+    let dx = grid.dx;
+    let cell_count = nx * ny * nz;
+    let factor = (thermal_diffusivity * dt / (dx * dx)).min(1.0 / 6.0);
+    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
+
+    if grid.scratch_scalar.len() != cell_count {
+        grid.scratch_scalar.resize(cell_count, 0.0);
+    }
+
+    std::mem::swap(&mut grid.scratch_scalar, &mut grid.temperature);
+    let old: &[f32] = &grid.scratch_scalar;
+    let cell_types_ref = &grid.cell_types;
+    let dst: &mut [f32] = &mut grid.temperature;
+
+    dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
+        if cell_types_ref[idx] != GasCellType::Gas {
+            *out = old[idx];
+            return;
+        }
+        let k = idx / (nx * ny);
+        let rem = idx - k * nx * ny;
+        let j = rem / nx;
+        let i = rem - j * nx;
+
+        let c = old[idx];
+        let xm = if i > 0 { old[idx_of(i - 1, j, k)] } else { c };
+        let xp = if i < nx - 1 {
+            old[idx_of(i + 1, j, k)]
+        } else {
+            c
+        };
+        let ym = if j > 0 { old[idx_of(i, j - 1, k)] } else { c };
+        let yp = if j < ny - 1 {
+            old[idx_of(i, j + 1, k)]
+        } else {
+            c
+        };
+        let zm = if k > 0 { old[idx_of(i, j, k - 1)] } else { c };
+        let zp = if k < nz - 1 {
+            old[idx_of(i, j, k + 1)]
+        } else {
+            c
+        };
+
+        let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+        *out = c + factor * laplacian;
+    });
 }
 
 // ---------------------------------------------------------------------------

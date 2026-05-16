@@ -89,32 +89,36 @@ if ! (cd "${REPO_ROOT}" && cargo bench --bench physics -- --quick) >"${BENCH_OUT
     exit 1
 fi
 
-# Parse "<group>/<name>      time:   [low mid high unit]" lines.
+# Parse Criterion bench output. Each bench produces either:
+#
+#   <group>/<name>      time:   [low med high unit]
+# or
+#   <group>/<name>
+#                       time:   [low med high unit]
+#
+# followed later by "change: time: ..." lines which we MUST ignore. Strategy:
+# track the most recent line that looks like a bench name; on the first
+# matching "time: [...]" we see after it, emit "<name>|<med> <unit>", then
+# clear the name so subsequent change: lines do not re-match.
 parse_current() {
     awk '
-        /[a-z]\/[a-z]+_/ && /time:/ {
-            name=$1
-            # find the "[" then take the middle (3rd) number + unit
-            for (i=1; i<=NF; i++) {
-                if ($i == "[") {
-                    print name "|" $(i+3) " " $(i+4)
-                    break
-                }
-            }
+        # A line whose first whitespace-separated token is "<group>/<bench>"
+        # registers the current bench name.
+        $1 ~ /^[a-z][a-z_]*\/[a-z][a-z0-9_]*$/ {
+            current_name = $1
         }
-        /^[a-z]+\/[a-z]/ {
-            current_name=$1
-        }
-        /^ +time:/ && current_name != "" {
-            # line like:  time:   [4.0323 ms 4.1049 ms 4.1230 ms]
-            for (i=1; i<=NF; i++) {
+        # The actual measurement line: "time:   [low med high unit]" (no
+        # leading "change:"). Skip lines that contain "change:" which carry
+        # delta percentages, not absolute durations.
+        /time:/ && !/change:/ && current_name != "" {
+            for (i = 1; i <= NF; i++) {
                 if (index($i, "[") > 0) {
-                    gsub("\\[", "", $i)
-                    mid_val=$(i+2)
-                    mid_unit=$(i+3)
-                    gsub("\\]", "", mid_unit)
+                    gsub(/\[/, "", $i)
+                    mid_val = $(i + 2)
+                    mid_unit = $(i + 3)
+                    gsub(/\]/, "", mid_unit)
                     print current_name "|" mid_val " " mid_unit
-                    current_name=""
+                    current_name = ""
                     break
                 }
             }

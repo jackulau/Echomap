@@ -4,6 +4,7 @@
 
 use std::time::Instant;
 
+use echomap::robot::boxing::{BoxingMatchConfig, BoxingScenario};
 use echomap::robot::definition::RobotDefinition;
 use echomap::robot::RobotManager;
 use echomap::scenarios::builders::{FluidRoomScenario, GasLeakScenario, ScenarioConfig};
@@ -114,5 +115,58 @@ fn gas_only_perf_release() {
         sim_fps >= 120.0,
         "gas-only {:.1} sim_fps below 120 — solver regressed",
         sim_fps
+    );
+}
+
+/// 60 Hz frame budget on the actual boxing scenario (D6 of the
+/// physics-quality-and-perf goal). Full integrated physics step — fluid grid,
+/// gas grid, both boxing humanoids' dynamics + collision — must run in less
+/// than 16.67 ms averaged over 1000 measured steps on a release build.
+///
+/// Marked `#[ignore]` so it does not block ordinary `cargo test`. Run via:
+///     cargo test --release --test integrated_perf -- --ignored physics_step_budget
+#[test]
+#[ignore]
+fn physics_step_budget() {
+    let frame_budget_ms = 16.67_f64;
+    let measured_steps = 1000usize;
+    let warmup_steps = 50usize;
+
+    // Build the actual fluid + gas scenarios used in the boxing-match server.
+    let config = ScenarioConfig::default();
+    let mut fluid = FluidRoomScenario::build(&config);
+    let mut gas = GasLeakScenario::build(&config);
+
+    // BoxingScenario owns the ring + boxing match; the returned RobotManager
+    // already has both humanoids inserted with combat state enabled.
+    let (_scenario, mut robots) = BoxingScenario::new(BoxingMatchConfig::default());
+
+    for _ in 0..warmup_steps {
+        fluid.simulation.step();
+        gas.simulation.step();
+        robots.step(0.016, &[]);
+    }
+
+    let start = Instant::now();
+    for _ in 0..measured_steps {
+        fluid.simulation.step();
+        gas.simulation.step();
+        robots.step(0.016, &[]);
+    }
+    let elapsed = start.elapsed();
+
+    let avg_ms = elapsed.as_secs_f64() * 1000.0 / measured_steps as f64;
+    eprintln!(
+        "physics_step_budget: {} steps in {:?} -> avg {:.3} ms/step (budget {:.2} ms)",
+        measured_steps, elapsed, avg_ms, frame_budget_ms
+    );
+
+    if cfg!(debug_assertions) {
+        eprintln!("debug build: skipping hard {frame_budget_ms} ms assertion");
+        return;
+    }
+    assert!(
+        avg_ms < frame_budget_ms,
+        "integrated physics step avg {avg_ms:.3} ms exceeds 60 Hz budget {frame_budget_ms:.2} ms"
     );
 }

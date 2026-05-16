@@ -246,7 +246,8 @@ fn velocity_from_arrays(
 // ---------------------------------------------------------------------------
 
 /// Semi-Lagrangian advection: traces backward through the velocity field and
-/// interpolates from the previous timestep. Returns new (u, v, w) arrays.
+/// interpolates from the previous timestep. Returns new (u, v, w) arrays
+/// (allocating fresh Vecs each call — prefer `advect_in_place` for hot paths).
 ///
 /// Row-parallel via rayon: each y-slice is processed independently.
 pub fn advect(grid: &FluidGrid, dt: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
@@ -328,6 +329,101 @@ pub fn advect(grid: &FluidGrid, dt: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     });
 
     (new_u, new_v, new_w)
+}
+
+/// In-place semi-Lagrangian advection. Uses the grid's `scratch_u/v/w` buffers
+/// as the read-from-old snapshot and writes new velocities directly into
+/// `grid.u/v/w`. No per-step heap allocation.
+///
+/// Equivalent to `advect()` but avoids three clones and three Vec allocations.
+pub fn advect_in_place(grid: &mut FluidGrid, dt: f32) {
+    let nx = grid.nx;
+    let ny = grid.ny;
+    let nz = grid.nz;
+    let dx = grid.dx;
+    let origin = grid.origin;
+
+    let need_u = (nx + 1) * ny * nz;
+    let need_v = nx * (ny + 1) * nz;
+    let need_w = nx * ny * (nz + 1);
+    if grid.scratch_u.len() != need_u {
+        grid.scratch_u.resize(need_u, 0.0);
+    }
+    if grid.scratch_v.len() != need_v {
+        grid.scratch_v.resize(need_v, 0.0);
+    }
+    if grid.scratch_w.len() != need_w {
+        grid.scratch_w.resize(need_w, 0.0);
+    }
+
+    // After these swaps: scratch_x holds the OLD velocity values (read), and
+    // grid.x is a (stale) buffer we overwrite with new values.
+    std::mem::swap(&mut grid.scratch_u, &mut grid.u);
+    std::mem::swap(&mut grid.scratch_v, &mut grid.v);
+    std::mem::swap(&mut grid.scratch_w, &mut grid.w);
+
+    let old_u: &[f32] = &grid.scratch_u;
+    let old_v: &[f32] = &grid.scratch_v;
+    let old_w: &[f32] = &grid.scratch_w;
+
+    // --- Advect u (on x-faces: (nx+1) x ny x nz) ---
+    grid.u
+        .par_chunks_mut((nx + 1) * ny)
+        .enumerate()
+        .for_each(|(k, slice)| {
+            for j in 0..ny {
+                for i in 0..=nx {
+                    let pos = origin
+                        + Vec3::new(i as f32 * dx, (j as f32 + 0.5) * dx, (k as f32 + 0.5) * dx);
+                    let vel =
+                        velocity_from_arrays(old_u, old_v, old_w, nx, ny, nz, dx, origin, pos);
+                    let back_pos = pos - vel * dt;
+                    let rel = back_pos - origin;
+                    let fi = rel.x / dx;
+                    let fj = rel.y / dx - 0.5;
+                    let fk = rel.z / dx - 0.5;
+                    slice[i + (nx + 1) * j] = sample_u(old_u, nx, ny, nz, fi, fj, fk);
+                }
+            }
+        });
+
+    // --- Advect v (on y-faces: nx x (ny+1) x nz) ---
+    grid.v
+        .par_chunks_mut(nx * (ny + 1))
+        .enumerate()
+        .for_each(|(k, slice)| {
+            for j in 0..=ny {
+                for i in 0..nx {
+                    let pos = origin
+                        + Vec3::new((i as f32 + 0.5) * dx, j as f32 * dx, (k as f32 + 0.5) * dx);
+                    let vel =
+                        velocity_from_arrays(old_u, old_v, old_w, nx, ny, nz, dx, origin, pos);
+                    let back_pos = pos - vel * dt;
+                    let rel = back_pos - origin;
+                    let fi = rel.x / dx - 0.5;
+                    let fj = rel.y / dx;
+                    let fk = rel.z / dx - 0.5;
+                    slice[i + nx * j] = sample_v(old_v, nx, ny, nz, fi, fj, fk);
+                }
+            }
+        });
+
+    // --- Advect w (on z-faces: nx x ny x (nz+1)) ---
+    grid.w.par_chunks_mut(nx).enumerate().for_each(|(jk, row)| {
+        let j = jk % ny;
+        let k = jk / ny;
+        for (i, row_val) in row.iter_mut().enumerate() {
+            let pos =
+                origin + Vec3::new((i as f32 + 0.5) * dx, (j as f32 + 0.5) * dx, k as f32 * dx);
+            let vel = velocity_from_arrays(old_u, old_v, old_w, nx, ny, nz, dx, origin, pos);
+            let back_pos = pos - vel * dt;
+            let rel = back_pos - origin;
+            let fi = rel.x / dx - 0.5;
+            let fj = rel.y / dx - 0.5;
+            let fk = rel.z / dx;
+            *row_val = sample_w(old_w, nx, ny, nz, fi, fj, fk);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -445,139 +541,153 @@ pub fn diffuse(grid: &mut FluidGrid, viscosity: f32, dt: f32) {
     // Clamp factor to ensure explicit stability (factor < 1/6 for 3D)
     let factor = factor.min(1.0 / 6.5);
 
-    // Diffuse u-field
+    // Diffuse u-field. Move the old buffer out (zero-copy via mem::take),
+    // allocate a fresh result buffer, parallelize z-slices via rayon. Each
+    // slice is independent under the explicit Jacobi update.
     {
-        let old = grid.u.clone();
         let nx1 = nx + 1;
-        for k in 0..nz {
-            for j in 0..ny {
-                for i in 0..nx1 {
-                    let c = old[i + nx1 * (j + ny * k)];
-                    let xm = if i > 0 {
-                        old[(i - 1) + nx1 * (j + ny * k)]
-                    } else {
-                        c
-                    };
-                    let xp = if i < nx1 - 1 {
-                        old[(i + 1) + nx1 * (j + ny * k)]
-                    } else {
-                        c
-                    };
-                    let ym = if j > 0 {
-                        old[i + nx1 * ((j - 1) + ny * k)]
-                    } else {
-                        c
-                    };
-                    let yp = if j < ny - 1 {
-                        old[i + nx1 * ((j + 1) + ny * k)]
-                    } else {
-                        c
-                    };
-                    let zm = if k > 0 {
-                        old[i + nx1 * (j + ny * (k - 1))]
-                    } else {
-                        c
-                    };
-                    let zp = if k < nz - 1 {
-                        old[i + nx1 * (j + ny * (k + 1))]
-                    } else {
-                        c
-                    };
-                    let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-                    grid.u[i + nx1 * (j + ny * k)] = c + factor * laplacian;
+        let old = std::mem::take(&mut grid.u);
+        let mut new = vec![0.0f32; nx1 * ny * nz];
+        new.par_chunks_mut(nx1 * ny)
+            .enumerate()
+            .for_each(|(k, slice)| {
+                for j in 0..ny {
+                    for i in 0..nx1 {
+                        let c = old[i + nx1 * (j + ny * k)];
+                        let xm = if i > 0 {
+                            old[(i - 1) + nx1 * (j + ny * k)]
+                        } else {
+                            c
+                        };
+                        let xp = if i < nx1 - 1 {
+                            old[(i + 1) + nx1 * (j + ny * k)]
+                        } else {
+                            c
+                        };
+                        let ym = if j > 0 {
+                            old[i + nx1 * ((j - 1) + ny * k)]
+                        } else {
+                            c
+                        };
+                        let yp = if j < ny - 1 {
+                            old[i + nx1 * ((j + 1) + ny * k)]
+                        } else {
+                            c
+                        };
+                        let zm = if k > 0 {
+                            old[i + nx1 * (j + ny * (k - 1))]
+                        } else {
+                            c
+                        };
+                        let zp = if k < nz - 1 {
+                            old[i + nx1 * (j + ny * (k + 1))]
+                        } else {
+                            c
+                        };
+                        let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+                        slice[i + nx1 * j] = c + factor * laplacian;
+                    }
                 }
-            }
-        }
+            });
+        grid.u = new;
     }
 
     // Diffuse v-field
     {
-        let old = grid.v.clone();
         let ny1 = ny + 1;
-        for k in 0..nz {
-            for j in 0..ny1 {
-                for i in 0..nx {
-                    let c = old[i + nx * (j + ny1 * k)];
-                    let xm = if i > 0 {
-                        old[(i - 1) + nx * (j + ny1 * k)]
-                    } else {
-                        c
-                    };
-                    let xp = if i < nx - 1 {
-                        old[(i + 1) + nx * (j + ny1 * k)]
-                    } else {
-                        c
-                    };
-                    let ym = if j > 0 {
-                        old[i + nx * ((j - 1) + ny1 * k)]
-                    } else {
-                        c
-                    };
-                    let yp = if j < ny1 - 1 {
-                        old[i + nx * ((j + 1) + ny1 * k)]
-                    } else {
-                        c
-                    };
-                    let zm = if k > 0 {
-                        old[i + nx * (j + ny1 * (k - 1))]
-                    } else {
-                        c
-                    };
-                    let zp = if k < nz - 1 {
-                        old[i + nx * (j + ny1 * (k + 1))]
-                    } else {
-                        c
-                    };
-                    let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-                    grid.v[i + nx * (j + ny1 * k)] = c + factor * laplacian;
+        let old = std::mem::take(&mut grid.v);
+        let mut new = vec![0.0f32; nx * ny1 * nz];
+        new.par_chunks_mut(nx * ny1)
+            .enumerate()
+            .for_each(|(k, slice)| {
+                for j in 0..ny1 {
+                    for i in 0..nx {
+                        let c = old[i + nx * (j + ny1 * k)];
+                        let xm = if i > 0 {
+                            old[(i - 1) + nx * (j + ny1 * k)]
+                        } else {
+                            c
+                        };
+                        let xp = if i < nx - 1 {
+                            old[(i + 1) + nx * (j + ny1 * k)]
+                        } else {
+                            c
+                        };
+                        let ym = if j > 0 {
+                            old[i + nx * ((j - 1) + ny1 * k)]
+                        } else {
+                            c
+                        };
+                        let yp = if j < ny1 - 1 {
+                            old[i + nx * ((j + 1) + ny1 * k)]
+                        } else {
+                            c
+                        };
+                        let zm = if k > 0 {
+                            old[i + nx * (j + ny1 * (k - 1))]
+                        } else {
+                            c
+                        };
+                        let zp = if k < nz - 1 {
+                            old[i + nx * (j + ny1 * (k + 1))]
+                        } else {
+                            c
+                        };
+                        let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+                        slice[i + nx * j] = c + factor * laplacian;
+                    }
                 }
-            }
-        }
+            });
+        grid.v = new;
     }
 
     // Diffuse w-field
     {
-        let old = grid.w.clone();
         let nz1 = nz + 1;
-        for k in 0..nz1 {
-            for j in 0..ny {
-                for i in 0..nx {
-                    let c = old[i + nx * (j + ny * k)];
-                    let xm = if i > 0 {
-                        old[(i - 1) + nx * (j + ny * k)]
-                    } else {
-                        c
-                    };
-                    let xp = if i < nx - 1 {
-                        old[(i + 1) + nx * (j + ny * k)]
-                    } else {
-                        c
-                    };
-                    let ym = if j > 0 {
-                        old[i + nx * ((j - 1) + ny * k)]
-                    } else {
-                        c
-                    };
-                    let yp = if j < ny - 1 {
-                        old[i + nx * ((j + 1) + ny * k)]
-                    } else {
-                        c
-                    };
-                    let zm = if k > 0 {
-                        old[i + nx * (j + ny * (k - 1))]
-                    } else {
-                        c
-                    };
-                    let zp = if k < nz1 - 1 {
-                        old[i + nx * (j + ny * (k + 1))]
-                    } else {
-                        c
-                    };
-                    let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-                    grid.w[i + nx * (j + ny * k)] = c + factor * laplacian;
+        let old = std::mem::take(&mut grid.w);
+        let mut new = vec![0.0f32; nx * ny * nz1];
+        new.par_chunks_mut(nx * ny)
+            .enumerate()
+            .for_each(|(k, slice)| {
+                for j in 0..ny {
+                    for i in 0..nx {
+                        let c = old[i + nx * (j + ny * k)];
+                        let xm = if i > 0 {
+                            old[(i - 1) + nx * (j + ny * k)]
+                        } else {
+                            c
+                        };
+                        let xp = if i < nx - 1 {
+                            old[(i + 1) + nx * (j + ny * k)]
+                        } else {
+                            c
+                        };
+                        let ym = if j > 0 {
+                            old[i + nx * ((j - 1) + ny * k)]
+                        } else {
+                            c
+                        };
+                        let yp = if j < ny - 1 {
+                            old[i + nx * ((j + 1) + ny * k)]
+                        } else {
+                            c
+                        };
+                        let zm = if k > 0 {
+                            old[i + nx * (j + ny * (k - 1))]
+                        } else {
+                            c
+                        };
+                        let zp = if k < nz1 - 1 {
+                            old[i + nx * (j + ny * (k + 1))]
+                        } else {
+                            c
+                        };
+                        let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+                        slice[i + nx * j] = c + factor * laplacian;
+                    }
                 }
-            }
-        }
+            });
+        grid.w = new;
     }
 }
 
@@ -762,53 +872,70 @@ pub fn project(grid: &mut FluidGrid, dt: f32) {
     let dx = grid.dx;
     let scale = dt / dx;
 
-    // Update interior u-faces (i=1..nx-1)
-    for k in 0..nz {
-        for j in 0..ny {
-            for i in 1..nx {
-                let left = grid.idx(i - 1, j, k);
-                let right = grid.idx(i, j, k);
-                if grid.cell_types[left] == CellType::Fluid
-                    || grid.cell_types[right] == CellType::Fluid
-                {
-                    let uidx = grid.idx_u(i, j, k);
-                    grid.u[uidx] -= scale * (grid.pressure[right] - grid.pressure[left]);
-                }
-            }
-        }
-    }
+    // Take immutable borrows of the cell types + pressure for the parallel
+    // closures (they need to read these while we mutably borrow each face
+    // field independently).
+    let cell_types: &[CellType] = &grid.cell_types;
+    let pressure: &[f32] = &grid.pressure;
+    let nx_cells = nx;
+    let ny_cells = ny;
 
-    // Update interior v-faces (j=1..ny-1)
-    for k in 0..nz {
-        for j in 1..ny {
-            for i in 0..nx {
-                let below = grid.idx(i, j - 1, k);
-                let above = grid.idx(i, j, k);
-                if grid.cell_types[below] == CellType::Fluid
-                    || grid.cell_types[above] == CellType::Fluid
-                {
-                    let vidx = grid.idx_v(i, j, k);
-                    grid.v[vidx] -= scale * (grid.pressure[above] - grid.pressure[below]);
+    // Update interior u-faces (i=1..nx-1). Each z-slice is independent.
+    let nx1 = nx + 1;
+    grid.u
+        .par_chunks_mut(nx1 * ny)
+        .enumerate()
+        .for_each(|(k, slice)| {
+            for j in 0..ny {
+                for i in 1..nx {
+                    let left = i - 1 + nx_cells * (j + ny_cells * k);
+                    let right = i + nx_cells * (j + ny_cells * k);
+                    if cell_types[left] == CellType::Fluid || cell_types[right] == CellType::Fluid {
+                        slice[i + nx1 * j] -= scale * (pressure[right] - pressure[left]);
+                    }
                 }
             }
-        }
-    }
+        });
 
-    // Update interior w-faces (k=1..nz-1)
-    for k in 1..nz {
-        for j in 0..ny {
-            for i in 0..nx {
-                let back = grid.idx(i, j, k - 1);
-                let front = grid.idx(i, j, k);
-                if grid.cell_types[back] == CellType::Fluid
-                    || grid.cell_types[front] == CellType::Fluid
-                {
-                    let widx = grid.idx_w(i, j, k);
-                    grid.w[widx] -= scale * (grid.pressure[front] - grid.pressure[back]);
+    // Update interior v-faces (j=1..ny-1). Each z-slice is independent.
+    let ny1 = ny + 1;
+    grid.v
+        .par_chunks_mut(nx * ny1)
+        .enumerate()
+        .for_each(|(k, slice)| {
+            for j in 1..ny {
+                for i in 0..nx {
+                    let below = i + nx_cells * ((j - 1) + ny_cells * k);
+                    let above = i + nx_cells * (j + ny_cells * k);
+                    if cell_types[below] == CellType::Fluid || cell_types[above] == CellType::Fluid
+                    {
+                        slice[i + nx * j] -= scale * (pressure[above] - pressure[below]);
+                    }
                 }
             }
-        }
-    }
+        });
+
+    // Update interior w-faces (k=1..nz-1). w is indexed differently — the
+    // (i,j,k) slot lives at row k of an `nx*ny` slice. Parallelize over k.
+    let nz1 = nz + 1;
+    let _ = nz1;
+    grid.w
+        .par_chunks_mut(nx * ny)
+        .enumerate()
+        .for_each(|(k, slice)| {
+            if k == 0 || k >= nz {
+                return;
+            }
+            for j in 0..ny {
+                for i in 0..nx {
+                    let back = i + nx_cells * (j + ny_cells * (k - 1));
+                    let front = i + nx_cells * (j + ny_cells * k);
+                    if cell_types[back] == CellType::Fluid || cell_types[front] == CellType::Fluid {
+                        slice[i + nx * j] -= scale * (pressure[front] - pressure[back]);
+                    }
+                }
+            }
+        });
 
     // Re-enforce domain boundary velocities
     enforce_boundary_velocities(grid);
@@ -822,11 +949,8 @@ pub fn project(grid: &mut FluidGrid, dt: f32) {
 pub fn step(grid: &mut FluidGrid, config: &FluidConfig) {
     let dt = config.dt;
 
-    // 1. Advection (semi-Lagrangian)
-    let (new_u, new_v, new_w) = advect(grid, dt);
-    grid.u = new_u;
-    grid.v = new_v;
-    grid.w = new_w;
+    // 1. Advection (semi-Lagrangian, in-place via scratch buffers)
+    advect_in_place(grid, dt);
 
     // 2. External forces (gravity + buoyancy)
     apply_forces(grid, config, dt);

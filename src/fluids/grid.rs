@@ -41,6 +41,15 @@ pub struct FluidGrid {
     pub density: Vec<f32>,
     pub level_set: Vec<f32>,
     pub cell_types: Vec<CellType>,
+
+    /// Scratch buffers for the advection step — swapped with `u/v/w` to avoid
+    /// per-step heap allocation. Sized to match `u/v/w` respectively.
+    #[doc(hidden)]
+    pub scratch_u: Vec<f32>,
+    #[doc(hidden)]
+    pub scratch_v: Vec<f32>,
+    #[doc(hidden)]
+    pub scratch_w: Vec<f32>,
 }
 
 /// Maximum allowed dimension per axis (prevents OOM).
@@ -74,6 +83,9 @@ impl FluidGrid {
             density: vec![0.0; cell_count],
             level_set: vec![0.0; cell_count],
             cell_types: vec![CellType::Air; cell_count],
+            scratch_u: vec![0.0; (nx + 1) * ny * nz],
+            scratch_v: vec![0.0; nx * (ny + 1) * nz],
+            scratch_w: vec![0.0; nx * ny * (nz + 1)],
         }
     }
 

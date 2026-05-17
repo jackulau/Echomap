@@ -1459,7 +1459,13 @@ mod tests {
     /// faster — a conservative bar that holds even on 2-core CI runners.
     ///
     /// Skipped if rayon reports < 2 threads available (single-core sandbox).
+    /// Gated with #[ignore] because it is a perf measurement: when `cargo test`
+    /// runs many test workers in parallel, the parallel run gets CPU-starved by
+    /// peer workers and the speedup ratio flakes. Run explicitly via
+    /// `cargo test --release --lib -- --ignored gas_solver_parallel_speedup`
+    /// or through the perf-regression script.
     #[test]
+    #[ignore]
     fn test_gas_solver_parallel_speedup() {
         if rayon::current_num_threads() < 2 {
             eprintln!("skipping: rayon pool has < 2 threads");

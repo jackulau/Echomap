@@ -1,13 +1,14 @@
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Triangle {
     pub vertices: [Vertex; 3],
 }
@@ -32,7 +33,7 @@ impl Triangle {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Mesh {
     pub triangles: Vec<Triangle>,
 }

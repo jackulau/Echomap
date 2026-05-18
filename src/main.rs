@@ -32,7 +32,7 @@ mod app {
     use echomap::gas::GasSimulation;
     use echomap::robot::RobotManager;
     use echomap::scene::Scene;
-    use echomap::ui::ViewportState;
+    use echomap::ui::{AppStatus, ViewportState};
     use eframe::egui;
 
     pub struct EchoMapApp {
@@ -43,6 +43,8 @@ mod app {
         robot_manager: RobotManager,
         viewport: ViewportState,
         show_settings: bool,
+        show_about: bool,
+        status: AppStatus,
         bridge_client: SimBridgeClient,
         bridge_server: Option<SimBridgeServer>,
         agent_server_config: AgentServerConfig,
@@ -53,7 +55,8 @@ mod app {
     }
 
     impl EchoMapApp {
-        pub fn new(_cc: &eframe::CreationContext<'_>, boxing: bool) -> Self {
+        pub fn new(cc: &eframe::CreationContext<'_>, boxing: bool) -> Self {
+            cc.egui_ctx.set_visuals(egui::Visuals::dark());
             let agent_server_config = AgentServerConfig::default();
 
             if boxing {
@@ -104,6 +107,8 @@ mod app {
                     robot_manager,
                     viewport,
                     show_settings: false,
+                    show_about: false,
+                    status: AppStatus::default(),
                     bridge_client,
                     bridge_server: Some(bridge_server),
                     agent_server_config,
@@ -135,6 +140,8 @@ mod app {
                 robot_manager: RobotManager::default(),
                 viewport: ViewportState::default(),
                 show_settings: false,
+                show_about: false,
+                status: AppStatus::default(),
                 bridge_client,
                 bridge_server: retained_bridge,
                 agent_server_config,
@@ -161,6 +168,9 @@ mod app {
             echomap::ui::menu_bar(
                 ctx,
                 &mut self.show_settings,
+                &mut self.show_about,
+                &mut self.status,
+                &mut self.simulation,
                 &mut self.scene,
                 &mut self.viewport,
             );
@@ -204,7 +214,14 @@ mod app {
                 &self.activity_log,
                 &self.bridge_client,
             );
-            echomap::ui::status_bar(ctx, &self.viewport, &self.scene, &self.robot_manager);
+            echomap::ui::status_bar(
+                ctx,
+                &self.viewport,
+                &self.scene,
+                &self.robot_manager,
+                &self.simulation,
+                &self.status,
+            );
 
             // Step robot simulation (skip when agent server owns stepping via bridge)
             if self.agent_server_handle.is_none() {
@@ -220,6 +237,10 @@ mod app {
                     &mut self.fluid_sim,
                     &mut self.gas_sim,
                 );
+            }
+
+            if self.show_about {
+                echomap::ui::about_window(ctx, &mut self.show_about);
             }
 
             // Request continuous repainting when demo agent or agent server is running.

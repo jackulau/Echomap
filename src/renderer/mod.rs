@@ -3,14 +3,24 @@ use glam::Vec3;
 use crate::fluids::grid::FluidGrid;
 use crate::gas::grid::GasGrid;
 
+pub mod listener_viz;
 pub mod ray_debug;
 pub mod surface_heatmap;
+pub use listener_viz::{
+    capture_listener_energy, normalized_spl, pulse_radius, render_listener_pulse, spl_color,
+    DEFAULT_LISTENER_CAPTURE_RADIUS,
+};
 pub use ray_debug::{
     remaining_energy_at, render_ray_paths_debug, sample_path_indices, DEFAULT_DEBUG_RAY_COUNT,
 };
 pub use surface_heatmap::{
     energy_to_log_db, face_energies, render_surface_overlay, viridis_color, HeatmapMode,
 };
+
+/// Default listener capture_radius doc — `capture_radius` controls how much of
+/// the scene's energy grid is integrated into the listener's pulse.
+pub const LISTENER_CAPTURE_RADIUS_DOC: &str =
+    "capture_radius defaults to 0.5m; pulse + shell expand visually with normalized SPL";
 
 /// State toggle for ray-path debug visualization. When `show_debug_rays = false`
 /// the renderer short-circuits with zero perf cost (see `ray_debug` module).

@@ -8,6 +8,90 @@ pub use surface_heatmap::{
     energy_to_log_db, face_energies, render_surface_overlay, viridis_color, HeatmapMode,
 };
 
+/// Octave-band center frequencies used by the acoustic sim. `Broadband` averages
+/// across all 6 bands. Bands match standard octave centers (Hz): 125, 250, 500,
+/// 1000, 2000, 4000.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FrequencyBand {
+    #[default]
+    Broadband,
+    Hz125,
+    Hz250,
+    Hz500,
+    Hz1k,
+    Hz2k,
+    Hz4k,
+}
+
+impl FrequencyBand {
+    /// All 6 narrowband variants in canonical order. Useful for iterating
+    /// per-band grids when averaging or picking a specific band.
+    pub const ALL_NARROW: [FrequencyBand; 6] = [
+        FrequencyBand::Hz125,
+        FrequencyBand::Hz250,
+        FrequencyBand::Hz500,
+        FrequencyBand::Hz1k,
+        FrequencyBand::Hz2k,
+        FrequencyBand::Hz4k,
+    ];
+
+    /// Octave center frequency in Hz. Broadband returns `None`.
+    pub fn center_hz(self) -> Option<f32> {
+        match self {
+            FrequencyBand::Broadband => None,
+            FrequencyBand::Hz125 => Some(125.0),
+            FrequencyBand::Hz250 => Some(250.0),
+            FrequencyBand::Hz500 => Some(500.0),
+            FrequencyBand::Hz1k => Some(1000.0),
+            FrequencyBand::Hz2k => Some(2000.0),
+            FrequencyBand::Hz4k => Some(4000.0),
+        }
+    }
+
+    /// Index into a `[f32;6]` per-band array. Broadband returns `None`.
+    pub fn narrow_index(self) -> Option<usize> {
+        match self {
+            FrequencyBand::Broadband => None,
+            FrequencyBand::Hz125 => Some(0),
+            FrequencyBand::Hz250 => Some(1),
+            FrequencyBand::Hz500 => Some(2),
+            FrequencyBand::Hz1k => Some(3),
+            FrequencyBand::Hz2k => Some(4),
+            FrequencyBand::Hz4k => Some(5),
+        }
+    }
+
+    /// Short human label for UI selectors.
+    pub fn label(self) -> &'static str {
+        match self {
+            FrequencyBand::Broadband => "All",
+            FrequencyBand::Hz125 => "125 Hz",
+            FrequencyBand::Hz250 => "250 Hz",
+            FrequencyBand::Hz500 => "500 Hz",
+            FrequencyBand::Hz1k => "1 kHz",
+            FrequencyBand::Hz2k => "2 kHz",
+            FrequencyBand::Hz4k => "4 kHz",
+        }
+    }
+}
+
+/// Sample energy from a grid point through the lens of a selected band.
+///
+/// Today `GridPoint::energy` is a scalar (broadband by construction). Until
+/// goal 005 lands per-band `[f32;6]` energy arrays, narrowband picks return
+/// the same scalar so the renderer wiring is stable. Once 005 ships, this
+/// helper updates to index into the array; callers stay unchanged.
+pub fn sample_band_energy(gp: &crate::acoustics::GridPoint, band: FrequencyBand) -> f32 {
+    let _ = band;
+    gp.energy
+}
+
+/// Compute broadband-equivalent energy by averaging across all narrow bands.
+/// Until per-band data exists this returns the scalar `gp.energy` directly.
+pub fn broadband_energy(gp: &crate::acoustics::GridPoint) -> f32 {
+    sample_band_energy(gp, FrequencyBand::Broadband)
+}
+
 /// Visualization mode for fluid slice rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FluidVisualizationMode {
@@ -662,6 +746,84 @@ mod tests {
         let point = Vec3::new(2.0, 0.0, 0.0);
         cam.zoom_toward(point, 4.0);
         assert!(cam.target.x > 0.0);
+    }
+
+    #[test]
+    fn test_frequency_band_default_is_broadband() {
+        assert_eq!(FrequencyBand::default(), FrequencyBand::Broadband);
+    }
+
+    #[test]
+    fn test_frequency_band_all_narrow_has_six_entries() {
+        assert_eq!(FrequencyBand::ALL_NARROW.len(), 6);
+    }
+
+    #[test]
+    fn test_frequency_band_narrow_indices_zero_through_five() {
+        for (i, band) in FrequencyBand::ALL_NARROW.iter().enumerate() {
+            assert_eq!(band.narrow_index(), Some(i));
+        }
+    }
+
+    #[test]
+    fn test_frequency_band_broadband_has_no_index() {
+        assert_eq!(FrequencyBand::Broadband.narrow_index(), None);
+        assert_eq!(FrequencyBand::Broadband.center_hz(), None);
+    }
+
+    #[test]
+    fn test_frequency_band_centers_are_octaves() {
+        // Each narrow band's center should be 2x the previous one.
+        let centers: Vec<f32> = FrequencyBand::ALL_NARROW
+            .iter()
+            .map(|b| b.center_hz().expect("narrow band has center"))
+            .collect();
+        for w in centers.windows(2) {
+            let ratio = w[1] / w[0];
+            assert!(
+                (ratio - 2.0).abs() < 0.01,
+                "expected octave spacing, got ratio {ratio}"
+            );
+        }
+        assert!((centers[0] - 125.0).abs() < 0.1);
+        assert!((centers[5] - 4000.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_frequency_band_labels_distinct() {
+        let mut labels: Vec<&str> = std::iter::once(FrequencyBand::Broadband.label())
+            .chain(FrequencyBand::ALL_NARROW.iter().map(|b| b.label()))
+            .collect();
+        labels.sort_unstable();
+        let count = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), count, "labels should be unique");
+    }
+
+    #[test]
+    fn test_sample_band_energy_returns_scalar_until_per_band_lands() {
+        // Until goal 005 adds [f32;6] energy, sample_band_energy should return the
+        // scalar GridPoint::energy regardless of band selection.
+        let gp = crate::acoustics::GridPoint {
+            position: Vec3::ZERO,
+            energy: 0.73,
+        };
+        for &band in FrequencyBand::ALL_NARROW.iter() {
+            assert!((sample_band_energy(&gp, band) - 0.73).abs() < 1e-6);
+        }
+        assert!((sample_band_energy(&gp, FrequencyBand::Broadband) - 0.73).abs() < 1e-6);
+        assert!((broadband_energy(&gp) - 0.73).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_sample_band_energy_with_zero_energy_grid_point() {
+        let gp = crate::acoustics::GridPoint {
+            position: Vec3::ZERO,
+            energy: 0.0,
+        };
+        for &band in FrequencyBand::ALL_NARROW.iter() {
+            assert_eq!(sample_band_energy(&gp, band), 0.0);
+        }
     }
 
     #[test]

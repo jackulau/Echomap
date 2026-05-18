@@ -125,6 +125,12 @@ pub struct ViewportState {
     pub hover_label: Option<(egui::Pos2, String)>,
     /// Outliner search filter (case-insensitive substring).
     pub outliner_filter: String,
+    /// Active frequency band for acoustic heatmap rendering. `Broadband`
+    /// averages all 6 octave bands; specific bands select one of [125, 250,
+    /// 500, 1k, 2k, 4k] Hz.
+    pub current_band: crate::renderer::FrequencyBand,
+    /// Surface-overlay vs floor-grid heatmap mode.
+    pub heatmap_mode: crate::renderer::HeatmapMode,
 }
 
 impl Default for ViewportState {
@@ -163,6 +169,8 @@ impl Default for ViewportState {
             show_listeners: true,
             hover_label: None,
             outliner_filter: String::new(),
+            current_band: crate::renderer::FrequencyBand::default(),
+            heatmap_mode: crate::renderer::HeatmapMode::default(),
         }
     }
 }

@@ -3,10 +3,18 @@ use glam::Vec3;
 use crate::fluids::grid::FluidGrid;
 use crate::gas::grid::GasGrid;
 
+pub mod ray_debug;
 pub mod surface_heatmap;
+pub use ray_debug::{
+    remaining_energy_at, render_ray_paths_debug, sample_path_indices, DEFAULT_DEBUG_RAY_COUNT,
+};
 pub use surface_heatmap::{
     energy_to_log_db, face_energies, render_surface_overlay, viridis_color, HeatmapMode,
 };
+
+/// State toggle for ray-path debug visualization. When `show_debug_rays = false`
+/// the renderer short-circuits with zero perf cost (see `ray_debug` module).
+pub const RAY_DEBUG_STATE_DOC: &str = "show_debug_rays toggles ray-path overlay";
 
 /// Octave-band center frequencies used by the acoustic sim. `Broadband` averages
 /// across all 6 bands. Bands match standard octave centers (Hz): 125, 250, 500,

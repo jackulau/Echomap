@@ -131,6 +131,10 @@ pub struct ViewportState {
     pub current_band: crate::renderer::FrequencyBand,
     /// Surface-overlay vs floor-grid heatmap mode.
     pub heatmap_mode: crate::renderer::HeatmapMode,
+    /// Toggle for ray-path debug visualization. False = zero perf cost.
+    pub show_debug_rays: bool,
+    /// Number of ray paths to sample for debug viz when `show_debug_rays = true`.
+    pub debug_ray_count: usize,
 }
 
 impl Default for ViewportState {
@@ -171,6 +175,8 @@ impl Default for ViewportState {
             outliner_filter: String::new(),
             current_band: crate::renderer::FrequencyBand::default(),
             heatmap_mode: crate::renderer::HeatmapMode::default(),
+            show_debug_rays: false,
+            debug_ray_count: crate::renderer::DEFAULT_DEBUG_RAY_COUNT,
         }
     }
 }

@@ -3,9 +3,14 @@ use glam::Vec3;
 use crate::fluids::grid::FluidGrid;
 use crate::gas::grid::GasGrid;
 
+pub mod legend;
 pub mod listener_viz;
 pub mod ray_debug;
 pub mod surface_heatmap;
+pub use legend::{
+    render_color_legend, render_material_legend, ColorLegend, MaterialLegendRow,
+    DEFAULT_LEGEND_DB_RANGE,
+};
 pub use listener_viz::{
     capture_listener_energy, normalized_spl, pulse_radius, render_listener_pulse, spl_color,
     DEFAULT_LISTENER_CAPTURE_RADIUS,

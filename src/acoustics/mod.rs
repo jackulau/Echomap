@@ -1,4 +1,4 @@
 pub mod ray;
-mod simulation;
+pub mod simulation;
 
-pub use simulation::SimulationState;
+pub use simulation::{GridPoint, SimulationResult, SimulationState};

@@ -3,6 +3,11 @@ use glam::Vec3;
 use crate::fluids::grid::FluidGrid;
 use crate::gas::grid::GasGrid;
 
+pub mod surface_heatmap;
+pub use surface_heatmap::{
+    energy_to_log_db, face_energies, render_surface_overlay, viridis_color, HeatmapMode,
+};
+
 /// Visualization mode for fluid slice rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FluidVisualizationMode {

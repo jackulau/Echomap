@@ -8,18 +8,58 @@ use glam::Vec3;
 /// entry, with headroom for refraction-branched paths.
 pub const DEFAULT_MAX_PATH_LENGTH: usize = 64;
 
+/// Per-octave-band energy (125/250/500/1k/2k/4k Hz). Mirrors
+/// `FrequencyBands.as_array()` ordering so per-band absorption/attenuation
+/// indices align trivially.
+pub type EnergyBands = [f32; 6];
+
+/// Broadcast a scalar to all 6 bands.
+#[inline]
+pub fn energy_uniform(e: f32) -> EnergyBands {
+    [e; 6]
+}
+
+/// Maximum across bands — used as the survival criterion (a ray is alive if
+/// any band still carries energy above threshold).
+#[inline]
+pub fn energy_max(e: &EnergyBands) -> f32 {
+    e.iter().copied().fold(0.0_f32, f32::max)
+}
+
+/// Sum across bands. Useful as a single "total energy" proxy for display.
+#[inline]
+pub fn energy_sum(e: &EnergyBands) -> f32 {
+    e.iter().sum()
+}
+
+/// Multiply every band by a scalar, in place.
+#[inline]
+pub fn energy_scale(e: &mut EnergyBands, s: f32) {
+    for x in e.iter_mut() {
+        *x *= s;
+    }
+}
+
+/// Return a scaled copy.
+#[inline]
+pub fn energy_scaled(e: &EnergyBands, s: f32) -> EnergyBands {
+    let mut out = *e;
+    energy_scale(&mut out, s);
+    out
+}
+
 #[allow(dead_code)]
 pub struct RefractionResult {
     pub reflected_direction: Vec3,
-    pub reflected_energy: f32,
+    pub reflected_energy: [f32; 6],
     pub transmitted_direction: Option<Vec3>,
-    pub transmitted_energy: f32,
+    pub transmitted_energy: [f32; 6],
 }
 
 pub struct AcousticRay {
     pub origin: Vec3,
     pub direction: Vec3,
-    pub energy: f32,
+    pub energy: [f32; 6],
     pub bounces: u32,
     pub path: Vec<Vec3>,
     pub current_medium: MediumProperties,
@@ -42,6 +82,26 @@ impl AcousticRay {
         Self {
             origin,
             direction: direction.normalize(),
+            energy: energy_uniform(energy),
+            bounces: 0,
+            path: vec![origin],
+            current_medium: medium,
+            frequency_hz: 1000.0,
+            max_path_length: DEFAULT_MAX_PATH_LENGTH,
+        }
+    }
+
+    /// Construct from an already-banded energy vector. Used when refraction
+    /// branches a transmitted ray that inherits the parent's per-band energy.
+    pub fn new_with_bands(
+        origin: Vec3,
+        direction: Vec3,
+        energy: EnergyBands,
+        medium: MediumProperties,
+    ) -> Self {
+        Self {
+            origin,
+            direction: direction.normalize(),
             energy,
             bounces: 0,
             path: vec![origin],
@@ -49,6 +109,14 @@ impl AcousticRay {
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
         }
+    }
+
+    /// Largest-band energy. Used by the simulation loop as the "is the ray
+    /// still meaningfully alive?" criterion — a ray with any band above
+    /// threshold should keep tracing.
+    #[inline]
+    pub fn energy_max(&self) -> f32 {
+        energy_max(&self.energy)
     }
 
     /// Re-derive the speed of sound for the current medium from a measured
@@ -114,8 +182,10 @@ impl AcousticRay {
     }
 
     pub fn reflect(&mut self, hit: &RayHit, material: &AcousticMaterial) {
-        let absorption = material.absorption.average();
-        self.energy *= 1.0 - absorption;
+        let absorption = material.absorption.as_array();
+        for b in 0..6 {
+            self.energy[b] *= 1.0 - absorption[b];
+        }
         self.origin = hit.point + hit.normal * 1e-4;
         self.direction = self.direction - 2.0 * self.direction.dot(hit.normal) * hit.normal;
         self.direction = self.direction.normalize();
@@ -141,7 +211,7 @@ impl AcousticRay {
         if (z1 + z2).abs() < 1e-10 {
             return Some(RefractionResult {
                 reflected_direction: self.direction,
-                reflected_energy: 0.0,
+                reflected_energy: energy_uniform(0.0),
                 transmitted_direction: Some(self.direction),
                 transmitted_energy: self.energy,
             });
@@ -170,7 +240,7 @@ impl AcousticRay {
                 reflected_direction: reflected_dir.normalize(),
                 reflected_energy: self.energy,
                 transmitted_direction: None,
-                transmitted_energy: 0.0,
+                transmitted_energy: energy_uniform(0.0),
             });
         }
 
@@ -198,15 +268,18 @@ impl AcousticRay {
 
         Some(RefractionResult {
             reflected_direction: reflected_dir.normalize(),
-            reflected_energy: self.energy * r,
+            reflected_energy: energy_scaled(&self.energy, r),
             transmitted_direction: Some(transmitted_dir.normalize()),
-            transmitted_energy: self.energy * t,
+            transmitted_energy: energy_scaled(&self.energy, t),
         })
     }
 
     /// Apply volumetric attenuation based on distance traveled in the current
-    /// medium. Uses the frequency-dependent attenuation coefficient from
-    /// `current_medium.attenuation`.
+    /// medium. Bands ≠ frequency_hz — D1 keeps the historical behaviour of
+    /// using the ray's nominal `frequency_hz` to pick a single scalar
+    /// dB/m, then applies that uniformly across all 6 bands. Per-band
+    /// attenuation is a downstream optimisation; preserving the scalar path
+    /// keeps the existing test_volumetric_attenuation_* contracts intact.
     pub fn apply_volumetric_attenuation(&mut self, distance: f32) {
         let atten_db_per_m = self
             .current_medium
@@ -215,7 +288,7 @@ impl AcousticRay {
         // Convert dB attenuation to linear factor: factor = 10^(-atten*distance/10)
         let total_atten_db = atten_db_per_m * distance;
         let factor = 10.0_f32.powf(-total_atten_db / 10.0);
-        self.energy *= factor;
+        energy_scale(&mut self.energy, factor);
     }
 }
 
@@ -240,7 +313,7 @@ mod tests {
         let ray = AcousticRay {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: Vec3::new(0.0, -1.0, 0.0),
-            energy: 1.0,
+            energy: energy_uniform(1.0),
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
@@ -270,14 +343,14 @@ mod tests {
         let expected_t = 1.0 - expected_r;
 
         assert!(
-            (result.reflected_energy - expected_r).abs() < 0.001,
+            (result.reflected_energy[0] - expected_r).abs() < 0.001,
             "Reflected energy: expected {expected_r}, got {}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
         assert!(
-            (result.transmitted_energy - expected_t).abs() < 0.001,
+            (result.transmitted_energy[0] - expected_t).abs() < 0.001,
             "Transmitted energy: expected {expected_t}, got {}",
-            result.transmitted_energy
+            result.transmitted_energy[0]
         );
     }
 
@@ -290,7 +363,7 @@ mod tests {
         let ray = AcousticRay {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
-            energy: 1.0,
+            energy: energy_uniform(1.0),
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
@@ -309,7 +382,7 @@ mod tests {
             "Air-to-water at 45 deg should be total reflection (sin_theta2 > 1)"
         );
         assert!(
-            (result.reflected_energy - 1.0).abs() < 0.001,
+            (result.reflected_energy[0] - 1.0).abs() < 0.001,
             "All energy should be reflected in TIR"
         );
     }
@@ -322,7 +395,7 @@ mod tests {
         let ray = AcousticRay {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
-            energy: 1.0,
+            energy: energy_uniform(1.0),
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
@@ -360,7 +433,7 @@ mod tests {
         let ray = AcousticRay {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
-            energy: 1.0,
+            energy: energy_uniform(1.0),
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: water(),
@@ -458,7 +531,7 @@ mod tests {
         let ray = AcousticRay {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
-            energy: 1.0,
+            energy: energy_uniform(1.0),
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
@@ -477,14 +550,14 @@ mod tests {
             "Air to water at 20 deg (beyond critical) should be total internal reflection"
         );
         assert!(
-            (result.reflected_energy - 1.0).abs() < 0.001,
+            (result.reflected_energy[0] - 1.0).abs() < 0.001,
             "All energy should be reflected in TIR, got {}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
         assert!(
-            result.transmitted_energy.abs() < 0.001,
+            result.transmitted_energy[0].abs() < 0.001,
             "No energy should be transmitted in TIR, got {}",
-            result.transmitted_energy
+            result.transmitted_energy[0]
         );
     }
 
@@ -500,7 +573,7 @@ mod tests {
         let ray = AcousticRay {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: Vec3::new(0.0, -1.0, 0.0),
-            energy: 1.0,
+            energy: energy_uniform(1.0),
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
@@ -519,26 +592,26 @@ mod tests {
 
         // R should be very close to 1 (massive impedance mismatch)
         assert!(
-            (result.reflected_energy - expected_r).abs() < 0.001,
+            (result.reflected_energy[0] - expected_r).abs() < 0.001,
             "Fresnel R at normal incidence: expected {expected_r:.6}, got {:.6}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
 
         // T = 1 - R should be very small
         let expected_t = 1.0 - expected_r;
         assert!(
-            (result.transmitted_energy - expected_t).abs() < 0.001,
+            (result.transmitted_energy[0] - expected_t).abs() < 0.001,
             "Fresnel T at normal incidence: expected {expected_t:.6}, got {:.6}",
-            result.transmitted_energy
+            result.transmitted_energy[0]
         );
 
         // Verify R + T = 1.0
         assert!(
-            (result.reflected_energy + result.transmitted_energy - 1.0).abs() < 1e-5,
+            (result.reflected_energy[0] + result.transmitted_energy[0] - 1.0).abs() < 1e-5,
             "Energy not conserved: R={} + T={} = {}",
-            result.reflected_energy,
-            result.transmitted_energy,
-            result.reflected_energy + result.transmitted_energy
+            result.reflected_energy[0],
+            result.transmitted_energy[0],
+            result.reflected_energy[0] + result.transmitted_energy[0]
         );
     }
 
@@ -555,7 +628,7 @@ mod tests {
             let ray = AcousticRay {
                 origin: Vec3::new(0.0, 1.0, 0.0),
                 direction: dir,
-                energy: 1.0,
+                energy: energy_uniform(1.0),
                 bounces: 0,
                 path: vec![Vec3::new(0.0, 1.0, 0.0)],
                 current_medium: air(),
@@ -564,12 +637,12 @@ mod tests {
             };
 
             let result = ray.refract(normal, &water_med).unwrap();
-            let total = result.reflected_energy + result.transmitted_energy;
+            let total = result.reflected_energy[0] + result.transmitted_energy[0];
             assert!(
                 (total - 1.0).abs() < 1e-4,
                 "Energy not conserved at {angle_deg} deg: R={} + T={} = {total}",
-                result.reflected_energy,
-                result.transmitted_energy
+                result.reflected_energy[0],
+                result.transmitted_energy[0]
             );
         }
     }
@@ -584,19 +657,19 @@ mod tests {
         );
         ray.frequency_hz = 1000.0;
 
-        let initial_energy = ray.energy;
+        let initial_energy = ray.energy[0];
         ray.apply_volumetric_attenuation(10.0); // 10m in water
 
         assert!(
-            ray.energy < initial_energy,
+            ray.energy[0] < initial_energy,
             "Energy should decrease after attenuation: {} >= {}",
-            ray.energy,
+            ray.energy[0],
             initial_energy
         );
         assert!(
-            ray.energy > 0.0,
+            ray.energy[0] > 0.0,
             "Energy should remain positive, got {}",
-            ray.energy
+            ray.energy[0]
         );
     }
 
@@ -623,10 +696,10 @@ mod tests {
         ray_high.apply_volumetric_attenuation(100.0);
 
         assert!(
-            ray_high.energy < ray_low.energy,
+            ray_high.energy[0] < ray_low.energy[0],
             "High freq ({}) should attenuate more than low freq ({}) in water",
-            ray_high.energy,
-            ray_low.energy
+            ray_high.energy[0],
+            ray_low.energy[0]
         );
     }
 
@@ -637,7 +710,7 @@ mod tests {
         let ray = AcousticRay {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
-            energy: 1.0,
+            energy: energy_uniform(1.0),
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
             current_medium: air(),
@@ -652,16 +725,16 @@ mod tests {
 
         // R should be ~0 (same impedance)
         assert!(
-            result.reflected_energy.abs() < 1e-4,
+            result.reflected_energy[0].abs() < 1e-4,
             "Same medium: R should be ~0, got {}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
 
         // T should be ~1
         assert!(
-            (result.transmitted_energy - 1.0).abs() < 1e-4,
+            (result.transmitted_energy[0] - 1.0).abs() < 1e-4,
             "Same medium: T should be ~1, got {}",
-            result.transmitted_energy
+            result.transmitted_energy[0]
         );
 
         // Transmitted direction should match incident direction
@@ -713,9 +786,9 @@ mod tests {
 
         // Energy should be reduced by absorption (0.1 average)
         assert!(
-            (ray.energy - 0.9).abs() < 0.01,
+            (ray.energy[0] - 0.9).abs() < 0.01,
             "Energy after reflect: expected 0.9, got {}",
-            ray.energy
+            ray.energy[0]
         );
 
         // Direction should be reflected (x was +1, normal is -x, reflected should be -x)

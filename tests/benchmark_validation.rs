@@ -55,10 +55,11 @@ fn test_full_scenario_underwater() {
     let z_water = scenario.scene.background_medium.impedance as f64;
     let expected_r = analytical::fresnel_reflection(z_air, z_water);
 
-    assert_relative_eq!(result.reflected_energy as f64, expected_r, 0.01);
+    assert_relative_eq!(result.reflected_energy[0] as f64, expected_r, 0.01);
 
-    // Energy should be conserved: R + T = 1.0
-    let total = result.reflected_energy + result.transmitted_energy;
+    // Energy should be conserved: R + T = 1.0 (per band — bands are uniform
+    // at construction, so band 0 is representative)
+    let total = result.reflected_energy[0] + result.transmitted_energy[0];
     assert!(
         (total - 1.0).abs() < 1e-4,
         "Energy should be conserved: R + T = {total}"

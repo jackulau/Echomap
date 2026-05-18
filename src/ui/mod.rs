@@ -2020,9 +2020,15 @@ pub fn viewport_3d(
                     }
                 }
 
+                // Visualise the band-summed total. SimulationResult now
+                // carries per-band data; the 2D viewport collapses it to a
+                // single scalar so the heat map stays meaningful until a
+                // band-aware UI surfaces it explicitly.
+                let max_total = result.max_energy.iter().sum::<f32>();
                 for gp in &result.energy_grid {
-                    if gp.energy > 0.01 {
-                        let color = energy_to_color(gp.energy, result.max_energy);
+                    let total = gp.energy_total();
+                    if total > 0.01 {
+                        let color = energy_to_color(total, max_total);
                         let p = project_3d(gp.position, cam, center, scale);
                         if rect.contains(p) {
                             painter.circle_filled(p, 2.0, color);

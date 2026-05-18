@@ -28,7 +28,7 @@ mod tests {
         let ray = AcousticRay {
             origin,
             direction: Vec3::new(0.0, -1.0, 0.0),
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: air(),
@@ -46,13 +46,13 @@ mod tests {
         let expected_r = ((z_water - z_air) / (z_water + z_air)).powi(2);
 
         // R should match Fresnel within 1%
-        assert_relative_eq!(result.reflected_energy, expected_r, 0.01);
+        assert_relative_eq!(result.reflected_energy[0], expected_r, 0.01);
 
         // R should be approximately 0.999 (massive impedance mismatch)
         assert!(
-            result.reflected_energy > 0.99,
+            result.reflected_energy[0] > 0.99,
             "R should be ~0.999, got {}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
     }
 
@@ -67,7 +67,7 @@ mod tests {
         let ray = AcousticRay {
             origin,
             direction: dir,
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: air(),
@@ -113,7 +113,7 @@ mod tests {
         let ray = AcousticRay {
             origin,
             direction: dir,
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: air(),
@@ -132,14 +132,14 @@ mod tests {
             "Air to water at 20 deg (beyond critical) should give total internal reflection"
         );
         assert!(
-            (result.reflected_energy - 1.0).abs() < 0.001,
+            (result.reflected_energy[0] - 1.0).abs() < 0.001,
             "All energy should be reflected in TIR, got {}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
         assert!(
-            result.transmitted_energy.abs() < 0.001,
+            result.transmitted_energy[0].abs() < 0.001,
             "No energy should be transmitted in TIR, got {}",
-            result.transmitted_energy
+            result.transmitted_energy[0]
         );
     }
 
@@ -158,7 +158,7 @@ mod tests {
             let ray = AcousticRay {
                 origin,
                 direction: dir,
-                energy: 1.0,
+                energy: crate::acoustics::ray::energy_uniform(1.0),
                 bounces: 0,
                 path: vec![origin],
                 current_medium: air(),
@@ -167,7 +167,7 @@ mod tests {
             };
 
             let result = ray.refract(normal, &water_med).unwrap();
-            let total = result.reflected_energy + result.transmitted_energy;
+            let total = result.reflected_energy[0] + result.transmitted_energy[0];
 
             // Within 0.1% of incident energy
             assert_relative_eq!(total as f64, 1.0_f64, 0.001);
@@ -187,7 +187,7 @@ mod tests {
         let ray_water = AcousticRay {
             origin,
             direction,
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: air(),
@@ -218,7 +218,7 @@ mod tests {
         let ray_glass = AcousticRay {
             origin,
             direction,
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: air(),
@@ -237,10 +237,10 @@ mod tests {
 
         // Higher impedance mismatch => higher reflection coefficient
         assert!(
-            result_glass.reflected_energy >= result_water.reflected_energy,
+            result_glass.reflected_energy[0] >= result_water.reflected_energy[0],
             "Glass reflection ({}) should be >= water reflection ({})",
-            result_glass.reflected_energy,
-            result_water.reflected_energy
+            result_glass.reflected_energy[0],
+            result_water.reflected_energy[0]
         );
     }
 
@@ -252,7 +252,7 @@ mod tests {
         let mut ray = AcousticRay {
             origin,
             direction: Vec3::new(1.0, 0.0, 0.0),
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: water(),
@@ -275,7 +275,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut prev_energy = ray.energy;
+        let mut prev_energy = ray.energy[0];
 
         for i in 0..5 {
             let hit = RayHit {
@@ -288,24 +288,24 @@ mod tests {
             ray.reflect(&hit, &material);
 
             assert!(
-                ray.energy < prev_energy,
+                ray.energy[0] < prev_energy,
                 "Energy should decrease after bounce {}: {} >= {}",
                 i + 1,
-                ray.energy,
+                ray.energy[0],
                 prev_energy
             );
             assert!(
-                ray.energy > 0.0,
+                ray.energy[0] > 0.0,
                 "Energy should remain positive after bounce {}, got {}",
                 i + 1,
-                ray.energy
+                ray.energy[0]
             );
 
-            prev_energy = ray.energy;
+            prev_energy = ray.energy[0];
         }
 
         // After 5 bounces with 10% absorption each: energy = (0.9)^5 = 0.59049
-        assert_relative_eq!(ray.energy as f64, 0.9_f64.powi(5), 0.01);
+        assert_relative_eq!(ray.energy[0] as f64, 0.9_f64.powi(5), 0.01);
     }
 
     /// Ray at 12.5 degrees (just below critical angle 13.4 degrees).
@@ -318,7 +318,7 @@ mod tests {
         let ray = AcousticRay {
             origin,
             direction: dir,
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: air(),
@@ -340,9 +340,9 @@ mod tests {
         // Near the critical angle, reflection coefficient should be high
         // (approaching 1.0 as we near critical angle of 13.4 deg)
         assert!(
-            result.reflected_energy > 0.99,
+            result.reflected_energy[0] > 0.99,
             "Near-critical angle should have high reflection, got {}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
 
         // Compare against a smaller angle (5 degrees) - reflection should be higher near critical
@@ -351,7 +351,7 @@ mod tests {
         let ray_small = AcousticRay {
             origin,
             direction: small_dir,
-            energy: 1.0,
+            energy: crate::acoustics::ray::energy_uniform(1.0),
             bounces: 0,
             path: vec![origin],
             current_medium: air(),
@@ -361,10 +361,10 @@ mod tests {
         let result_small = ray_small.refract(normal, &water_med).unwrap();
 
         assert!(
-            result.reflected_energy >= result_small.reflected_energy,
+            result.reflected_energy[0] >= result_small.reflected_energy[0],
             "Reflection at 12.5 deg ({}) should be >= reflection at 5 deg ({})",
-            result.reflected_energy,
-            result_small.reflected_energy
+            result.reflected_energy[0],
+            result_small.reflected_energy[0]
         );
     }
 }

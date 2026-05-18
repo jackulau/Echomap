@@ -2,7 +2,7 @@ use glam::Vec3;
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
-use super::ray::{AcousticRay, RayHit};
+use super::ray::{energy_max, energy_sum, energy_uniform, AcousticRay, EnergyBands, RayHit};
 use crate::scene::material::MediumProperties;
 use crate::scene::{Scene, SceneObject};
 
@@ -29,13 +29,25 @@ impl Default for SimulationConfig {
 pub struct SimulationResult {
     pub energy_grid: Vec<GridPoint>,
     pub ray_paths: Vec<Vec<Vec3>>,
-    pub max_energy: f32,
+    /// Per-band peak energy across the grid. Index ordering matches
+    /// `FrequencyBands.as_array()` (125/250/500/1k/2k/4k Hz).
+    pub max_energy: EnergyBands,
 }
 
 #[derive(Clone)]
 pub struct GridPoint {
     pub position: Vec3,
-    pub energy: f32,
+    pub energy: EnergyBands,
+}
+
+impl GridPoint {
+    /// Single scalar that summarises the band vector for plain visualisations
+    /// (heatmaps that don't yet know about bands). Uses the band-sum so
+    /// brighter cells still mean "more total acoustic energy passes here".
+    #[inline]
+    pub fn energy_total(&self) -> f32 {
+        energy_sum(&self.energy)
+    }
 }
 
 #[derive(Default)]
@@ -86,11 +98,17 @@ impl SimulationState {
         result.energy_grid =
             build_energy_grid(min, max, self.config.grid_resolution, &result.ray_paths);
 
-        result.max_energy = result
-            .energy_grid
-            .iter()
-            .map(|p| p.energy)
-            .fold(0.0_f32, f32::max);
+        // Per-band max over the grid. Initialised to zeros so an empty grid
+        // produces an all-zero max_energy vector rather than `f32::MIN`.
+        let mut max_energy: EnergyBands = energy_uniform(0.0);
+        for gp in &result.energy_grid {
+            for b in 0..6 {
+                if gp.energy[b] > max_energy[b] {
+                    max_energy[b] = gp.energy[b];
+                }
+            }
+        }
+        result.max_energy = max_energy;
 
         self.result = Some(result);
         self.running = false;
@@ -136,14 +154,18 @@ fn trace_ray(
     let mut all_paths: Vec<Vec3> = Vec::new();
 
     loop {
-        // Trace the current ray until it terminates
-        while ray.bounces < config.max_bounces && ray.energy > config.energy_threshold {
+        // Trace the current ray until it terminates. The survival criterion
+        // is "any band still carries energy above threshold" — using the max
+        // band keeps the old scalar contract while letting per-band
+        // attenuation diverge in future deliverables.
+        while ray.bounces < config.max_bounces && energy_max(&ray.energy) > config.energy_threshold
+        {
             if let Some((hit, obj)) = find_nearest_hit(&ray, scene) {
                 // Apply volumetric attenuation for distance traveled in current medium
                 ray.apply_volumetric_attenuation(hit.distance);
 
                 // Check if energy dropped below threshold after attenuation
-                if ray.energy <= config.energy_threshold {
+                if energy_max(&ray.energy) <= config.energy_threshold {
                     break;
                 }
 
@@ -154,21 +176,25 @@ fn trace_ray(
                     Some(target_medium) => {
                         // Medium boundary: compute refraction
                         let material = &obj.material;
-                        let absorption = material.absorption.average();
+                        let absorption = material.absorption.as_array();
 
                         if let Some(refraction) = ray.refract(hit.normal, &target_medium) {
-                            // Apply surface absorption to both reflected and transmitted
-                            let reflected_energy = refraction.reflected_energy * (1.0 - absorption);
-                            let transmitted_energy =
-                                refraction.transmitted_energy * (1.0 - absorption);
+                            // Apply surface absorption per band to both reflected and
+                            // transmitted energy vectors.
+                            let mut reflected_energy: EnergyBands = refraction.reflected_energy;
+                            let mut transmitted_energy: EnergyBands = refraction.transmitted_energy;
+                            for b in 0..6 {
+                                reflected_energy[b] *= 1.0 - absorption[b];
+                                transmitted_energy[b] *= 1.0 - absorption[b];
+                            }
 
                             // Queue transmitted ray if not total internal reflection
                             // and energy is above threshold and we have room
                             if let Some(transmitted_dir) = refraction.transmitted_direction {
-                                if transmitted_energy > config.energy_threshold
+                                if energy_max(&transmitted_energy) > config.energy_threshold
                                     && pending.len() < MAX_PENDING_RAYS
                                 {
-                                    let mut transmitted_ray = AcousticRay::new(
+                                    let mut transmitted_ray = AcousticRay::new_with_bands(
                                         hit.point + transmitted_dir * 1e-4,
                                         transmitted_dir,
                                         transmitted_energy,
@@ -327,7 +353,7 @@ fn build_energy_grid(
         .collect()
 }
 
-fn compute_point_energy(point: Vec3, radius: f32, ray_paths: &[Vec<Vec3>]) -> f32 {
+fn compute_point_energy(point: Vec3, radius: f32, ray_paths: &[Vec<Vec3>]) -> EnergyBands {
     let r2 = radius * radius;
     let mut energy = 0.0_f32;
 
@@ -341,7 +367,11 @@ fn compute_point_energy(point: Vec3, radius: f32, ray_paths: &[Vec<Vec3>]) -> f3
         }
     }
 
-    energy
+    // D1 stores per-band grids but does not yet carry per-band energy
+    // along ray paths — broadcast the scalar contribution to every band so
+    // downstream visualisers see identical heat maps until a later
+    // deliverable populates per-band path samples.
+    energy_uniform(energy)
 }
 
 fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
@@ -482,13 +512,13 @@ mod tests {
         let refraction = ray.refract(Vec3::new(-1.0, 0.0, 0.0), &water()).unwrap();
 
         // The transmitted energy through the boundary is tiny (~0.1%)
-        let energy_through_water = refraction.transmitted_energy;
+        let energy_through_water = refraction.transmitted_energy[0];
 
         // Compare: same ray just traveling through air (no boundary)
         let mut ray_air_only = AcousticRay::new(Vec3::ZERO, Vec3::X, 1.0, MediumProperties::air());
         ray_air_only.frequency_hz = 1000.0;
         ray_air_only.apply_volumetric_attenuation(5.0); // 5m of air travel
-        let energy_air_path = ray_air_only.energy;
+        let energy_air_path = ray_air_only.energy[0];
 
         assert!(
             energy_through_water < energy_air_path,
@@ -525,11 +555,11 @@ mod tests {
             "Should be total internal reflection at 20 deg air-to-water"
         );
         assert!(
-            (result.reflected_energy - 1.0).abs() < 0.001,
+            (result.reflected_energy[0] - 1.0).abs() < 0.001,
             "All energy should be reflected in TIR"
         );
         assert!(
-            result.transmitted_energy.abs() < 0.001,
+            result.transmitted_energy[0].abs() < 0.001,
             "No transmitted energy in TIR"
         );
 
@@ -709,30 +739,30 @@ mod tests {
 
         // ~99.9% of energy should be reflected
         assert!(
-            (result.reflected_energy - analytical_r).abs() < 0.001,
+            (result.reflected_energy[0] - analytical_r).abs() < 0.001,
             "Reflected energy should be {analytical_r:.6}, got {:.6}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
         assert!(
-            result.reflected_energy > 0.998,
+            result.reflected_energy[0] > 0.998,
             "Reflection coefficient should be > 99.8%, got {:.4}",
-            result.reflected_energy
+            result.reflected_energy[0]
         );
 
         // ~0.1% transmitted into water
         assert!(
-            (result.transmitted_energy - analytical_t).abs() < 0.001,
+            (result.transmitted_energy[0] - analytical_t).abs() < 0.001,
             "Transmitted energy should be {analytical_t:.6}, got {:.6}",
-            result.transmitted_energy
+            result.transmitted_energy[0]
         );
         assert!(
-            result.transmitted_energy < 0.002,
+            result.transmitted_energy[0] < 0.002,
             "Transmission coefficient should be < 0.2%, got {:.4}",
-            result.transmitted_energy
+            result.transmitted_energy[0]
         );
 
         // Energy conservation: R + T = 1.0
-        let total = result.reflected_energy + result.transmitted_energy;
+        let total = result.reflected_energy[0] + result.transmitted_energy[0];
         assert!(
             (total - 1.0).abs() < 1e-5,
             "Energy not conserved: R + T = {total:.8}"
@@ -839,14 +869,14 @@ mod tests {
         let result1 = ray1.refract(Vec3::new(-1.0, 0.0, 0.0), &glass_med).unwrap();
 
         assert!(
-            (result1.reflected_energy - r_air_glass).abs() < 0.001,
+            (result1.reflected_energy[0] - r_air_glass).abs() < 0.001,
             "Ray air->glass R: expected {r_air_glass:.6}, got {:.6}",
-            result1.reflected_energy
+            result1.reflected_energy[0]
         );
 
         // Second boundary: ray in glass hitting air
         if let Some(transmitted_dir) = result1.transmitted_direction {
-            let ray2 = AcousticRay::new(
+            let ray2 = AcousticRay::new_with_bands(
                 Vec3::new(0.1, 0.0, 0.0),
                 transmitted_dir,
                 result1.transmitted_energy,
@@ -855,7 +885,7 @@ mod tests {
             let result2 = ray2.refract(Vec3::new(-1.0, 0.0, 0.0), &air_med).unwrap();
 
             // After both boundaries, transmitted energy should match analytical
-            let actual_total_t = result2.transmitted_energy;
+            let actual_total_t = result2.transmitted_energy[0];
             // Use relative tolerance since values are very small
             assert!(
                 actual_total_t < 0.001,
@@ -1103,43 +1133,43 @@ mod tests {
                 let result = ray.refract(Vec3::Y, m2).unwrap();
 
                 // Check energy conservation: R + T = initial
-                let total = result.reflected_energy + result.transmitted_energy;
+                let total = result.reflected_energy[0] + result.transmitted_energy[0];
                 assert!(
                     (total - initial_energy).abs() < 1e-4,
                     "Energy not conserved for {} -> {} at {angle_deg} deg: \
                      R={:.6} + T={:.6} = {total:.6} (expected {initial_energy})",
                     m1.name,
                     m2.name,
-                    result.reflected_energy,
-                    result.transmitted_energy
+                    result.reflected_energy[0],
+                    result.transmitted_energy[0]
                 );
 
                 // Both energies must be non-negative
                 assert!(
-                    result.reflected_energy >= 0.0,
+                    result.reflected_energy[0] >= 0.0,
                     "Reflected energy must be >= 0 for {} -> {} at {angle_deg} deg: {}",
                     m1.name,
                     m2.name,
-                    result.reflected_energy
+                    result.reflected_energy[0]
                 );
                 assert!(
-                    result.transmitted_energy >= 0.0,
+                    result.transmitted_energy[0] >= 0.0,
                     "Transmitted energy must be >= 0 for {} -> {} at {angle_deg} deg: {}",
                     m1.name,
                     m2.name,
-                    result.transmitted_energy
+                    result.transmitted_energy[0]
                 );
 
                 // If TIR, all energy reflected
                 if result.transmitted_direction.is_none() {
                     assert!(
-                        (result.reflected_energy - initial_energy).abs() < 1e-4,
+                        (result.reflected_energy[0] - initial_energy).abs() < 1e-4,
                         "TIR should reflect all energy for {} -> {} at {angle_deg} deg",
                         m1.name,
                         m2.name
                     );
                     assert!(
-                        result.transmitted_energy.abs() < 1e-4,
+                        result.transmitted_energy[0].abs() < 1e-4,
                         "TIR should have zero transmitted energy for {} -> {} at {angle_deg} deg",
                         m1.name,
                         m2.name
@@ -1161,21 +1191,21 @@ mod tests {
             let mut ray = AcousticRay::new(Vec3::ZERO, Vec3::X, 1.0, med.clone());
             ray.frequency_hz = 1000.0;
 
-            let e_before = ray.energy;
+            let e_before = ray.energy[0];
             ray.apply_volumetric_attenuation(50.0); // 50 meters
 
             assert!(
-                ray.energy <= e_before,
+                ray.energy[0] <= e_before,
                 "Volumetric attenuation should never increase energy in {}: \
                  before={e_before}, after={}",
                 med.name,
-                ray.energy
+                ray.energy[0]
             );
             assert!(
-                ray.energy > 0.0,
+                ray.energy[0] > 0.0,
                 "Energy should remain positive after attenuation in {}: {}",
                 med.name,
-                ray.energy
+                ray.energy[0]
             );
         }
 
@@ -1240,21 +1270,21 @@ mod tests {
         ray_long.apply_volumetric_attenuation(100.0); // 100 meters
 
         assert!(
-            ray_long.energy < ray_short.energy,
+            ray_long.energy[0] < ray_short.energy[0],
             "Longer distance should produce lower energy: short={}, long={}",
-            ray_short.energy,
-            ray_long.energy
+            ray_short.energy[0],
+            ray_long.energy[0]
         );
 
         // Both should be positive
-        assert!(ray_short.energy > 0.0);
-        assert!(ray_long.energy > 0.0);
+        assert!(ray_short.energy[0] > 0.0);
+        assert!(ray_long.energy[0] > 0.0);
 
         // Short distance should still be close to 1.0 (air has low attenuation)
         assert!(
-            ray_short.energy > 0.99,
+            ray_short.energy[0] > 0.99,
             "1m in air at 1kHz should barely attenuate: {}",
-            ray_short.energy
+            ray_short.energy[0]
         );
     }
 }

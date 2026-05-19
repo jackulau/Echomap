@@ -2,6 +2,8 @@ use glam::Vec3;
 
 use crate::fluids::grid::FluidGrid;
 use crate::gas::grid::GasGrid;
+use crate::robot::RobotManager;
+use crate::scene::Scene;
 
 /// Visualization mode for fluid slice rendering.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -196,6 +198,100 @@ impl Camera {
                 self.distance * self.pitch.cos() * self.yaw.sin(),
             );
     }
+
+    /// Project a world-space point to screen coordinates.
+    /// Thin method wrapper around [`project_3d`] for ergonomic call sites.
+    pub fn project_world_to_screen(
+        &self,
+        world: Vec3,
+        screen_center: egui::Pos2,
+        scale: f32,
+    ) -> egui::Pos2 {
+        project_3d(world, self, screen_center, scale)
+    }
+
+    /// Unproject a screen coordinate to a world-space ray (origin, direction).
+    /// Thin method wrapper around [`screen_to_ray`].
+    pub fn screen_ray_to_world(
+        &self,
+        screen: egui::Pos2,
+        screen_center: egui::Pos2,
+        scale: f32,
+    ) -> (Vec3, Vec3) {
+        screen_to_ray(screen, self, screen_center, scale)
+    }
+}
+
+/// A single renderable primitive emitted by [`collect_draw_primitives`].
+///
+/// Pure data — no painter dependency — so it can be inventoried in headless
+/// tests without spinning up an egui context. The viewport renderer is free
+/// to ignore or augment this list; the goal is to give tests a ground-truth
+/// "what would be drawn" view of the scene.
+#[derive(Clone, Debug)]
+pub struct DrawPrimitive {
+    pub kind: DrawPrimitiveKind,
+    /// Stable identifier — for [`DrawPrimitiveKind::RobotLink`] this is the
+    /// link's `name` from `LinkDefinition`; for `SceneMesh` it is the
+    /// `SceneObject::name`.
+    pub tag: String,
+    /// World-space anchor (mesh centroid or link origin) for sort/clip checks.
+    pub world_pos: Vec3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DrawPrimitiveKind {
+    SceneMesh,
+    RobotLink,
+}
+
+/// Inventory the primitives a frame would draw without actually painting.
+///
+/// Emits one entry per visible scene mesh and one per robot link with a
+/// computed world pose. Used by `tests/renderer_drawlist.rs` to assert the
+/// renderer pipeline produces non-empty output for a minimal scene+robot.
+pub fn collect_draw_primitives(scene: &Scene, robots: &RobotManager) -> Vec<DrawPrimitive> {
+    let mut out = Vec::new();
+
+    for mesh in &scene.meshes {
+        if !mesh.visible {
+            continue;
+        }
+        let centroid = mesh_centroid(&mesh.mesh);
+        out.push(DrawPrimitive {
+            kind: DrawPrimitiveKind::SceneMesh,
+            tag: mesh.name.clone(),
+            world_pos: centroid,
+        });
+    }
+
+    for robot in &robots.robots {
+        let base = robot.base_pose_mat4();
+        for (link_idx, link) in robot.definition.links.iter().enumerate() {
+            let local = robot
+                .state
+                .link_poses
+                .get(link_idx)
+                .map(glam::Mat4::from_cols_array)
+                .unwrap_or(glam::Mat4::IDENTITY);
+            let world = base * local;
+            out.push(DrawPrimitive {
+                kind: DrawPrimitiveKind::RobotLink,
+                tag: link.name.clone(),
+                world_pos: world.w_axis.truncate(),
+            });
+        }
+    }
+
+    out
+}
+
+fn mesh_centroid(mesh: &crate::scene::Mesh) -> Vec3 {
+    if mesh.triangles.is_empty() {
+        return Vec3::ZERO;
+    }
+    let (min, max) = mesh.bounds();
+    (min + max) * 0.5
 }
 
 pub fn project_3d(
@@ -666,5 +762,127 @@ mod tests {
         let bright = shade_color(base, light, light, 0.2);
         let dark = shade_color(base, -light, light, 0.2);
         assert!(bright.r() > dark.r());
+    }
+
+    // ---- D3: renderer math invariants (tolerance ≤ 1e-4) ----
+
+    const D3_TOL: f32 = 1e-4;
+    const D3_SCALE: f32 = 50.0;
+
+    fn d3_camera() -> Camera {
+        // Deterministic camera independent of Default tweaks.
+        let mut cam = Camera {
+            position: Vec3::ZERO,
+            target: Vec3::ZERO,
+            up: Vec3::Y,
+            distance: 10.0,
+            yaw: 45.0_f32.to_radians(),
+            pitch: 30.0_f32.to_radians(),
+            focus_target: None,
+            focus_distance: None,
+        };
+        cam.update_position();
+        cam
+    }
+
+    #[test]
+    fn project_world_to_screen_target_lands_at_center() {
+        let cam = d3_camera();
+        let screen_center = egui::Pos2::new(640.0, 360.0);
+        let p = cam.project_world_to_screen(cam.target, screen_center, D3_SCALE);
+        // The camera target is straight along the forward axis with zero
+        // lateral offset, so it must land *exactly* on screen_center.
+        assert!((p.x - screen_center.x).abs() < D3_TOL);
+        assert!((p.y - screen_center.y).abs() < D3_TOL);
+    }
+
+    #[test]
+    fn screen_ray_to_world_center_yields_forward() {
+        let cam = d3_camera();
+        let screen_center = egui::Pos2::new(640.0, 360.0);
+        let (origin, dir) = cam.screen_ray_to_world(screen_center, screen_center, D3_SCALE);
+        // Ray origin is the camera; direction is the forward axis.
+        assert!((origin - cam.position).length() < D3_TOL);
+        let forward = (cam.target - cam.position).normalize();
+        assert!((dir - forward).length() < D3_TOL);
+    }
+
+    #[test]
+    fn project_then_unproject_round_trip_preserves_point() {
+        let cam = d3_camera();
+        let screen_center = egui::Pos2::new(640.0, 360.0);
+        // Pick a world point ahead of the camera with some lateral offset.
+        let forward = (cam.target - cam.position).normalize();
+        let right = forward.cross(cam.up).normalize();
+        let up = right.cross(forward).normalize();
+        let depth = 4.0_f32;
+        let lateral = 0.3_f32;
+        let vert = -0.2_f32;
+        let world = cam.position + forward * depth + right * lateral + up * vert;
+
+        let screen = cam.project_world_to_screen(world, screen_center, D3_SCALE);
+        let (ro, rd) = cam.screen_ray_to_world(screen, screen_center, D3_SCALE);
+
+        // Intersect the recovered ray with the plane perpendicular to forward
+        // passing through `world`. Distance along the ray to that plane:
+        //   t = dot(world - ro, forward) / dot(rd, forward)
+        let t = (world - ro).dot(forward) / rd.dot(forward);
+        let recovered = ro + rd * t;
+        assert!(
+            (recovered - world).length() < D3_TOL,
+            "round-trip drift {:?} > tol {}",
+            (recovered - world).length(),
+            D3_TOL
+        );
+    }
+
+    #[test]
+    fn orbit_position_matches_spherical_math_at_known_angles() {
+        // distance=8, yaw=0, pitch=0 → position is +X * distance, target ZERO.
+        let mut cam = d3_camera();
+        cam.target = Vec3::ZERO;
+        cam.distance = 8.0;
+        cam.yaw = 0.0;
+        cam.pitch = 0.0;
+        cam.update_position();
+        let expected = Vec3::new(8.0, 0.0, 0.0);
+        assert!(
+            (cam.position - expected).length() < D3_TOL,
+            "got {:?}, expected {:?}",
+            cam.position,
+            expected
+        );
+
+        // distance=5, yaw=90°, pitch=0 → position is +Z * distance.
+        cam.distance = 5.0;
+        cam.yaw = std::f32::consts::FRAC_PI_2;
+        cam.pitch = 0.0;
+        cam.update_position();
+        let expected = Vec3::new(0.0, 0.0, 5.0);
+        assert!(
+            (cam.position - expected).length() < D3_TOL,
+            "yaw=90° got {:?}, expected {:?}",
+            cam.position,
+            expected
+        );
+
+        // Distance to target is preserved for any (yaw, pitch).
+        for yaw in [0.0_f32, 1.0, 2.5, -1.3] {
+            for pitch in [-1.0_f32, -0.25, 0.0, 0.7, 1.4] {
+                cam.distance = 12.5;
+                cam.target = Vec3::new(0.5, -0.2, 1.1);
+                cam.yaw = yaw;
+                cam.pitch = pitch;
+                cam.update_position();
+                let d = (cam.position - cam.target).length();
+                assert!(
+                    (d - 12.5).abs() < D3_TOL,
+                    "distance drift {} at yaw={} pitch={}",
+                    (d - 12.5).abs(),
+                    yaw,
+                    pitch
+                );
+            }
+        }
     }
 }

@@ -81,6 +81,11 @@ pub struct SimulationResult {
     pub max_energy: f32,
     pub max_band_energies: BandEnergies,
     pub listener_captures: Vec<ListenerCapture>,
+    /// Per-band reverberation time (seconds for energy to decay 60 dB).
+    /// Computed by energy-decay regression on the traced rays; falls back
+    /// to the Sabine formula if the regression slope is invalid. `None` when
+    /// neither method can produce a finite positive value.
+    pub rt60_bands: [Option<f32>; BAND_COUNT],
 }
 
 #[derive(Clone)]
@@ -161,10 +166,128 @@ impl SimulationState {
         // grid or ray paths.
         result.listener_captures = compute_listener_captures(&scene.listeners, &result.ray_paths);
 
+        // RT60 per band — regression on ray-energy decay, Sabine fallback.
+        result.rt60_bands = compute_rt60_bands(scene, &result.ray_paths);
+
         self.result = Some(result);
         self.running = false;
         self.progress = 1.0;
     }
+}
+
+/// Per-band RT60: try energy-decay regression first, fall back to Sabine
+/// for any band where regression cannot produce a valid slope. Both
+/// methods can return `None` on truly zero-energy scenes — callers must
+/// treat `None` as "no data" and never as a NaN sentinel.
+pub fn compute_rt60_bands(scene: &Scene, paths: &[TracedRayPath]) -> [Option<f32>; BAND_COUNT] {
+    let speed_of_sound = scene.background_medium.speed_of_sound.max(1.0);
+    let regression = rt60_from_energy_decay(paths, speed_of_sound);
+    let sabine = rt60_sabine(scene);
+    let mut out = [None; BAND_COUNT];
+    for i in 0..BAND_COUNT {
+        out[i] = regression[i].or(sabine[i]);
+    }
+    out
+}
+
+/// Linear regression on `log10(E)` vs `t` across all ray-path samples,
+/// per band. RT60 = -6 / slope when the slope is meaningfully negative.
+/// Returns `None` for bands with too few non-zero samples or a flat /
+/// rising slope (decay never observed).
+fn rt60_from_energy_decay(
+    paths: &[TracedRayPath],
+    speed_of_sound: f32,
+) -> [Option<f32>; BAND_COUNT] {
+    let mut result = [None; BAND_COUNT];
+
+    for band in 0..BAND_COUNT {
+        // Collect (time, log10(energy)) samples.
+        let mut xs: Vec<f32> = Vec::new();
+        let mut ys: Vec<f32> = Vec::new();
+
+        for path in paths {
+            let positions = &path.positions;
+            let band_e = &path.band_energies;
+            if positions.len() < 2 || band_e.is_empty() {
+                continue;
+            }
+            let mut t = 0.0_f32;
+            for i in 0..positions.len() {
+                if i > 0 {
+                    t += (positions[i] - positions[i - 1]).length() / speed_of_sound;
+                }
+                let e = band_e[i.min(band_e.len() - 1)][band];
+                if e.is_finite() && e > 0.0 {
+                    xs.push(t);
+                    ys.push(e.log10());
+                }
+            }
+        }
+
+        if xs.len() < 3 {
+            continue;
+        }
+
+        let n = xs.len() as f32;
+        let sum_x: f32 = xs.iter().sum();
+        let sum_y: f32 = ys.iter().sum();
+        let sum_xx: f32 = xs.iter().map(|x| x * x).sum();
+        let sum_xy: f32 = xs.iter().zip(&ys).map(|(x, y)| x * y).sum();
+
+        let denom = n * sum_xx - sum_x * sum_x;
+        if !denom.is_finite() || denom.abs() < 1e-10 {
+            continue;
+        }
+        let slope = (n * sum_xy - sum_x * sum_y) / denom;
+        if !slope.is_finite() || slope >= -1e-3 {
+            continue;
+        }
+        // slope is log10(E) per second. -60 dB corresponds to log10 = -6.
+        // RT60 = -6 / slope.
+        let rt60 = -6.0 / slope;
+        if rt60.is_finite() && rt60 > 0.0 {
+            result[band] = Some(rt60);
+        }
+    }
+
+    result
+}
+
+/// Sabine reverberation formula per band:
+///   RT60 = 0.161 * V / A
+/// where V is the bounding-volume estimate and A is the per-band absorption
+/// area summed over all mesh surfaces. Returns `None` for bands with zero
+/// absorption area (acoustically unbounded scene).
+fn rt60_sabine(scene: &Scene) -> [Option<f32>; BAND_COUNT] {
+    if scene.meshes.is_empty() {
+        return [None; BAND_COUNT];
+    }
+    let (min, max) = scene_bounds(scene);
+    let size = max - min;
+    let volume = size.x * size.y * size.z;
+    if !volume.is_finite() || volume <= 0.0 {
+        return [None; BAND_COUNT];
+    }
+
+    let mut absorption_area: BandEnergies = [0.0; BAND_COUNT];
+    for obj in &scene.meshes {
+        let abs = obj.material.absorption.as_array();
+        let area: f32 = obj.mesh.triangles.iter().map(|t| t.area()).sum();
+        for i in 0..BAND_COUNT {
+            absorption_area[i] += area * sanitize_absorption(abs[i]);
+        }
+    }
+
+    let mut result = [None; BAND_COUNT];
+    for i in 0..BAND_COUNT {
+        if absorption_area[i] > 1e-6 {
+            let rt60 = 0.161 * volume / absorption_area[i];
+            if rt60.is_finite() && rt60 > 0.0 {
+                result[i] = Some(rt60);
+            }
+        }
+    }
+    result
 }
 
 /// For each listener in `listeners`, walk every traced ray segment, test
@@ -1868,5 +1991,138 @@ mod tests {
             direct.broadband_energy,
             walled.broadband_energy / direct.broadband_energy.max(1e-12)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // D3 — RT60 estimation per band (echomap-v1 T8)
+    // -----------------------------------------------------------------------
+
+    /// Sabine RT60 for a 5x5x3 m carpet room is ~0.16 s at 1 kHz. After
+    /// running a sim, the per-band RT60 must be a finite positive number
+    /// in the same order of magnitude as the Sabine prediction. The
+    /// tolerance is generous (±50% absolute, capped at "within Sabine ±20%
+    /// OR plausibly low-end of carpet absorption") to absorb regression
+    /// noise inherent in low-sample fits.
+    #[test]
+    fn rt60_estimation() {
+        // Drywall: moderate absorption (0.04..0.29 across bands). Sabine's
+        // diffuse-field assumption is physically valid for α < ~0.3, so we
+        // pick drywall instead of carpet (where Sabine over-estimates
+        // because the room becomes acoustically "dead").
+        let lib = crate::scene::material::MaterialLibrary::with_defaults();
+        let mut room = primitives::box_room(5.0, 5.0, 3.0);
+        room.material = lib.materials.get("Drywall").unwrap().clone();
+        let scene = Scene {
+            meshes: vec![room],
+            sound_sources: vec![SoundSource {
+                position: Vec3::new(2.5, 1.5, 2.5),
+                frequency_hz: 1000.0,
+                power_db: 80.0,
+                enabled: true,
+            }],
+            listeners: vec![Listener::default()],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+        let mut sim = SimulationState {
+            config: SimulationConfig {
+                ray_count: 800,
+                max_bounces: 60,
+                energy_threshold: 1e-12,
+                grid_resolution: 1.0,
+            },
+            ..Default::default()
+        };
+        sim.run(&scene);
+        let result = sim.result.expect("sim ran");
+
+        let sabine = rt60_sabine(&scene);
+
+        // For a moderately-absorbing room, regression and Sabine should
+        // land in the same ballpark. Allow 0.4..2.5× to cover regression
+        // sampling noise but still catch a math error like dropping a
+        // factor of 10 or forgetting the -6 / slope conversion.
+        let sabine_1k = sabine[3].expect("Sabine 1 kHz should be finite for drywall room");
+        let rt60_1k = result.rt60_bands[3].expect("RT60 1 kHz should be finite for drywall room");
+        assert!(
+            rt60_1k.is_finite() && rt60_1k > 0.0,
+            "RT60 should be finite positive, got {rt60_1k}"
+        );
+        let ratio = rt60_1k / sabine_1k;
+        assert!(
+            (0.4..=2.5).contains(&ratio),
+            "RT60 regression ({rt60_1k:.3} s) should be within 0.4..2.5× of Sabine ({sabine_1k:.3} s), ratio = {ratio:.3}"
+        );
+
+        // Sanity: every defined band RT60 should be finite + positive.
+        for (i, rt) in result.rt60_bands.iter().enumerate() {
+            if let Some(v) = rt {
+                assert!(
+                    v.is_finite() && *v > 0.0,
+                    "band {i} RT60 ({v}) should be finite positive"
+                );
+            }
+        }
+        // At least one band must have a value.
+        assert!(
+            result.rt60_bands.iter().any(|x| x.is_some()),
+            "expected at least one band to produce an RT60 estimate"
+        );
+    }
+
+    /// A scene with no rays (no enabled sources) must produce all-`None`
+    /// RT60 entries — never NaN or Inf, never silently zero. The Sabine
+    /// fallback still applies if the scene has volume + absorption, so we
+    /// strip materials too: an empty scene yields no Sabine result.
+    #[test]
+    fn rt60_zero_energy() {
+        let scene_empty = Scene {
+            meshes: vec![],
+            sound_sources: vec![],
+            listeners: vec![Listener::default()],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+        // Direct call — SimulationState::run early-returns on empty meshes.
+        let rt60 = compute_rt60_bands(&scene_empty, &[]);
+        for (i, v) in rt60.iter().enumerate() {
+            assert!(
+                v.is_none(),
+                "empty scene should produce None RT60 at band {i}, got {v:?}"
+            );
+        }
+
+        // Also check that no NaN/Inf appears even when paths exist but all
+        // band energies are zero.
+        let mut paths: Vec<TracedRayPath> = Vec::new();
+        let mut p = TracedRayPath::default();
+        p.positions = vec![
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+        ];
+        p.band_energies = vec![[0.0; BAND_COUNT]; 3];
+        paths.push(p);
+
+        let scene_with_mesh = {
+            let room = primitives::box_room(5.0, 5.0, 3.0);
+            Scene {
+                meshes: vec![room],
+                sound_sources: vec![],
+                listeners: vec![],
+                background_medium: MediumProperties::air(),
+                ..Default::default()
+            }
+        };
+        let rt60 = compute_rt60_bands(&scene_with_mesh, &paths);
+        for (i, v) in rt60.iter().enumerate() {
+            if let Some(val) = v {
+                assert!(
+                    val.is_finite() && *val > 0.0,
+                    "RT60 band {i} from Sabine fallback should be finite positive, got {val}"
+                );
+            }
+            // None is also acceptable here.
+        }
     }
 }

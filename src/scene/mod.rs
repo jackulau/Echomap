@@ -109,6 +109,11 @@ pub struct SoundSource {
 pub struct Listener {
     pub position: Vec3,
     pub name: String,
+    /// Radius around the listener within which ray segments deposit energy.
+    /// Default 0.3 m matches a head-sized capture sphere — small enough that
+    /// noisy near-source rays don't dominate, large enough that bounced
+    /// energy is reliably sampled.
+    pub capture_radius: f32,
 }
 
 impl Default for SoundSource {
@@ -127,6 +132,7 @@ impl Default for Listener {
         Self {
             position: Vec3::new(0.0, 0.0, 1.0),
             name: "Listener 1".into(),
+            capture_radius: 0.3,
         }
     }
 }

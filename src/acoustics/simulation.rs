@@ -4,7 +4,23 @@ use std::f32::consts::PI;
 
 use super::ray::{broadband, sanitize_absorption, AcousticRay, BandEnergies, RayHit, BAND_COUNT};
 use crate::scene::material::MediumProperties;
-use crate::scene::{Scene, SceneObject};
+use crate::scene::{Listener, Scene, SceneObject};
+
+/// Reference energy for SPL conversion. Choosing 1.0 means a source emitting
+/// `power_db = 80` produces `linear = 1e8`, and `energy_to_spl(1e8) = 80 dB`
+/// — the round-trip preserves the input convention. Useful as a relative scale.
+pub const SPL_REFERENCE: f32 = 1.0;
+
+/// Convert linear acoustic energy to dB SPL: `10 * log10(E / SPL_REFERENCE)`.
+/// Returns `None` for zero / negative / non-finite energy. The UI surfaces
+/// `None` as "No energy received".
+pub fn energy_to_spl(energy: f32) -> Option<f32> {
+    if energy.is_finite() && energy > 0.0 {
+        Some(10.0 * (energy / SPL_REFERENCE).log10())
+    } else {
+        None
+    }
+}
 
 #[derive(Clone)]
 pub struct SimulationConfig {
@@ -43,12 +59,28 @@ impl TracedRayPath {
     }
 }
 
+/// Per-listener capture summary: how much energy reached the listener
+/// across each band, and the equivalent dB SPL.
+#[derive(Clone, Debug, Default)]
+pub struct ListenerCapture {
+    pub name: String,
+    pub position: Vec3,
+    pub capture_radius: f32,
+    pub energy_bands: BandEnergies,
+    /// dB SPL per band. `None` for bands that received zero energy.
+    pub spl_bands: [Option<f32>; BAND_COUNT],
+    pub broadband_energy: f32,
+    /// `None` when broadband energy is zero — UI renders "No energy received".
+    pub broadband_spl: Option<f32>,
+}
+
 #[derive(Clone, Default)]
 pub struct SimulationResult {
     pub energy_grid: Vec<GridPoint>,
     pub ray_paths: Vec<TracedRayPath>,
     pub max_energy: f32,
     pub max_band_energies: BandEnergies,
+    pub listener_captures: Vec<ListenerCapture>,
 }
 
 #[derive(Clone)]
@@ -124,10 +156,68 @@ impl SimulationState {
         }
         result.max_band_energies = max_bands;
 
+        // Listener captures — non-destructive, computed post-trace from the
+        // existing ray paths. Adding/removing listeners does NOT change the
+        // grid or ray paths.
+        result.listener_captures = compute_listener_captures(&scene.listeners, &result.ray_paths);
+
         self.result = Some(result);
         self.running = false;
         self.progress = 1.0;
     }
+}
+
+/// For each listener in `listeners`, walk every traced ray segment, test
+/// closest-approach distance, and accumulate proximity-weighted per-band
+/// energy. Pure read-only — does not modify ray paths.
+pub fn compute_listener_captures(
+    listeners: &[Listener],
+    paths: &[TracedRayPath],
+) -> Vec<ListenerCapture> {
+    listeners
+        .iter()
+        .map(|listener| {
+            let r = listener.capture_radius.max(1e-6);
+            let r2 = r * r;
+            let mut bands: BandEnergies = [0.0; BAND_COUNT];
+
+            for path in paths {
+                let positions = &path.positions;
+                let band_e = &path.band_energies;
+                if positions.len() < 2 || band_e.is_empty() {
+                    continue;
+                }
+                for i in 0..positions.len() - 1 {
+                    let a = positions[i];
+                    let b = positions[i + 1];
+                    let closest = closest_point_on_segment(a, b, listener.position);
+                    let dist2 = (closest - listener.position).length_squared();
+                    if dist2 < r2 {
+                        let weight = 1.0 - (dist2 / r2).sqrt();
+                        let seg_e = band_e[i.min(band_e.len() - 1)];
+                        for b_idx in 0..BAND_COUNT {
+                            bands[b_idx] += weight * seg_e[b_idx];
+                        }
+                    }
+                }
+            }
+
+            let mut spl_bands: [Option<f32>; BAND_COUNT] = [None; BAND_COUNT];
+            for i in 0..BAND_COUNT {
+                spl_bands[i] = energy_to_spl(bands[i]);
+            }
+            let bb = broadband(&bands);
+            ListenerCapture {
+                name: listener.name.clone(),
+                position: listener.position,
+                capture_radius: r,
+                energy_bands: bands,
+                spl_bands,
+                broadband_energy: bb,
+                broadband_spl: energy_to_spl(bb),
+            }
+        })
+        .collect()
 }
 
 fn generate_sphere_rays(origin: Vec3, count: u32) -> Vec<Vec3> {
@@ -686,6 +776,7 @@ mod tests {
             listeners: vec![Listener {
                 position: Vec3::new(8.0, 5.0, 5.0),
                 name: "Underwater Listener".into(),
+                ..Default::default()
             }],
             // Background is water (entire environment is underwater)
             background_medium: water_med.clone(),
@@ -969,6 +1060,7 @@ mod tests {
             listeners: vec![Listener {
                 position: Vec3::new(7.5, 2.5, 5.0),
                 name: "Behind Glass".into(),
+                ..Default::default()
             }],
             background_medium: MediumProperties::air(),
             ..Default::default()
@@ -1515,6 +1607,266 @@ mod tests {
         assert!(
             checked > 0,
             "expected at least one cell with positive broadband energy"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // D2 — Listener capture + SPL verify tests (echomap-v1 T7)
+    // -----------------------------------------------------------------------
+
+    fn d2_scene_with_listener(listener_pos: Vec3) -> Scene {
+        let room = primitives::box_room(5.0, 5.0, 3.0);
+        Scene {
+            meshes: vec![room],
+            sound_sources: vec![SoundSource {
+                position: Vec3::new(2.5, 1.5, 2.5),
+                frequency_hz: 1000.0,
+                power_db: 80.0,
+                enabled: true,
+            }],
+            listeners: vec![Listener {
+                position: listener_pos,
+                name: "L".into(),
+                capture_radius: 0.5,
+            }],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        }
+    }
+
+    fn d2_config() -> SimulationConfig {
+        SimulationConfig {
+            ray_count: 500,
+            max_bounces: 8,
+            energy_threshold: 1e-6,
+            grid_resolution: 1.0,
+        }
+    }
+
+    /// A listener placed inside the room must receive non-zero energy and
+    /// produce a finite broadband SPL value.
+    #[test]
+    fn listener_captures_energy() {
+        let scene = d2_scene_with_listener(Vec3::new(3.5, 1.5, 2.5));
+        let mut sim = SimulationState {
+            config: d2_config(),
+            ..Default::default()
+        };
+        sim.run(&scene);
+        let result = sim.result.expect("sim ran");
+
+        assert_eq!(
+            result.listener_captures.len(),
+            1,
+            "one listener → one capture"
+        );
+        let cap = &result.listener_captures[0];
+        assert!(
+            cap.broadband_energy > 0.0,
+            "listener inside room should receive non-zero energy, got {}",
+            cap.broadband_energy
+        );
+        let spl = cap
+            .broadband_spl
+            .expect("non-zero energy should yield Some(SPL)");
+        assert!(
+            spl.is_finite(),
+            "SPL should be finite for positive energy, got {spl}"
+        );
+        // At least one band should also be positive.
+        assert!(
+            cap.energy_bands.iter().any(|e| *e > 0.0),
+            "at least one band should have captured energy: {:?}",
+            cap.energy_bands
+        );
+    }
+
+    /// A listener farther from the source receives less energy than a
+    /// listener nearer the source — geometric falloff plus longer
+    /// volumetric attenuation paths reduce the captured signal.
+    #[test]
+    fn listener_distance_falloff() {
+        // Near listener: 0.7 m from source (just outside the capture radius
+        // of the source position itself so the first segment doesn't trivially
+        // dominate).
+        let scene_near = d2_scene_with_listener(Vec3::new(2.5, 1.5, 3.2));
+        // Far listener: 2.2 m from source (against a wall, max distance).
+        let scene_far = d2_scene_with_listener(Vec3::new(2.5, 1.5, 4.7));
+
+        let mut sim_near = SimulationState {
+            config: d2_config(),
+            ..Default::default()
+        };
+        sim_near.run(&scene_near);
+        let near = sim_near
+            .result
+            .expect("near sim ran")
+            .listener_captures
+            .remove(0);
+
+        let mut sim_far = SimulationState {
+            config: d2_config(),
+            ..Default::default()
+        };
+        sim_far.run(&scene_far);
+        let far = sim_far
+            .result
+            .expect("far sim ran")
+            .listener_captures
+            .remove(0);
+
+        assert!(
+            near.broadband_energy > 0.0,
+            "near listener should receive energy: {}",
+            near.broadband_energy
+        );
+        assert!(
+            far.broadband_energy > 0.0,
+            "far listener should receive energy: {}",
+            far.broadband_energy
+        );
+        assert!(
+            near.broadband_energy > far.broadband_energy,
+            "near listener energy ({}) should exceed far listener energy ({})",
+            near.broadband_energy,
+            far.broadband_energy
+        );
+    }
+
+    /// Adding a listener must not change ray_paths or energy_grid — capture
+    /// is post-trace and purely additive (non-destructive).
+    #[test]
+    fn capture_nondestructive() {
+        // Scene WITHOUT listener
+        let room_a = primitives::box_room(5.0, 5.0, 3.0);
+        let scene_no_listener = Scene {
+            meshes: vec![room_a],
+            sound_sources: vec![SoundSource {
+                position: Vec3::new(2.5, 1.5, 2.5),
+                frequency_hz: 1000.0,
+                power_db: 80.0,
+                enabled: true,
+            }],
+            listeners: vec![],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+        // Same scene WITH listener
+        let scene_with_listener = d2_scene_with_listener(Vec3::new(3.5, 1.5, 2.5));
+
+        let cfg = d2_config();
+
+        let mut sim_a = SimulationState {
+            config: cfg.clone(),
+            ..Default::default()
+        };
+        sim_a.run(&scene_no_listener);
+        let res_a = sim_a.result.expect("a ran");
+
+        let mut sim_b = SimulationState {
+            config: cfg,
+            ..Default::default()
+        };
+        sim_b.run(&scene_with_listener);
+        let res_b = sim_b.result.expect("b ran");
+
+        // ray_paths must be identical: ray tracing doesn't depend on listeners.
+        assert_eq!(
+            res_a.ray_paths.len(),
+            res_b.ray_paths.len(),
+            "listener should not change ray count"
+        );
+        for (pa, pb) in res_a.ray_paths.iter().zip(res_b.ray_paths.iter()) {
+            assert_eq!(
+                pa.positions.len(),
+                pb.positions.len(),
+                "listener should not change path length"
+            );
+        }
+        // Energy grid should be element-for-element identical.
+        assert_eq!(
+            res_a.energy_grid.len(),
+            res_b.energy_grid.len(),
+            "grid sizes must match"
+        );
+        for (ga, gb) in res_a.energy_grid.iter().zip(res_b.energy_grid.iter()) {
+            assert!(
+                (ga.energy - gb.energy).abs() < 1e-6,
+                "grid energy must match: {} vs {}",
+                ga.energy,
+                gb.energy
+            );
+        }
+        // And confirm listener was actually populated in the listener run.
+        assert_eq!(res_b.listener_captures.len(), 1);
+        assert!(res_b.listener_captures[0].broadband_energy > 0.0);
+    }
+
+    /// A listener fully enclosed in its own sealed box (no opening to the
+    /// source's room) receives near-zero energy — direct sound cannot
+    /// reach it, only any rays that fluke into the capture radius.
+    #[test]
+    fn listener_separated_by_wall() {
+        // Source room: 5×5×3 m. Place a smaller fully-enclosed inner box
+        // far from the source so no rays through walls reach the listener.
+        let source_room = primitives::box_room(20.0, 20.0, 6.0);
+        let inner_box = primitives::box_room(2.0, 2.0, 2.0);
+        // Translate inner_box to (15, 0, 15) so it sits in the far corner.
+        let mut inner_translated = inner_box.clone();
+        for tri in &mut inner_translated.mesh.triangles {
+            for v in &mut tri.vertices {
+                v.position += Vec3::new(15.0, 0.0, 15.0);
+            }
+        }
+
+        let listener_pos = Vec3::new(16.0, 1.0, 16.0); // inside inner box
+        let scene = Scene {
+            meshes: vec![source_room, inner_translated],
+            sound_sources: vec![SoundSource {
+                position: Vec3::new(2.5, 1.5, 2.5),
+                frequency_hz: 1000.0,
+                power_db: 80.0,
+                enabled: true,
+            }],
+            listeners: vec![
+                Listener {
+                    position: Vec3::new(3.5, 1.5, 2.5), // direct-path listener (sanity)
+                    name: "Direct".into(),
+                    capture_radius: 0.5,
+                },
+                Listener {
+                    position: listener_pos,
+                    name: "Walled".into(),
+                    capture_radius: 0.5,
+                },
+            ],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+
+        let mut sim = SimulationState {
+            config: d2_config(),
+            ..Default::default()
+        };
+        sim.run(&scene);
+        let result = sim.result.expect("sim ran");
+
+        let direct = &result.listener_captures[0];
+        let walled = &result.listener_captures[1];
+
+        assert!(
+            direct.broadband_energy > 0.0,
+            "direct listener should capture energy: {}",
+            direct.broadband_energy
+        );
+        // Walled listener may catch some energy from grazing rays around the
+        // box, but must be at least 10x less than the direct listener.
+        assert!(
+            walled.broadband_energy < direct.broadband_energy / 10.0,
+            "walled listener ({}) should receive much less than direct ({}) — ratio {:.4}",
+            walled.broadband_energy,
+            direct.broadband_energy,
+            walled.broadband_energy / direct.broadband_energy.max(1e-12)
         );
     }
 }

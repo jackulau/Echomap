@@ -1912,6 +1912,7 @@ pub fn viewport_3d(
                                 scene.listeners.push(Listener {
                                     position: Vec3::new(gp.x, 1.0, gp.z),
                                     name: format!("Listener {n}"),
+                                    ..Default::default()
                                 });
                                 vp.selection = Selection::Listener(scene.listeners.len() - 1);
                             }

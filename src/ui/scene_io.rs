@@ -216,7 +216,8 @@ pub fn export_results_report(
     s.push_str(&format!("Rays:       {}\n", cfg.ray_count));
     s.push_str(&format!("Max bounces: {}\n", cfg.max_bounces));
     s.push_str(&format!("Grid res:   {:.3} m\n", cfg.grid_resolution));
-    s.push_str(&format!("Max energy: {:.4e}\n", result.max_energy));
+    let broadband_max = result.max_energy.iter().copied().fold(0.0_f32, f32::max);
+    s.push_str(&format!("Max energy: {:.4e}\n", broadband_max));
     s.push_str(&format!("Grid samples: {}\n", result.energy_grid.len()));
     s.push_str(&format!("Ray paths:  {}\n", result.ray_paths.len()));
     s.push_str("\n## Listener readings\n\n");
@@ -239,7 +240,7 @@ fn nearest_grid_energy(result: &SimulationResult, pos: Vec3) -> f32 {
         let d = (p.position - pos).length_squared();
         if d < best_d {
             best_d = d;
-            best = p.energy;
+            best = p.energy.iter().copied().fold(0.0_f32, f32::max);
         }
     }
     best
@@ -345,7 +346,7 @@ mod tests {
         let mut result = SimulationResult::default();
         result.energy_grid.push(GridPoint {
             position: Vec3::new(2.0, 1.0, 1.0),
-            energy: 1e-6,
+            energy: [1e-6; 6],
         });
         let scene = make_scene();
         let csv = export_results_csv(&result, &scene.listeners);
@@ -357,10 +358,10 @@ mod tests {
     #[test]
     fn file_menu_export_report_contains_summary() {
         let mut result = SimulationResult::default();
-        result.max_energy = 1e-4;
+        result.max_energy = [1e-4; 6];
         result.energy_grid.push(GridPoint {
             position: Vec3::new(2.0, 1.0, 1.0),
-            energy: 1e-6,
+            energy: [1e-6; 6],
         });
         let scene = make_scene();
         let cfg = SimulationConfig::default();

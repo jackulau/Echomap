@@ -263,7 +263,7 @@ pub fn menu_bar(
                     ui.close_menu();
                 }
                 ui.separator();
-                let has_results = sim.result.is_some();
+                let has_results = sim.result().is_some();
                 let resp = ui
                     .add_enabled(has_results, egui::Button::new("Export Results..."))
                     .on_hover_text(if has_results {
@@ -272,7 +272,7 @@ pub fn menu_bar(
                         "Run a simulation first to enable export"
                     });
                 if resp.clicked() {
-                    if let Some(result) = sim.result.as_ref() {
+                    if let Some(result) = sim.result() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("CSV", &["csv"])
                             .set_file_name("results.csv")
@@ -1812,7 +1812,7 @@ pub fn side_panel(
                     let can_run = validation.is_valid()
                         && !scene.sound_sources.is_empty()
                         && !scene.meshes.is_empty()
-                        && !sim.running;
+                        && !sim.is_running();
                     let run_resp = ui
                         .add_enabled(can_run, egui::Button::new("Run Simulation"))
                         .on_hover_text(if !validation.is_valid() {
@@ -1821,13 +1821,13 @@ pub fn side_panel(
                             "Add at least one sound source"
                         } else if scene.meshes.is_empty() {
                             "Add at least one mesh / room"
-                        } else if sim.running {
+                        } else if sim.is_running() {
                             "Simulation already running"
                         } else {
                             "Trace rays for the current scene"
                         });
                     if run_resp.clicked() {
-                        sim.run(scene);
+                        sim.start(scene);
                     }
                 });
 
@@ -1837,7 +1837,7 @@ pub fn side_panel(
             egui::CollapsingHeader::new("Results")
                 .id_salt("results_group")
                 .default_open(true)
-                .show(ui, |ui| match sim.result.as_ref() {
+                .show(ui, |ui| match sim.result() {
                     None => {
                         ui.label("No results yet. Run a simulation above.");
                     }
@@ -1845,7 +1845,9 @@ pub fn side_panel(
                         ui.label(format!("Grid samples: {}", r.energy_grid.len()))
                             .on_hover_text("Energy samples in the spatial grid");
                         ui.label(format!("Ray paths: {}", r.ray_paths.len()));
-                        ui.label(format!("Max energy: {:.4e}", r.max_energy));
+                        let broadband_max =
+                            r.max_energy.iter().copied().fold(0.0_f32, f32::max);
+                        ui.label(format!("Max energy: {:.4e}", broadband_max));
                     }
                 });
 
@@ -2717,9 +2719,10 @@ pub fn status_bar(
             // Lay out from the right edge so the Cancel sits flush right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let total_rays = sim.config.ray_count.max(1) as f32;
-                let done_rays = (sim.progress.clamp(0.0, 1.0) * total_rays) as u32;
+                let sim_progress = sim.progress();
+                let done_rays = (sim_progress.clamp(0.0, 1.0) * total_rays) as u32;
 
-                let cancel_enabled = sim.running;
+                let cancel_enabled = sim.is_running();
                 let resp = ui
                     .add_enabled(cancel_enabled, egui::Button::new("Cancel"))
                     .on_hover_text(if cancel_enabled {
@@ -2741,14 +2744,14 @@ pub fn status_bar(
                 ));
 
                 ui.separator();
-                if sim.running {
+                if sim.is_running() {
                     ui.add(
-                        egui::ProgressBar::new(sim.progress)
+                        egui::ProgressBar::new(sim_progress)
                             .show_percentage()
                             .desired_width(180.0)
                             .text(format!(
                                 "{:.0}% ({}/{} rays)",
-                                sim.progress * 100.0,
+                                sim_progress * 100.0,
                                 done_rays,
                                 sim.config.ray_count
                             )),
@@ -4661,11 +4664,10 @@ mod tests {
 
     #[test]
     fn status_bar_progress_fraction_is_clamped() {
-        let mut sim = SimulationState::default();
-        sim.config = SimulationConfig::default();
-        sim.progress = 1.5;
+        let sim = SimulationState::default();
         let total = sim.config.ray_count.max(1) as f32;
-        let done = (sim.progress.clamp(0.0, 1.0) * total) as u32;
+        let raw_progress: f32 = 1.5;
+        let done = (raw_progress.clamp(0.0, 1.0) * total) as u32;
         assert_eq!(done, sim.config.ray_count);
     }
 

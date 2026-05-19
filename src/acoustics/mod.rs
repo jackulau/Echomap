@@ -1,4 +1,5 @@
+pub mod bvh;
 pub mod ray;
-mod simulation;
+pub mod simulation;
 
 pub use simulation::SimulationState;

@@ -1,10 +1,26 @@
 use glam::Vec3;
 use rayon::prelude::*;
 use std::f32::consts::PI;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
+use super::bvh::Bvh;
 use super::ray::{energy_max, energy_sum, energy_uniform, AcousticRay, EnergyBands, RayHit};
 use crate::scene::material::MediumProperties;
-use crate::scene::{Scene, SceneObject};
+use crate::scene::{Scene, SceneObject, SoundSource};
+
+/// Bounded ray streaming buffer. Backpressure: when full the worker thread
+/// blocks on `send`, which keeps memory growth flat while still letting the
+/// UI drain at its own cadence. 256 is large enough to absorb a typical
+/// 60 Hz drain cycle for 10k-ray scenes without stalling tracing.
+pub const RAY_STREAM_CAPACITY: usize = 256;
+
+/// Cancellation is checked at this bounce interval inside the trace loop.
+/// Small enough that a "stop" press is honoured within a few ms even on
+/// long-bouncing rays; large enough that the atomic load isn't the hot path.
+pub const CANCEL_CHECK_INTERVAL: u32 = 10;
 
 #[derive(Clone)]
 pub struct SimulationConfig {
@@ -50,70 +66,383 @@ impl GridPoint {
     }
 }
 
+/// Tri-state lifecycle for a simulation run. The UI thread inspects this
+/// every frame; the worker thread never touches it. `Running` carries
+/// everything the UI needs to *observe* progress (read-only) and to
+/// *cancel* (write-only via `AtomicBool`) — but the actual paths flow
+/// through the bounded mpsc channel to keep the enum small.
+pub enum SimulationPhase {
+    Idle,
+    Running {
+        /// Number of rays the worker has finished tracing so far. Compared
+        /// against `total_rays` for a 0..1 ratio.
+        progress: Arc<AtomicU32>,
+        /// Total rays this run will trace (sum across enabled sources).
+        total_rays: u32,
+        /// Flip to `true` to ask the worker to stop. The worker observes
+        /// this every `CANCEL_CHECK_INTERVAL` bounces inside `trace_ray`
+        /// and between rays/sources at the loop boundaries.
+        cancel: Arc<AtomicBool>,
+        /// Bounded ray-path stream. Drained by `tick()` on the UI thread.
+        rx: Receiver<Vec<Vec3>>,
+        /// Worker join handle. `take()`'d once the worker finishes so the
+        /// final result can be moved into `Complete`.
+        thread: Option<JoinHandle<SimulationResult>>,
+        /// Paths drained from `rx` so far. The renderer can read these
+        /// while the worker is still tracing — that's the non-blocking
+        /// behaviour the spec calls out.
+        partial_paths: Vec<Vec<Vec3>>,
+    },
+    Complete {
+        result: SimulationResult,
+    },
+}
+
+impl Default for SimulationPhase {
+    fn default() -> Self {
+        SimulationPhase::Idle
+    }
+}
+
 #[derive(Default)]
 pub struct SimulationState {
     pub config: SimulationConfig,
-    pub result: Option<SimulationResult>,
-    pub running: bool,
-    pub progress: f32,
+    pub phase: SimulationPhase,
 }
 
 impl SimulationState {
-    pub fn run(&mut self, scene: &Scene) {
+    /// Spawn a background worker that traces every ray and streams paths
+    /// back over a bounded channel. Returns immediately — call `tick()`
+    /// every frame to drain. Does nothing if the scene is empty or another
+    /// run is already in flight.
+    pub fn start(&mut self, scene: &Scene) {
+        if matches!(self.phase, SimulationPhase::Running { .. }) {
+            return;
+        }
         if scene.sound_sources.is_empty() || scene.meshes.is_empty() {
             return;
         }
 
-        self.running = true;
-        self.progress = 0.0;
-
-        let mut result = SimulationResult::default();
-
-        for source in &scene.sound_sources {
-            if !source.enabled {
-                continue;
-            }
-
-            let rays = generate_sphere_rays(source.position, self.config.ray_count);
-            let bg = &scene.background_medium;
-
-            let paths: Vec<Vec<Vec3>> = rays
-                .into_par_iter()
-                .map(|dir| {
-                    trace_ray(
-                        source.position,
-                        dir,
-                        source.power_db,
-                        &self.config,
-                        scene,
-                        bg,
-                    )
-                })
-                .collect();
-
-            result.ray_paths.extend(paths);
+        let enabled_sources: Vec<SoundSource> = scene
+            .sound_sources
+            .iter()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect();
+        if enabled_sources.is_empty() {
+            return;
         }
 
-        let (min, max) = scene_bounds(scene);
-        result.energy_grid =
-            build_energy_grid(min, max, self.config.grid_resolution, &result.ray_paths);
+        let total_rays = enabled_sources.len() as u32 * self.config.ray_count;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU32::new(0));
+        let (tx, rx) = mpsc::sync_channel::<Vec<Vec3>>(RAY_STREAM_CAPACITY);
 
-        // Per-band max over the grid. Initialised to zeros so an empty grid
-        // produces an all-zero max_energy vector rather than `f32::MIN`.
-        let mut max_energy: EnergyBands = energy_uniform(0.0);
-        for gp in &result.energy_grid {
-            for b in 0..6 {
-                if gp.energy[b] > max_energy[b] {
-                    max_energy[b] = gp.energy[b];
+        let meshes = scene.meshes.clone();
+        let bg = scene.background_medium.clone();
+        let config = self.config.clone();
+        let cancel_worker = cancel.clone();
+        let progress_worker = progress.clone();
+
+        let thread = thread::spawn(move || {
+            simulate_worker(
+                meshes,
+                enabled_sources,
+                bg,
+                config,
+                cancel_worker,
+                progress_worker,
+                tx,
+            )
+        });
+
+        self.phase = SimulationPhase::Running {
+            progress,
+            total_rays,
+            cancel,
+            rx,
+            thread: Some(thread),
+            partial_paths: Vec::new(),
+        };
+    }
+
+    /// Synchronously block on the running worker until it returns. Used by
+    /// the tests where we want to assert post-run state without spinning a
+    /// tick loop. Returns true if a run finished, false if there was none.
+    pub fn join(&mut self) -> bool {
+        let take_thread = if let SimulationPhase::Running { thread, rx, .. } = &mut self.phase {
+            // Continuously drain while the worker is still running. The
+            // channel is bounded (256) — if we drained once and then
+            // blocked on `thread.join()`, the worker could be stuck on
+            // `tx.send()` after the buffer filled, producing a deadlock.
+            // `recv_timeout` lets us interleave drains with finish checks
+            // without spinning hot.
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                    Ok(_path) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if thread.as_ref().map(|t| t.is_finished()).unwrap_or(true) {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            thread.take()
+        } else {
+            None
+        };
+
+        if let Some(handle) = take_thread {
+            let result = handle.join().expect("simulation worker panicked");
+            // Drop any tail items still sitting on the channel — they're
+            // duplicated in `result.ray_paths` so dropping is safe.
+            if let SimulationPhase::Running { rx, .. } = &mut self.phase {
+                while rx.try_recv().is_ok() {}
+            }
+            self.phase = SimulationPhase::Complete { result };
+            return true;
+        }
+        false
+    }
+
+    /// Ask the worker to stop. The next bounce check (≤ 10 bounces) and the
+    /// next ray boundary will both observe this and short-circuit.
+    pub fn cancel(&mut self) {
+        if let SimulationPhase::Running { cancel, .. } = &self.phase {
+            cancel.store(true, Ordering::Release);
+        }
+    }
+
+    /// Drain any paths the worker has streamed since the last tick, and
+    /// transition to `Complete` once the worker has exited. Returns true if
+    /// new paths arrived this tick — useful for deciding whether to call
+    /// `ctx.request_repaint()`.
+    pub fn tick(&mut self) -> bool {
+        let mut new_paths = false;
+        let take_thread = match &mut self.phase {
+            SimulationPhase::Running {
+                rx,
+                thread,
+                partial_paths,
+                ..
+            } => {
+                loop {
+                    match rx.try_recv() {
+                        Ok(path) => {
+                            partial_paths.push(path);
+                            new_paths = true;
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => break,
+                    }
+                }
+                thread
+                    .as_ref()
+                    .map(|t| t.is_finished())
+                    .unwrap_or(false)
+                    .then(|| thread.take())
+                    .flatten()
+            }
+            _ => None,
+        };
+
+        if let Some(handle) = take_thread {
+            let result = handle.join().expect("simulation worker panicked");
+            if let SimulationPhase::Running { rx, .. } = &mut self.phase {
+                while let Ok(_) = rx.try_recv() {}
+            }
+            self.phase = SimulationPhase::Complete { result };
+            new_paths = true;
+        }
+
+        new_paths
+    }
+
+    /// True while a worker thread is alive.
+    pub fn is_running(&self) -> bool {
+        matches!(self.phase, SimulationPhase::Running { .. })
+    }
+
+    /// 0.0..=1.0 progress. `Idle` is 0, `Complete` is 1, `Running` is the
+    /// worker's atomic ray-count divided by the total ray budget.
+    pub fn progress(&self) -> f32 {
+        match &self.phase {
+            SimulationPhase::Idle => 0.0,
+            SimulationPhase::Complete { .. } => 1.0,
+            SimulationPhase::Running {
+                progress,
+                total_rays,
+                ..
+            } => {
+                if *total_rays == 0 {
+                    0.0
+                } else {
+                    (progress.load(Ordering::Acquire) as f32) / (*total_rays as f32)
                 }
             }
         }
-        result.max_energy = max_energy;
-
-        self.result = Some(result);
-        self.running = false;
-        self.progress = 1.0;
     }
+
+    /// The final result, available once the worker has joined.
+    pub fn result(&self) -> Option<&SimulationResult> {
+        match &self.phase {
+            SimulationPhase::Complete { result } => Some(result),
+            _ => None,
+        }
+    }
+
+    /// Live view of the paths streamed so far, even while still running.
+    pub fn partial_paths(&self) -> &[Vec<Vec3>] {
+        match &self.phase {
+            SimulationPhase::Running { partial_paths, .. } => partial_paths,
+            SimulationPhase::Complete { result } => &result.ray_paths,
+            SimulationPhase::Idle => &[],
+        }
+    }
+
+    /// Convenience for legacy callers that want blocking semantics: start
+    /// the worker, then immediately join. Equivalent to the old `run()`.
+    pub fn run_blocking(&mut self, scene: &Scene) {
+        self.start(scene);
+        self.join();
+    }
+}
+
+/// Trace every ray from every enabled source synchronously using the
+/// linear-scan triangle test. The "brute force" baseline used by the
+/// criterion bench to measure BVH speedup.
+pub fn trace_all_rays_brute_force(scene: &Scene, config: &SimulationConfig) -> Vec<Vec<Vec3>> {
+    trace_all_rays_inner(scene, config, None)
+}
+
+/// Trace every ray from every enabled source using a prebuilt BVH. The
+/// BVH must be built from the same `scene.meshes` slice the trace will
+/// query against — wiring a stale BVH is the kind of bug that produces
+/// wrong-but-not-NaN paths, so callers should build per-run.
+pub fn trace_all_rays_with_bvh(
+    scene: &Scene,
+    config: &SimulationConfig,
+    bvh: &Bvh,
+) -> Vec<Vec<Vec3>> {
+    trace_all_rays_inner(scene, config, Some(bvh))
+}
+
+fn trace_all_rays_inner(
+    scene: &Scene,
+    config: &SimulationConfig,
+    bvh: Option<&Bvh>,
+) -> Vec<Vec<Vec3>> {
+    let bg = scene.background_medium.clone();
+    let mut paths: Vec<Vec<Vec3>> = Vec::with_capacity(config.ray_count as usize);
+    for source in &scene.sound_sources {
+        if !source.enabled {
+            continue;
+        }
+        let rays = generate_sphere_rays(source.position, config.ray_count);
+        for dir in rays {
+            paths.push(trace_ray_in(
+                source.position,
+                dir,
+                source.power_db,
+                config,
+                &scene.meshes,
+                &bg,
+                None,
+                bvh,
+            ));
+        }
+    }
+    paths
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_worker(
+    meshes: Vec<SceneObject>,
+    sources: Vec<SoundSource>,
+    bg: MediumProperties,
+    config: SimulationConfig,
+    cancel: Arc<AtomicBool>,
+    progress: Arc<AtomicU32>,
+    tx: SyncSender<Vec<Vec3>>,
+) -> SimulationResult {
+    // Build a transient Scene-shaped struct the existing trace helpers
+    // already expect. We don't reuse the public `Scene` (which carries
+    // unrelated fluid/gas/robot state we never need here) to keep the
+    // thread snapshot minimal and to avoid forcing `Scene: Clone` on the
+    // wider codebase.
+    let scene_view = SceneView { meshes };
+
+    // Build the spatial accel once per run. Amortised over `ray_count`
+    // rays — for the 10k-ray budget this is the difference between
+    // O(rays × tris) and O(rays × log tris).
+    let bvh = Bvh::build(&scene_view.meshes);
+
+    let mut all_paths: Vec<Vec<Vec3>> = Vec::new();
+    'outer: for source in &sources {
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        let rays = generate_sphere_rays(source.position, config.ray_count);
+        for dir in rays {
+            if cancel.load(Ordering::Acquire) {
+                break 'outer;
+            }
+            let path = trace_ray_cancellable(
+                source.position,
+                dir,
+                source.power_db,
+                &config,
+                &scene_view,
+                &bg,
+                Some(&cancel),
+                Some(&bvh),
+            );
+            // Try to push to the UI stream; ignore disconnects (UI dropped).
+            // Send is blocking when full, which is the deliberate
+            // backpressure mechanism for the bounded channel.
+            let _ = tx.send(path.clone());
+            all_paths.push(path);
+            progress.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    // Build the energy grid from whatever paths we have. On cancel this is
+    // still a meaningful partial result, not garbage.
+    let (min, max) = scene_view_bounds(&scene_view);
+    let energy_grid = build_energy_grid(min, max, config.grid_resolution, &all_paths);
+
+    let mut max_energy: EnergyBands = energy_uniform(0.0);
+    for gp in &energy_grid {
+        for b in 0..6 {
+            if gp.energy[b] > max_energy[b] {
+                max_energy[b] = gp.energy[b];
+            }
+        }
+    }
+
+    SimulationResult {
+        energy_grid,
+        ray_paths: all_paths,
+        max_energy,
+    }
+}
+
+/// Minimal view the tracing helpers actually need. Kept private so the
+/// public `Scene` doesn't have to grow a `Clone` impl across the whole app.
+struct SceneView {
+    meshes: Vec<SceneObject>,
+}
+
+fn scene_view_bounds(scene: &SceneView) -> (Vec3, Vec3) {
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for obj in &scene.meshes {
+        let (obj_min, obj_max) = obj.mesh.bounds();
+        min = min.min(obj_min);
+        max = max.max(obj_max);
+    }
+    (min, max)
 }
 
 fn generate_sphere_rays(origin: Vec3, count: u32) -> Vec<Vec3> {
@@ -139,6 +468,7 @@ fn generate_sphere_rays(origin: Vec3, count: u32) -> Vec<Vec3> {
 /// Maximum number of pending (queued) rays from refraction branching.
 const MAX_PENDING_RAYS: usize = 16;
 
+#[cfg(test)]
 fn trace_ray(
     origin: Vec3,
     direction: Vec3,
@@ -147,11 +477,65 @@ fn trace_ray(
     scene: &Scene,
     background_medium: &MediumProperties,
 ) -> Vec<Vec3> {
+    // Thin façade over the cancellable variant. Synchronous tests don't
+    // need cancellation, so they pass `None` and pay no atomic load cost.
+    // No BVH passed → linear scan (kept as the brute-force baseline that
+    // every D4 / bench test compares against).
+    trace_ray_in(
+        origin,
+        direction,
+        power_db,
+        config,
+        &scene.meshes,
+        background_medium,
+        None,
+        None,
+    )
+}
+
+/// Cancellable variant operating directly on a meshes slice. The worker
+/// thread uses this with `Some(&cancel)` and (optionally) a prebuilt
+/// `Bvh`; tests use it with `None`s.
+#[allow(clippy::too_many_arguments)]
+fn trace_ray_cancellable(
+    origin: Vec3,
+    direction: Vec3,
+    power_db: f32,
+    config: &SimulationConfig,
+    scene_view: &SceneView,
+    background_medium: &MediumProperties,
+    cancel: Option<&AtomicBool>,
+    bvh: Option<&Bvh>,
+) -> Vec<Vec3> {
+    trace_ray_in(
+        origin,
+        direction,
+        power_db,
+        config,
+        &scene_view.meshes,
+        background_medium,
+        cancel,
+        bvh,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_ray_in(
+    origin: Vec3,
+    direction: Vec3,
+    power_db: f32,
+    config: &SimulationConfig,
+    meshes: &[SceneObject],
+    background_medium: &MediumProperties,
+    cancel: Option<&AtomicBool>,
+    bvh: Option<&Bvh>,
+) -> Vec<Vec3> {
     let initial_energy = db_to_linear(power_db);
     let mut ray = AcousticRay::new(origin, direction, initial_energy, background_medium.clone());
 
     let mut pending: Vec<AcousticRay> = Vec::new();
     let mut all_paths: Vec<Vec3> = Vec::new();
+    let mut last_cancel_check: u32 = 0;
 
     loop {
         // Trace the current ray until it terminates. The survival criterion
@@ -160,7 +544,33 @@ fn trace_ray(
         // attenuation diverge in future deliverables.
         while ray.bounces < config.max_bounces && energy_max(&ray.energy) > config.energy_threshold
         {
-            if let Some((hit, obj)) = find_nearest_hit(&ray, scene) {
+            // Cancel observed every CANCEL_CHECK_INTERVAL bounces. The
+            // counter is local rather than `% interval` so refraction
+            // branching (which resets `ray.bounces` mid-trace) can't make
+            // us skip a check.
+            if let Some(c) = cancel {
+                if ray.bounces.wrapping_sub(last_cancel_check) >= CANCEL_CHECK_INTERVAL {
+                    last_cancel_check = ray.bounces;
+                    if c.load(Ordering::Acquire) {
+                        // Flush what we already have so the partial path
+                        // up to the cancel point isn't lost.
+                        all_paths.extend(ray.path.iter().copied());
+                        return all_paths;
+                    }
+                }
+            }
+
+            // Prefer the BVH when available; fall back to linear scan
+            // so the brute-force trace_ray path stays available for
+            // cross-checks (D4 verifies equivalence within float
+            // epsilon) and so tests that don't build a BVH still work.
+            let hit_pair = match bvh {
+                Some(b) => b
+                    .nearest_hit(&ray, meshes)
+                    .map(|(h, tref)| (h, &meshes[tref.object_index])),
+                None => find_nearest_hit_in(&ray, meshes),
+            };
+            if let Some((hit, obj)) = hit_pair {
                 // Apply volumetric attenuation for distance traveled in current medium
                 ray.apply_volumetric_attenuation(hit.distance);
 
@@ -274,11 +684,14 @@ fn determine_medium_transition(
     }
 }
 
-fn find_nearest_hit<'a>(ray: &AcousticRay, scene: &'a Scene) -> Option<(RayHit, &'a SceneObject)> {
+fn find_nearest_hit_in<'a>(
+    ray: &AcousticRay,
+    meshes: &'a [SceneObject],
+) -> Option<(RayHit, &'a SceneObject)> {
     let mut nearest: Option<(RayHit, &SceneObject)> = None;
     let mut nearest_dist = f32::MAX;
 
-    for obj in &scene.meshes {
+    for obj in meshes {
         for (idx, tri) in obj.mesh.triangles.iter().enumerate() {
             if let Some(t) = ray.intersect_triangle(tri) {
                 if t < nearest_dist {
@@ -305,6 +718,7 @@ fn db_to_linear(db: f32) -> f32 {
     10.0_f32.powf(db / 10.0)
 }
 
+#[cfg(test)]
 fn scene_bounds(scene: &Scene) -> (Vec3, Vec3) {
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
@@ -1286,5 +1700,216 @@ mod tests {
             "1m in air at 1kHz should barely attenuate: {}",
             ray_short.energy[0]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // D2 tests — async, non-blocking, cancellable simulation
+    // -----------------------------------------------------------------------
+
+    /// SimulationState must walk Idle → Running → Complete and never get
+    /// stuck. Default is Idle; `start` flips to Running; `join` flips to
+    /// Complete and exposes a result.
+    #[test]
+    fn test_simulation_state_transitions() {
+        let scene = air_box_scene();
+        let mut sim = SimulationState::default();
+        sim.config.ray_count = 200;
+        sim.config.max_bounces = 5;
+
+        assert!(
+            matches!(sim.phase, SimulationPhase::Idle),
+            "default state should be Idle"
+        );
+
+        sim.start(&scene);
+        assert!(
+            matches!(sim.phase, SimulationPhase::Running { .. }),
+            "after start() state should be Running"
+        );
+
+        assert!(sim.join(), "join() should report a run finished");
+        assert!(
+            matches!(sim.phase, SimulationPhase::Complete { .. }),
+            "after join() state should be Complete"
+        );
+        assert!(sim.result().is_some(), "Complete must expose a result");
+    }
+
+    /// Progress is monotonic non-decreasing and reaches 1.0 once the run
+    /// finishes. We sample progress before and after join — strictly we
+    /// can't observe the intermediate values deterministically without a
+    /// race, but the start→finish bracket already enforces the contract.
+    #[test]
+    fn test_simulation_progress() {
+        let scene = air_box_scene();
+        let mut sim = SimulationState::default();
+        sim.config.ray_count = 500;
+        sim.config.max_bounces = 8;
+
+        sim.start(&scene);
+        let p_running = sim.progress();
+        assert!(
+            (0.0..=1.0).contains(&p_running),
+            "progress while running must be in [0,1], got {p_running}"
+        );
+
+        sim.join();
+        let p_done = sim.progress();
+        assert!(
+            (p_done - 1.0).abs() < 1e-3,
+            "progress after join should be 1.0, got {p_done}"
+        );
+    }
+
+    /// `cancel()` must cause the worker to exit promptly. We pre-set a
+    /// long-running config, fire cancel immediately, then join — the
+    /// worker should still produce some result (partial) and the state
+    /// should reach Complete without hanging.
+    #[test]
+    fn test_simulation_cancel() {
+        let scene = air_box_scene();
+        let mut sim = SimulationState::default();
+        // Big enough to ensure the worker is still busy when we cancel.
+        sim.config.ray_count = 10_000;
+        sim.config.max_bounces = 50;
+
+        sim.start(&scene);
+        // Don't sleep — just fire cancel immediately. The worker may
+        // already be done for tiny scenes, which is fine: cancel after
+        // completion is a no-op, and join still transitions to Complete.
+        sim.cancel();
+
+        let start = std::time::Instant::now();
+        let joined = sim.join();
+        let elapsed = start.elapsed();
+
+        assert!(joined, "join() must return true after start()");
+        assert!(
+            matches!(sim.phase, SimulationPhase::Complete { .. }),
+            "after cancel + join state should be Complete"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "cancel should free the worker quickly, took {elapsed:?}"
+        );
+        // Cancel must yield a partial result (possibly empty grid) — not
+        // panic, not deadlock.
+        assert!(sim.result().is_some());
+    }
+
+    /// A single ray with very high `max_bounces` and zero energy threshold
+    /// would otherwise loop until it ran out of bounces. With cancel set
+    /// at entry, `trace_ray_cancellable` must return within
+    /// `CANCEL_CHECK_INTERVAL` bounces — i.e. the path it returns must
+    /// have far fewer points than `max_bounces`.
+    #[test]
+    fn test_cancel_during_long_ray() {
+        let scene = air_box_scene();
+        let view = SceneView {
+            meshes: scene.meshes.clone(),
+        };
+        let cfg = SimulationConfig {
+            ray_count: 1,
+            max_bounces: 100_000,
+            energy_threshold: 0.0,
+            grid_resolution: 1.0,
+        };
+        let bg = MediumProperties::air();
+        let cancel = AtomicBool::new(true);
+
+        let path = trace_ray_cancellable(
+            scene.sound_sources[0].position,
+            Vec3::new(1.0, 0.0, 0.0),
+            scene.sound_sources[0].power_db,
+            &cfg,
+            &view,
+            &bg,
+            Some(&cancel),
+            None,
+        );
+
+        // With cancel pre-set, we should observe it on the first check
+        // (bounces 0 satisfies `wrapping_sub(0) >= CANCEL_CHECK_INTERVAL`
+        // only after one full interval, so the worst case is roughly
+        // CANCEL_CHECK_INTERVAL bounces × at most a few path points each).
+        // The key invariant: path.len() ≪ max_bounces.
+        assert!(
+            path.len() < 50,
+            "cancel-set-at-entry should short-circuit in well under 50 \
+             path entries, got {}",
+            path.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // D4 — BVH integration cross-check
+    // -----------------------------------------------------------------------
+
+    /// Running the trace loop with the BVH must produce paths identical
+    /// (within float epsilon) to running with the linear scan. This is
+    /// the load-bearing equivalence check that protects against BVH
+    /// regressions sneaking in via the spatial accel.
+    #[test]
+    fn test_bvh_matches_brute_force_full_sim() {
+        // Mixed scene: a room + a smaller interior platform exercises
+        // multiple meshes, so the BVH actually has to descend.
+        let mut scene = air_box_scene();
+        scene.meshes.push(primitives::platform(
+            Vec3::new(1.5, 0.0, 1.5),
+            1.5,
+            1.5,
+            1.0,
+        ));
+
+        let bvh = Bvh::build(&scene.meshes);
+        let cfg = SimulationConfig {
+            ray_count: 300,
+            max_bounces: 8,
+            energy_threshold: 0.001,
+            grid_resolution: 1.0,
+        };
+        let bg = MediumProperties::air();
+        let src = &scene.sound_sources[0];
+        let rays = generate_sphere_rays(src.position, cfg.ray_count);
+
+        let mut compared = 0;
+        for (i, dir) in rays.iter().enumerate() {
+            let brute = trace_ray_in(
+                src.position,
+                *dir,
+                src.power_db,
+                &cfg,
+                &scene.meshes,
+                &bg,
+                None,
+                None,
+            );
+            let accel = trace_ray_in(
+                src.position,
+                *dir,
+                src.power_db,
+                &cfg,
+                &scene.meshes,
+                &bg,
+                None,
+                Some(&bvh),
+            );
+            assert_eq!(
+                brute.len(),
+                accel.len(),
+                "ray {i} path length differs: brute={} accel={}",
+                brute.len(),
+                accel.len()
+            );
+            for (j, (a, b)) in brute.iter().zip(accel.iter()).enumerate() {
+                let d = (*a - *b).length();
+                assert!(
+                    d < 1e-3,
+                    "ray {i} path[{j}] diverges by {d}: brute={a:?} accel={b:?}"
+                );
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, cfg.ray_count as usize);
     }
 }

@@ -3,9 +3,11 @@
 //! Schema is fixed: the CSV header is exact and consumers parse positionally.
 //! Changing it is a versioned data-contract change, not a refactor.
 
+use std::fs::File;
 use std::io::{self, Write};
+use std::path::Path;
 
-use crate::acoustics::simulation::SimulationResult;
+use crate::acoustics::simulation::{SimulationConfig, SimulationResult};
 
 /// Exact CSV header — must match the deliverable schema byte-for-byte.
 pub const CSV_HEADER: &str =
@@ -21,6 +23,34 @@ fn safe_f32(v: f32) -> f32 {
         v
     } else {
         0.0
+    }
+}
+
+/// Errors surfaced by the export pipeline. Distinguished so the UI can show
+/// a clear message when the user clicks Export before running a sim.
+#[derive(Debug)]
+pub enum ExportError {
+    NoResults,
+    Io(io::Error),
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExportError::NoResults => write!(
+                f,
+                "No simulation results available — run a simulation before exporting"
+            ),
+            ExportError::Io(e) => write!(f, "I/O error during export: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ExportError {}
+
+impl From<io::Error> for ExportError {
+    fn from(e: io::Error) -> Self {
+        ExportError::Io(e)
     }
 }
 
@@ -49,11 +79,104 @@ pub fn write_grid_csv<W: Write>(writer: &mut W, result: &SimulationResult) -> io
     Ok(())
 }
 
+/// Write a human-readable text report covering: simulation config, per-listener
+/// SPL across all 6 bands + broadband, and per-band RT60. Empty listener list
+/// or all-None RT60 produces an explicit "—" placeholder rather than being
+/// silently omitted.
+pub fn write_text_report<W: Write>(
+    writer: &mut W,
+    config: &SimulationConfig,
+    result: &SimulationResult,
+) -> io::Result<()> {
+    writeln!(writer, "Echomap Acoustic Simulation Report")?;
+    writeln!(writer, "===================================")?;
+    writeln!(writer)?;
+
+    writeln!(writer, "Configuration")?;
+    writeln!(writer, "-------------")?;
+    writeln!(writer, "Ray count:        {}", config.ray_count)?;
+    writeln!(writer, "Max bounces:      {}", config.max_bounces)?;
+    writeln!(writer, "Energy threshold: {:.3e}", config.energy_threshold)?;
+    writeln!(writer, "Grid resolution:  {} m", config.grid_resolution)?;
+    writeln!(writer)?;
+
+    writeln!(writer, "Grid Summary")?;
+    writeln!(writer, "------------")?;
+    writeln!(writer, "Grid points:      {}", result.energy_grid.len())?;
+    writeln!(writer, "Max broadband:    {:.4e}", result.max_energy)?;
+    writeln!(writer)?;
+
+    // ---- Listener SPL table ----
+    writeln!(writer, "Listener SPL (dB)")?;
+    writeln!(writer, "-----------------")?;
+    if result.listener_captures.is_empty() {
+        writeln!(writer, "(no listeners in scene)")?;
+    } else {
+        writeln!(
+            writer,
+            "{:<24}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>9}",
+            "Name", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz", "Broadband"
+        )?;
+        for cap in &result.listener_captures {
+            write!(writer, "{:<24}", cap.name)?;
+            for s in &cap.spl_bands {
+                match s {
+                    Some(v) => write!(writer, "  {v:8.1}")?,
+                    None => write!(writer, "  {:>8}", "—")?,
+                }
+            }
+            match cap.broadband_spl {
+                Some(v) => writeln!(writer, "  {v:9.1}")?,
+                None => writeln!(writer, "  {:>9}", "—")?,
+            }
+        }
+    }
+    writeln!(writer)?;
+
+    // ---- RT60 table (room-wide, per band) ----
+    writeln!(writer, "Reverberation Time RT60 (s)")?;
+    writeln!(writer, "---------------------------")?;
+    writeln!(
+        writer,
+        "{:<10}{:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
+        "Band", "125Hz", "250Hz", "500Hz", "1kHz", "2kHz", "4kHz"
+    )?;
+    write!(writer, "{:<10}", "RT60")?;
+    for rt in &result.rt60_bands {
+        match rt {
+            Some(v) => write!(writer, "{v:8.3}  ")?,
+            None => write!(writer, "{:>8}  ", "—")?,
+        }
+    }
+    writeln!(writer)?;
+
+    Ok(())
+}
+
+/// Export both CSV (energy grid) and TXT (human report) to the given paths.
+/// Returns `ExportError::NoResults` if `result` is `None` so the UI can
+/// surface a clean message — never panic on missing data.
+pub fn export_simulation(
+    csv_path: impl AsRef<Path>,
+    txt_path: impl AsRef<Path>,
+    config: &SimulationConfig,
+    result: Option<&SimulationResult>,
+) -> Result<(), ExportError> {
+    let result = result.ok_or(ExportError::NoResults)?;
+    let mut csv_file = File::create(csv_path).map_err(ExportError::Io)?;
+    write_grid_csv(&mut csv_file, result).map_err(ExportError::Io)?;
+    let mut txt_file = File::create(txt_path).map_err(ExportError::Io)?;
+    write_text_report(&mut txt_file, config, result).map_err(ExportError::Io)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::acoustics::ray::BAND_COUNT;
-    use crate::acoustics::simulation::{GridPoint, SimulationResult};
+    use crate::acoustics::simulation::{
+        GridPoint, ListenerCapture, SimulationConfig, SimulationResult,
+    };
     use glam::Vec3;
 
     fn small_result() -> SimulationResult {
@@ -127,6 +250,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn report_result_with_listener() -> SimulationResult {
+        let mut r = small_result();
+        let mut spl_bands: [Option<f32>; BAND_COUNT] = [None; BAND_COUNT];
+        for i in 0..BAND_COUNT {
+            spl_bands[i] = Some(80.0 - i as f32 * 3.0);
+        }
+        r.listener_captures.push(ListenerCapture {
+            name: "L1".into(),
+            position: Vec3::new(1.0, 1.0, 1.0),
+            capture_radius: 0.3,
+            energy_bands: [1.0; BAND_COUNT],
+            spl_bands,
+            broadband_energy: 1.0,
+            broadband_spl: Some(70.0),
+        });
+        // 1 kHz RT60 is set, others None so the table renders mixed values.
+        r.rt60_bands[3] = Some(0.42);
+        r
+    }
+
+    #[test]
+    fn report_contains_config() {
+        let cfg = SimulationConfig {
+            ray_count: 12345,
+            max_bounces: 17,
+            energy_threshold: 1e-4,
+            grid_resolution: 0.42,
+        };
+        let r = report_result_with_listener();
+        let mut buf: Vec<u8> = Vec::new();
+        write_text_report(&mut buf, &cfg, &r).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        // Each named config field must appear with its value.
+        assert!(
+            s.contains("Ray count:") && s.contains("12345"),
+            "ray_count must be in report:\n{s}"
+        );
+        assert!(
+            s.contains("Max bounces:") && s.contains("17"),
+            "max_bounces must be in report:\n{s}"
+        );
+        assert!(
+            s.contains("Grid resolution:") && s.contains("0.42"),
+            "grid_resolution must be in report:\n{s}"
+        );
+    }
+
+    #[test]
+    fn report_contains_listener_spl() {
+        let cfg = SimulationConfig::default();
+        let r = report_result_with_listener();
+        let mut buf: Vec<u8> = Vec::new();
+        write_text_report(&mut buf, &cfg, &r).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+
+        // Listener name, header row, and broadband value should all be present.
+        assert!(s.contains("L1"), "listener name must appear:\n{s}");
+        assert!(
+            s.contains("125Hz") && s.contains("4kHz") && s.contains("Broadband"),
+            "SPL table header must include band labels and Broadband:\n{s}"
+        );
+        // Broadband SPL of 70.0 should appear as "70.0" somewhere on L1's row.
+        assert!(s.contains("70.0"), "L1 broadband SPL must appear:\n{s}");
+        // RT60 row label.
+        assert!(
+            s.contains("RT60"),
+            "RT60 table must be present in report:\n{s}"
+        );
+    }
+
+    #[test]
+    fn export_no_results_error() {
+        // Use a real but unlikely-to-exist temp path so the test fails on
+        // create-error from "no results" rather than file-system noise.
+        let tmpdir = std::env::temp_dir();
+        let csv = tmpdir.join("echomap_test_no_results.csv");
+        let txt = tmpdir.join("echomap_test_no_results.txt");
+        let cfg = SimulationConfig::default();
+        let result = export_simulation(&csv, &txt, &cfg, None);
+        match result {
+            Err(ExportError::NoResults) => { /* expected */ }
+            other => panic!("expected ExportError::NoResults, got {other:?}"),
+        }
+        // And NEITHER file should have been created — failure is total.
+        assert!(
+            !csv.exists() || std::fs::metadata(&csv).unwrap().len() == 0,
+            "CSV must not be created (or be empty) when no results"
+        );
+        // Clean up if anything slipped through.
+        let _ = std::fs::remove_file(&csv);
+        let _ = std::fs::remove_file(&txt);
     }
 
     #[test]

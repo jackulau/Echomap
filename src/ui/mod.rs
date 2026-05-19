@@ -172,6 +172,7 @@ pub fn menu_bar(
     show_settings: &mut bool,
     scene: &mut Scene,
     vp: &mut ViewportState,
+    sim: &SimulationState,
 ) {
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
@@ -190,6 +191,35 @@ pub fn menu_bar(
                             Err(e) => {
                                 log::error!("Failed to load STEP: {e}");
                             }
+                        }
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                let export_enabled = sim.result.is_some();
+                if ui
+                    .add_enabled(export_enabled, egui::Button::new("Export Results..."))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("CSV", &["csv"])
+                        .set_file_name("echomap_results.csv")
+                        .save_file()
+                    {
+                        let csv_path = path.clone();
+                        let txt_path = csv_path.with_extension("txt");
+                        match crate::io::export::export_simulation(
+                            &csv_path,
+                            &txt_path,
+                            &sim.config,
+                            sim.result.as_ref(),
+                        ) {
+                            Ok(()) => log::info!(
+                                "Exported results: {} + {}",
+                                csv_path.display(),
+                                txt_path.display()
+                            ),
+                            Err(e) => log::error!("Export failed: {e}"),
                         }
                     }
                     ui.close_menu();

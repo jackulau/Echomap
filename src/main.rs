@@ -163,6 +163,7 @@ mod app {
                 &mut self.show_settings,
                 &mut self.scene,
                 &mut self.viewport,
+                &self.sim,
             );
             echomap::ui::toolbar(ctx, &mut self.viewport);
             echomap::ui::outliner_panel(

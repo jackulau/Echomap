@@ -4,6 +4,9 @@ fn main() -> eframe::Result<()> {
     env_logger::init();
 
     let boxing = std::env::args().any(|a| a == "--boxing");
+    let test_frames = std::env::var("ECHOMAP_TEST_FRAMES")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -16,7 +19,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "EchoMap",
         options,
-        Box::new(move |cc| Ok(Box::new(app::EchoMapApp::new(cc, boxing)))),
+        Box::new(move |cc| Ok(Box::new(app::EchoMapApp::new(cc, boxing, test_frames)))),
     )
 }
 
@@ -34,6 +37,11 @@ mod app {
     use echomap::scene::Scene;
     use echomap::ui::ViewportState;
     use eframe::egui;
+    use std::time::{Duration, Instant};
+
+    /// Per-frame budget when ECHOMAP_TEST_FRAMES is active.
+    /// If any single update() exceeds this, the test harness exits 2.
+    const TEST_FRAME_BUDGET: Duration = Duration::from_millis(500);
 
     pub struct EchoMapApp {
         scene: Scene,
@@ -50,10 +58,19 @@ mod app {
         activity_log: AgentActivityLog,
         demo_handle: Option<DemoAgentHandle>,
         demo_behavior: DemoBehavior,
+        // ECHOMAP_TEST_FRAMES support: when Some(N), the app runs exactly N
+        // update() ticks and then exits 0 (or exits 2 if any frame exceeded
+        // TEST_FRAME_BUDGET). None = normal interactive mode.
+        test_frame_limit: Option<usize>,
+        test_frames_done: std::sync::atomic::AtomicUsize,
     }
 
     impl EchoMapApp {
-        pub fn new(_cc: &eframe::CreationContext<'_>, boxing: bool) -> Self {
+        pub fn new(
+            _cc: &eframe::CreationContext<'_>,
+            boxing: bool,
+            test_frames: Option<usize>,
+        ) -> Self {
             let agent_server_config = AgentServerConfig::default();
 
             if boxing {
@@ -111,6 +128,8 @@ mod app {
                     activity_log: AgentActivityLog::default(),
                     demo_handle: None,
                     demo_behavior: DemoBehavior::ReachTarget,
+                    test_frame_limit: test_frames,
+                    test_frames_done: std::sync::atomic::AtomicUsize::new(0),
                 };
             }
 
@@ -142,12 +161,16 @@ mod app {
                 activity_log: AgentActivityLog::default(),
                 demo_handle: None,
                 demo_behavior: DemoBehavior::ReachTarget,
+                test_frame_limit: test_frames,
+                test_frames_done: std::sync::atomic::AtomicUsize::new(0),
             }
         }
     }
 
     impl eframe::App for EchoMapApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            let frame_start = self.test_frame_limit.map(|_| Instant::now());
+
             // Bump activity log elapsed time.
             self.activity_log.elapsed += ctx.input(|i| i.predicted_dt);
 
@@ -230,6 +253,33 @@ mod app {
                     .is_some_and(|h| h.status().running)
             {
                 ctx.request_repaint();
+            }
+
+            // ECHOMAP_TEST_FRAMES: enforce frame budget + bounded run.
+            if let (Some(limit), Some(start)) = (self.test_frame_limit, frame_start) {
+                let elapsed = start.elapsed();
+                if elapsed > TEST_FRAME_BUDGET {
+                    eprintln!(
+                        "ECHOMAP_TEST_FRAMES: frame exceeded budget {:?} (took {:?}); exiting 2",
+                        TEST_FRAME_BUDGET, elapsed
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    std::process::exit(2);
+                }
+                let prev = self
+                    .test_frames_done
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let done = prev + 1;
+                // Force the next frame so we hit the limit without waiting on input.
+                ctx.request_repaint();
+                if done >= limit {
+                    eprintln!(
+                        "ECHOMAP_TEST_FRAMES: completed {}/{} frames (last {:?}); exiting 0",
+                        done, limit, elapsed
+                    );
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    std::process::exit(0);
+                }
             }
         }
     }

@@ -36,9 +36,9 @@ fn run_sim_on_step(
     source_pos: glam::Vec3,
     ray_count: u32,
 ) -> (Scene, SimulationState) {
-    let meshes = load_step_file(path).expect("STEP file should load");
+    let load = load_step_file(path).expect("STEP file should load");
     let scene = Scene {
-        meshes,
+        meshes: load.objects,
         sound_sources: vec![SoundSource {
             position: source_pos,
             frequency_hz: 1000.0,
@@ -48,6 +48,7 @@ fn run_sim_on_step(
         listeners: vec![Listener {
             position: source_pos + glam::Vec3::new(1.0, 1.0, 0.0),
             name: "Test Listener".into(),
+            ..Listener::default()
         }],
         background_medium: air_medium(),
         ..Scene::default()

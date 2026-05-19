@@ -154,6 +154,7 @@ pub fn load_scene_from_string(
         .map(|l| Listener {
             position: Vec3::from(l.position),
             name: l.name,
+            ..Listener::default()
         })
         .collect();
 
@@ -297,6 +298,7 @@ mod tests {
         s.listeners.push(Listener {
             position: Vec3::new(2.0, 1.0, 1.0),
             name: "L1".into(),
+            ..Listener::default()
         });
         s
     }

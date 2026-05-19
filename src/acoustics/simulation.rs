@@ -41,6 +41,42 @@ impl Default for SimulationConfig {
     }
 }
 
+/// Stub RT60 estimator — placeholder for goal/009's per-band reverberation-time
+/// computation. Master's sim pipeline does not yet populate per-band decay data,
+/// so this returns `[None; BAND_COUNT]`. The integration test that calls it
+/// asserts only the shape (6 entries), not specific numeric values.
+pub fn compute_rt60_bands(
+    _scene: &crate::scene::Scene,
+    _ray_paths: &[Vec<Vec3>],
+) -> [Option<f32>; crate::acoustics::ray::BAND_COUNT] {
+    [None; crate::acoustics::ray::BAND_COUNT]
+}
+
+impl SimulationConfig {
+    /// Validate the config against the contract used by the UI before
+    /// kicking off a sim: ray_count must be ≥ 1; grid_resolution must be a
+    /// finite positive number; energy_threshold must be finite and ≥ 0.
+    /// Returns a descriptive error message on the first failure.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.ray_count == 0 {
+            return Err("ray_count must be at least 1".to_string());
+        }
+        if !self.grid_resolution.is_finite() || self.grid_resolution <= 0.0 {
+            return Err(format!(
+                "grid_resolution must be a finite positive number (got {})",
+                self.grid_resolution
+            ));
+        }
+        if !self.energy_threshold.is_finite() || self.energy_threshold < 0.0 {
+            return Err(format!(
+                "energy_threshold must be finite and non-negative (got {})",
+                self.energy_threshold
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SimulationResult {
     pub energy_grid: Vec<GridPoint>,
@@ -48,6 +84,25 @@ pub struct SimulationResult {
     /// Per-band peak energy across the grid. Index ordering matches
     /// `FrequencyBands.as_array()` (125/250/500/1k/2k/4k Hz).
     pub max_energy: EnergyBands,
+    /// Per-listener captures: SPL across the 6 octave bands + broadband.
+    /// Empty until the sim populates them (see capture_radius integration).
+    pub listener_captures: Vec<ListenerCapture>,
+    /// Room-wide RT60 estimate per octave band (seconds for energy to decay 60 dB).
+    /// `None` per band when no valid estimate could be produced.
+    pub rt60_bands: [Option<f32>; crate::acoustics::ray::BAND_COUNT],
+}
+
+/// Per-listener summary populated by the sim when listeners have a `capture_radius`.
+/// SPL bands are `None` when no energy reached that band.
+#[derive(Clone, Debug)]
+pub struct ListenerCapture {
+    pub name: String,
+    pub position: Vec3,
+    pub capture_radius: f32,
+    pub energy_bands: EnergyBands,
+    pub spl_bands: [Option<f32>; crate::acoustics::ray::BAND_COUNT],
+    pub broadband_energy: f32,
+    pub broadband_spl: Option<f32>,
 }
 
 #[derive(Clone)]
@@ -421,6 +476,8 @@ fn simulate_worker(
         energy_grid,
         ray_paths: all_paths,
         max_energy,
+        listener_captures: Vec::new(),
+        rt60_bands: [None; crate::acoustics::ray::BAND_COUNT],
     }
 }
 
@@ -1058,6 +1115,7 @@ mod tests {
             listeners: vec![Listener {
                 position: Vec3::new(8.0, 5.0, 5.0),
                 name: "Underwater Listener".into(),
+                ..Listener::default()
             }],
             // Background is water (entire environment is underwater)
             background_medium: water_med.clone(),
@@ -1341,6 +1399,7 @@ mod tests {
             listeners: vec![Listener {
                 position: Vec3::new(7.5, 2.5, 5.0),
                 name: "Behind Glass".into(),
+                ..Listener::default()
             }],
             background_medium: MediumProperties::air(),
             ..Default::default()

@@ -216,10 +216,19 @@ pub fn menu_bar(
                         .pick_file()
                     {
                         match crate::io::load_step_file(&path) {
-                            Ok(objects) => {
-                                scene.meshes.extend(objects);
+                            Ok(load) => {
+                                let count = load.objects.len();
+                                scene.meshes.extend(load.objects);
                                 focus_on_scene(&mut vp.camera, scene);
-                                status.info(format!("Loaded STEP: {}", path.display()));
+                                let warn_note = if load.warnings.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" ({} warnings)", load.warnings.len())
+                                };
+                                status.info(format!(
+                                    "Loaded STEP: {} ({count} objects){warn_note}",
+                                    path.display()
+                                ));
                             }
                             Err(e) => {
                                 status.error(format!("Failed to load STEP: {e}"));
@@ -2286,6 +2295,7 @@ pub fn viewport_3d(
                                 scene.listeners.push(Listener {
                                     position: Vec3::new(gp.x, 1.0, gp.z),
                                     name: format!("Listener {n}"),
+                                    ..Listener::default()
                                 });
                                 vp.selection = Selection::Listener(scene.listeners.len() - 1);
                             }

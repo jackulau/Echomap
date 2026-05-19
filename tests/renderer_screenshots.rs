@@ -60,6 +60,7 @@ fn build_scene(meshes: Vec<echomap::scene::SceneObject>, source: Vec3, listener:
         listeners: vec![Listener {
             position: listener,
             name: "L".into(),
+            ..Listener::default()
         }],
         background_medium: air_medium(),
         ..Scene::default()
@@ -313,7 +314,7 @@ fn scene_centroid_and_span(scene: &Scene) -> (Vec3, f32) {
 fn generate_screenshots() {
     // ---- box_room: 3 band variants ----
     let box_path = fixture_dir().join("box_room.step");
-    let box_meshes = load_step_file(&box_path).expect("box_room loads");
+    let box_meshes = load_step_file(&box_path).expect("box_room loads").objects;
     let box_source = Vec3::new(1.0, 1.5, 0.5);
     let box_listener = Vec3::new(-1.0, 1.0, 0.5);
     let box_scene = build_scene(box_meshes, box_source, box_listener);
@@ -353,7 +354,7 @@ fn generate_screenshots() {
 
     // ---- studio: listener_pulse shot ----
     let studio_path = fixture_dir().join("studio.step");
-    let studio_meshes = load_step_file(&studio_path).expect("studio loads");
+    let studio_meshes = load_step_file(&studio_path).expect("studio loads").objects;
     let studio_source = Vec3::new(0.0, 1.6, 0.0);
     let studio_listener = Vec3::new(1.5, 1.3, 1.0);
     let studio_scene = build_scene(studio_meshes, studio_source, studio_listener);

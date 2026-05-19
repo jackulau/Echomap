@@ -11,7 +11,11 @@ pub const DEFAULT_MAX_PATH_LENGTH: usize = 64;
 /// Per-octave-band energy (125/250/500/1k/2k/4k Hz). Mirrors
 /// `FrequencyBands.as_array()` ordering so per-band absorption/attenuation
 /// indices align trivially.
-pub type EnergyBands = [f32; 6];
+///
+/// Number of octave bands tracked per ray: 125 / 250 / 500 / 1k / 2k / 4k Hz.
+pub const BAND_COUNT: usize = 6;
+
+pub type EnergyBands = [f32; BAND_COUNT];
 
 /// Broadcast a scalar to all 6 bands.
 #[inline]

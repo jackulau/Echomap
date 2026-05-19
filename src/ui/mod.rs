@@ -125,6 +125,16 @@ pub struct ViewportState {
     pub hover_label: Option<(egui::Pos2, String)>,
     /// Outliner search filter (case-insensitive substring).
     pub outliner_filter: String,
+    /// Tele-op keyboard mode (toggled by Ctrl+T). While active, the viewport
+    /// consumes W/A/S/D/Q/E and emits a [`RobotAction`] into
+    /// [`Self::teleop_pending`] each frame for the app loop to apply to
+    /// `robot/0`. The fly-camera handler is gated off in this mode so the
+    /// WASD keys go to the robot, not the camera.
+    pub teleop_mode: bool,
+    /// Latest action computed by the tele-op key handler. Set every frame
+    /// when [`Self::teleop_mode`] is on (even when nothing is pressed — the
+    /// next frame must zero stale commands). Drained by the main loop.
+    pub teleop_pending: Option<crate::robot::state::RobotAction>,
 }
 
 impl Default for ViewportState {
@@ -163,7 +173,163 @@ impl Default for ViewportState {
             show_listeners: true,
             hover_label: None,
             outliner_filter: String::new(),
+            teleop_mode: false,
+            teleop_pending: None,
         }
+    }
+}
+
+/// Pressed-state snapshot of the W/A/S/D/Q/E tele-op keys.
+///
+/// Bit order mirrors the field order so a `[bool; 6]` from a test mirrors
+/// what `viewport_3d` reads from `egui::InputState::key_down`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TeleopKeys {
+    pub w: bool,
+    pub a: bool,
+    pub s: bool,
+    pub d: bool,
+    pub q: bool,
+    pub e: bool,
+}
+
+/// Pure helper that maps the tele-op key state to a [`RobotAction`].
+///
+/// Mapping (joints 0..3 of `robot/0`; joints 3..6 reserved at zero so the
+/// action is still legal for 6-DoF robots and forward-compatible for richer
+/// keymaps):
+/// * `W` / `S` → joint 0 motor velocity `+1.0` / `-1.0`
+/// * `A` / `D` → joint 1 motor velocity `-1.0` / `+1.0`
+/// * `Q` / `E` → joint 2 motor velocity `-1.0` / `+1.0`
+///
+/// `num_motors` clamps the action vector length, matching the robot's
+/// `ActionSpace::num_motors`. Released keys produce `0.0` so the next frame
+/// zeros stale commands without extra bookkeeping.
+pub fn compute_teleop_action(
+    keys: TeleopKeys,
+    num_motors: usize,
+) -> crate::robot::state::RobotAction {
+    let mut velocities = vec![0.0_f32; num_motors];
+    let mut set = |joint: usize, v: f32| {
+        if joint < velocities.len() {
+            velocities[joint] = v;
+        }
+    };
+    let axis = |pos: bool, neg: bool| -> f32 {
+        match (pos, neg) {
+            (true, false) => 1.0,
+            (false, true) => -1.0,
+            _ => 0.0,
+        }
+    };
+    set(0, axis(keys.w, keys.s));
+    set(1, axis(keys.d, keys.a));
+    set(2, axis(keys.e, keys.q));
+    crate::robot::state::RobotAction {
+        motor_velocities: velocities,
+        gripper_commands: Vec::new(),
+        base_velocity: [0.0, 0.0],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teleop_keymap_zero_when_no_keys() {
+        let action = compute_teleop_action(TeleopKeys::default(), 3);
+        assert_eq!(action.motor_velocities, vec![0.0, 0.0, 0.0]);
+        assert!(action.gripper_commands.is_empty());
+        assert_eq!(action.base_velocity, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn teleop_keymap_w_drives_joint_0_positive() {
+        let mut keys = TeleopKeys::default();
+        keys.w = true;
+        let action = compute_teleop_action(keys, 3);
+        assert_eq!(action.motor_velocities, vec![1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn teleop_keymap_s_drives_joint_0_negative() {
+        let mut keys = TeleopKeys::default();
+        keys.s = true;
+        let action = compute_teleop_action(keys, 3);
+        assert_eq!(action.motor_velocities, vec![-1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn teleop_keymap_a_d_axis_joint_1() {
+        let mut keys = TeleopKeys::default();
+        keys.a = true;
+        let neg = compute_teleop_action(keys, 3);
+        assert_eq!(neg.motor_velocities[1], -1.0);
+
+        let mut keys = TeleopKeys::default();
+        keys.d = true;
+        let pos = compute_teleop_action(keys, 3);
+        assert_eq!(pos.motor_velocities[1], 1.0);
+    }
+
+    #[test]
+    fn teleop_keymap_q_e_axis_joint_2() {
+        let mut keys = TeleopKeys::default();
+        keys.q = true;
+        let neg = compute_teleop_action(keys, 3);
+        assert_eq!(neg.motor_velocities[2], -1.0);
+
+        let mut keys = TeleopKeys::default();
+        keys.e = true;
+        let pos = compute_teleop_action(keys, 3);
+        assert_eq!(pos.motor_velocities[2], 1.0);
+    }
+
+    #[test]
+    fn teleop_keymap_opposite_keys_cancel() {
+        let mut keys = TeleopKeys::default();
+        keys.w = true;
+        keys.s = true;
+        let action = compute_teleop_action(keys, 3);
+        assert_eq!(action.motor_velocities[0], 0.0);
+    }
+
+    #[test]
+    fn teleop_keymap_clamps_to_num_motors() {
+        // Smaller robot: only 1 motor exposed → vector length matches.
+        let mut keys = TeleopKeys::default();
+        keys.w = true;
+        let action = compute_teleop_action(keys, 1);
+        assert_eq!(action.motor_velocities.len(), 1);
+        assert_eq!(action.motor_velocities[0], 1.0);
+
+        // No motors → empty vector, no panic.
+        let action = compute_teleop_action(keys, 0);
+        assert!(action.motor_velocities.is_empty());
+    }
+
+    #[test]
+    fn teleop_keymap_pads_to_six_for_richer_robots() {
+        let mut keys = TeleopKeys::default();
+        keys.e = true;
+        let action = compute_teleop_action(keys, 6);
+        assert_eq!(action.motor_velocities.len(), 6);
+        assert_eq!(action.motor_velocities[2], 1.0);
+        for i in [0, 1, 3, 4, 5] {
+            assert_eq!(
+                action.motor_velocities[i], 0.0,
+                "joint {} should be zero",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn teleop_mode_field_defaults_off() {
+        let vp = ViewportState::default();
+        assert!(!vp.teleop_mode);
+        assert!(vp.teleop_pending.is_none());
     }
 }
 
@@ -1668,6 +1834,25 @@ pub fn viewport_3d(
         let rect = response.rect;
         painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 35));
 
+        // Tele-op top banner — drawn first so any 3D overlays show beneath.
+        if vp.teleop_mode {
+            let banner_h = 24.0;
+            let banner_rect =
+                egui::Rect::from_min_size(rect.left_top(), egui::vec2(rect.width(), banner_h));
+            painter.rect_filled(
+                banner_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(180, 40, 40, 220),
+            );
+            painter.text(
+                banner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "TELE-OP (Ctrl+T to exit) — W/S A/D Q/E → robot/0 joints 0..3",
+                egui::FontId::proportional(14.0),
+                egui::Color32::WHITE,
+            );
+        }
+
         let cam = &mut vp.camera;
         let center = rect.center();
 
@@ -1701,6 +1886,17 @@ pub fn viewport_3d(
             }
             if i.key_pressed(egui::Key::Tab) {
                 vp.fly_mode = !vp.fly_mode;
+            }
+            // Ctrl+T toggles tele-op mode. Turning it on suppresses fly-mode so
+            // WASD/QE feed the robot rather than the camera.
+            if modifiers.ctrl && i.key_pressed(egui::Key::T) {
+                vp.teleop_mode = !vp.teleop_mode;
+                if vp.teleop_mode {
+                    vp.fly_mode = false;
+                } else {
+                    // Emit a zero action immediately so motors stop on next frame.
+                    vp.teleop_pending = Some(compute_teleop_action(TeleopKeys::default(), 6));
+                }
             }
             // Camera view presets (Blender-style numpad)
             let view_keys = [
@@ -1774,8 +1970,25 @@ pub fn viewport_3d(
                 }
             }
 
+            // --- Tele-op key sampling (Ctrl+T to toggle) ---
+            if vp.teleop_mode {
+                let num_motors = robot_manager
+                    .get_robot(0)
+                    .map(|r| r.definition.joints.len())
+                    .unwrap_or(0);
+                let keys = TeleopKeys {
+                    w: i.key_down(egui::Key::W),
+                    a: i.key_down(egui::Key::A),
+                    s: i.key_down(egui::Key::S),
+                    d: i.key_down(egui::Key::D),
+                    q: i.key_down(egui::Key::Q),
+                    e: i.key_down(egui::Key::E),
+                };
+                vp.teleop_pending = Some(compute_teleop_action(keys, num_motors));
+            }
+
             // --- Fly-mode movement ---
-            if vp.fly_mode {
+            if vp.fly_mode && !vp.teleop_mode {
                 let mut fwd = 0.0;
                 let mut rt = 0.0;
                 let mut up = 0.0;

@@ -229,6 +229,18 @@ mod app {
             );
             echomap::ui::status_bar(ctx, &self.viewport, &self.scene, &self.robot_manager);
 
+            // Drain tele-op pending action (Ctrl+T mode) onto robot/0.
+            if let Some(action) = self.viewport.teleop_pending.take() {
+                if let Some(robot) = self.robot_manager.get_robot_mut(0) {
+                    echomap::robot::state::apply_action(
+                        &robot.definition,
+                        &mut robot.state,
+                        &action,
+                    );
+                }
+                ctx.request_repaint();
+            }
+
             // Step robot simulation (skip when agent server owns stepping via bridge)
             if self.agent_server_handle.is_none() {
                 let dt = 1.0 / 60.0;

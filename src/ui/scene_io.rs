@@ -312,7 +312,7 @@ mod tests {
             "Quit",
         ] {
             assert!(
-                FILE_MENU_ITEMS.iter().any(|i| *i == needle),
+                FILE_MENU_ITEMS.contains(&needle),
                 "FILE_MENU_ITEMS missing {needle}"
             );
         }
@@ -357,8 +357,10 @@ mod tests {
 
     #[test]
     fn file_menu_export_report_contains_summary() {
-        let mut result = SimulationResult::default();
-        result.max_energy = [1e-4; 6];
+        let mut result = SimulationResult {
+            max_energy: [1e-4; 6],
+            ..SimulationResult::default()
+        };
         result.energy_grid.push(GridPoint {
             position: Vec3::new(2.0, 1.0, 1.0),
             energy: [1e-6; 6],

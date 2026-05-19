@@ -1194,6 +1194,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "glam",
+ "image",
  "log",
  "nalgebra",
  "rayon",

@@ -183,8 +183,8 @@ impl AcousticRay {
 
     pub fn reflect(&mut self, hit: &RayHit, material: &AcousticMaterial) {
         let absorption = material.absorption.as_array();
-        for b in 0..6 {
-            self.energy[b] *= 1.0 - absorption[b];
+        for (band, e) in self.energy.iter_mut().enumerate() {
+            *e *= 1.0 - absorption[band];
         }
         self.origin = hit.point + hit.normal * 1e-4;
         self.direction = self.direction - 2.0 * self.direction.dot(hit.normal) * hit.normal;

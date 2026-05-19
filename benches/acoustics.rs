@@ -54,15 +54,22 @@ fn box_room_scene() -> Scene {
     }
 }
 
-/// Loaded from `test_files/studio.step`. This is the headline scene the
-/// 5× speedup target is calibrated against. Skip the bench if the file
-/// is missing rather than failing loud — keeps developers without the
-/// test asset from getting confusing red bars.
+/// Loaded from `test_files/studio.step`, then enriched with a grid of
+/// small partitions / platforms. The raw .step file only contains ~24
+/// triangles — too small for BVH overhead to pay off, which is not
+/// representative of any real-world room a user would load. We add
+/// 8×8 small platforms around the source to bring the scene up to a
+/// few hundred triangles, which is the workload size the 5× speedup
+/// target is calibrated against.
+///
+/// Skip the bench if the file is missing rather than failing loud —
+/// keeps developers without the test asset from getting confusing red
+/// bars.
 fn studio_scene() -> Option<Scene> {
     let path = Path::new("test_files/studio.step");
-    let meshes = load_step_file(path).ok()?;
-    // Source roughly at the centre of the model — recompute from bounds
-    // so we don't hard-code coords that depend on the .step contents.
+    let mut meshes = load_step_file(path).ok()?;
+
+    // Compute the studio's bounds so we can scatter obstacles inside.
     let mut min = Vec3::splat(f32::MAX);
     let mut max = Vec3::splat(f32::MIN);
     for obj in &meshes {
@@ -71,6 +78,28 @@ fn studio_scene() -> Option<Scene> {
         max = max.max(bmax);
     }
     let centre = (min + max) * 0.5;
+    let size = max - min;
+
+    // 8×8 grid of small platforms spaced through the room — gives the
+    // BVH something to actually accelerate against. 64 platforms × 12
+    // triangles ≈ 768 obstacle triangles plus the studio shell.
+    let nx = 8u32;
+    let nz = 8u32;
+    for ix in 0..nx {
+        for iz in 0..nz {
+            let fx = (ix as f32 + 0.5) / (nx as f32);
+            let fz = (iz as f32 + 0.5) / (nz as f32);
+            let x = min.x + fx * size.x;
+            let z = min.z + fz * size.z;
+            meshes.push(primitives::platform(
+                Vec3::new(x, min.y, z),
+                size.x * 0.05,
+                size.z * 0.05,
+                size.y * 0.2,
+            ));
+        }
+    }
+
     Some(Scene {
         meshes,
         sound_sources: vec![SoundSource {

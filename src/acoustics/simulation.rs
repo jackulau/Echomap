@@ -71,7 +71,9 @@ impl GridPoint {
 /// everything the UI needs to *observe* progress (read-only) and to
 /// *cancel* (write-only via `AtomicBool`) — but the actual paths flow
 /// through the bounded mpsc channel to keep the enum small.
+#[derive(Default)]
 pub enum SimulationPhase {
+    #[default]
     Idle,
     Running {
         /// Number of rays the worker has finished tracing so far. Compared
@@ -96,12 +98,6 @@ pub enum SimulationPhase {
     Complete {
         result: SimulationResult,
     },
-}
-
-impl Default for SimulationPhase {
-    fn default() -> Self {
-        SimulationPhase::Idle
-    }
 }
 
 #[derive(Default)]
@@ -250,7 +246,7 @@ impl SimulationState {
         if let Some(handle) = take_thread {
             let result = handle.join().expect("simulation worker panicked");
             if let SimulationPhase::Running { rx, .. } = &mut self.phase {
-                while let Ok(_) = rx.try_recv() {}
+                while rx.try_recv().is_ok() {}
             }
             self.phase = SimulationPhase::Complete { result };
             new_paths = true;
@@ -414,9 +410,9 @@ fn simulate_worker(
 
     let mut max_energy: EnergyBands = energy_uniform(0.0);
     for gp in &energy_grid {
-        for b in 0..6 {
-            if gp.energy[b] > max_energy[b] {
-                max_energy[b] = gp.energy[b];
+        for (max_band, &gp_band) in max_energy.iter_mut().zip(gp.energy.iter()) {
+            if gp_band > *max_band {
+                *max_band = gp_band;
             }
         }
     }
@@ -593,9 +589,14 @@ fn trace_ray_in(
                             // transmitted energy vectors.
                             let mut reflected_energy: EnergyBands = refraction.reflected_energy;
                             let mut transmitted_energy: EnergyBands = refraction.transmitted_energy;
-                            for b in 0..6 {
-                                reflected_energy[b] *= 1.0 - absorption[b];
-                                transmitted_energy[b] *= 1.0 - absorption[b];
+                            for ((r, t), a) in reflected_energy
+                                .iter_mut()
+                                .zip(transmitted_energy.iter_mut())
+                                .zip(absorption.iter())
+                            {
+                                let keep = 1.0 - *a;
+                                *r *= keep;
+                                *t *= keep;
                             }
 
                             // Queue transmitted ray if not total internal reflection

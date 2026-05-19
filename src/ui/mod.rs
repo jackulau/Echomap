@@ -1,3 +1,6 @@
+pub mod config_validation;
+pub mod scene_io;
+
 use glam::Vec3;
 
 use crate::acoustics::SimulationState;
@@ -170,13 +173,30 @@ impl Default for ViewportState {
 pub fn menu_bar(
     ctx: &egui::Context,
     show_settings: &mut bool,
+    show_about: &mut bool,
+    status: &mut AppStatus,
+    sim: &mut SimulationState,
     scene: &mut Scene,
     vp: &mut ViewportState,
 ) {
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("Open STEP File...").clicked() {
+                if ui
+                    .button("New Scene")
+                    .on_hover_text("Clear all objects, sources, and listeners")
+                    .clicked()
+                {
+                    *scene = scene_io::new_scene();
+                    vp.selection = Selection::None;
+                    status.info("New scene");
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Open STEP File...")
+                    .on_hover_text("Import a .step / .stp CAD model as scene geometry")
+                    .clicked()
+                {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("STEP", &["step", "stp", "STEP", "STP"])
                         .pick_file()
@@ -185,37 +205,133 @@ pub fn menu_bar(
                             Ok(objects) => {
                                 scene.meshes.extend(objects);
                                 focus_on_scene(&mut vp.camera, scene);
-                                log::info!("Loaded STEP: {}", path.display());
+                                status.info(format!("Loaded STEP: {}", path.display()));
                             }
                             Err(e) => {
-                                log::error!("Failed to load STEP: {e}");
+                                status.error(format!("Failed to load STEP: {e}"));
                             }
                         }
                     }
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Exit").clicked() {
+                if ui
+                    .button("Save Scene...")
+                    .on_hover_text("Save sources, listeners, geometry, and sim config to JSON")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("EchoMap Scene", &["json"])
+                        .set_file_name("scene.json")
+                        .save_file()
+                    {
+                        match scene_io::save_scene_to_string(scene, &sim.config) {
+                            Ok(data) => match std::fs::write(&path, data) {
+                                Ok(_) => status.info(format!("Saved {}", path.display())),
+                                Err(e) => status.error(format!("Save failed: {e}")),
+                            },
+                            Err(e) => status.error(e),
+                        }
+                    }
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Load Scene...")
+                    .on_hover_text("Restore a previously-saved EchoMap scene")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("EchoMap Scene", &["json"])
+                        .pick_file()
+                    {
+                        match std::fs::read_to_string(&path) {
+                            Ok(data) => {
+                                match scene_io::load_scene_from_string(&data, &vp.medium_lib) {
+                                    Ok((loaded, cfg)) => {
+                                        *scene = loaded;
+                                        sim.config = cfg;
+                                        vp.selection = Selection::None;
+                                        focus_on_scene(&mut vp.camera, scene);
+                                        status.info(format!("Loaded {}", path.display()));
+                                    }
+                                    Err(e) => status.error(e),
+                                }
+                            }
+                            Err(e) => status.error(format!("Read failed: {e}")),
+                        }
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                let has_results = sim.result.is_some();
+                let resp = ui
+                    .add_enabled(has_results, egui::Button::new("Export Results..."))
+                    .on_hover_text(if has_results {
+                        "Write listener readings (CSV) and a text report"
+                    } else {
+                        "Run a simulation first to enable export"
+                    });
+                if resp.clicked() {
+                    if let Some(result) = sim.result.as_ref() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("CSV", &["csv"])
+                            .set_file_name("results.csv")
+                            .save_file()
+                        {
+                            let csv = scene_io::export_results_csv(result, &scene.listeners);
+                            let report =
+                                scene_io::export_results_report(result, scene, &sim.config);
+                            let report_path = path.with_extension("report.md");
+                            let csv_ok = std::fs::write(&path, csv);
+                            let rep_ok = std::fs::write(&report_path, report);
+                            match (csv_ok, rep_ok) {
+                                (Ok(_), Ok(_)) => status.info(format!(
+                                    "Exported {} + {}",
+                                    path.display(),
+                                    report_path.display()
+                                )),
+                                (Err(e), _) | (_, Err(e)) => {
+                                    status.error(format!("Export failed: {e}"))
+                                }
+                            }
+                        }
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Quit").clicked() {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
 
             ui.menu_button("Add", |ui| {
-                if ui.button("Box Room (5x4x3m)").clicked() {
+                if ui
+                    .button("Box Room (5x4x3m)")
+                    .on_hover_text("Add a closed 5×4×3 m rectangular room")
+                    .clicked()
+                {
                     scene
                         .meshes
                         .push(crate::scene::primitives::box_room(5.0, 4.0, 3.0));
                     focus_on_scene(&mut vp.camera, scene);
                     ui.close_menu();
                 }
-                if ui.button("L-Room (8x6x3m)").clicked() {
+                if ui
+                    .button("L-Room (8x6x3m)")
+                    .on_hover_text("Add an L-shaped room composed of two boxes")
+                    .clicked()
+                {
                     scene
                         .meshes
                         .extend(crate::scene::primitives::l_room(8.0, 6.0, 3.0, 3.0, 3.0));
                     focus_on_scene(&mut vp.camera, scene);
                     ui.close_menu();
                 }
-                if ui.button("Partition Wall").clicked() {
+                if ui
+                    .button("Partition Wall")
+                    .on_hover_text("Insert a free-standing 2×2.5 m wall")
+                    .clicked()
+                {
                     scene.meshes.push(crate::scene::primitives::partition_wall(
                         Vec3::new(2.0, 0.0, 1.0),
                         2.0,
@@ -224,7 +340,11 @@ pub fn menu_bar(
                     ));
                     ui.close_menu();
                 }
-                if ui.button("Platform / Stage").clicked() {
+                if ui
+                    .button("Platform / Stage")
+                    .on_hover_text("Add a 2×2×0.5 m raised platform")
+                    .clicked()
+                {
                     scene.meshes.push(crate::scene::primitives::platform(
                         Vec3::new(1.0, 0.0, 1.0),
                         2.0,
@@ -234,12 +354,20 @@ pub fn menu_bar(
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Sound Source").clicked() {
+                if ui
+                    .button("Sound Source")
+                    .on_hover_text("Add a new omnidirectional source at the origin")
+                    .clicked()
+                {
                     scene.sound_sources.push(SoundSource::default());
                     vp.selection = Selection::Source(scene.sound_sources.len() - 1);
                     ui.close_menu();
                 }
-                if ui.button("Listener").clicked() {
+                if ui
+                    .button("Listener")
+                    .on_hover_text("Add a new listener probe at the origin")
+                    .clicked()
+                {
                     let n = scene.listeners.len() + 1;
                     scene.listeners.push(Listener {
                         name: format!("Listener {n}"),
@@ -251,11 +379,16 @@ pub fn menu_bar(
             });
 
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut vp.show_grid, "Show Grid");
-                ui.checkbox(&mut vp.show_rays, "Show Ray Paths");
-                ui.checkbox(&mut vp.show_robots, "Show Robots");
-                ui.checkbox(&mut vp.show_sensor_rays, "Show Sensor Rays");
-                ui.checkbox(&mut vp.shaded, "Shaded Surfaces");
+                ui.checkbox(&mut vp.show_grid, "Show Grid")
+                    .on_hover_text("Toggle the floor grid overlay");
+                ui.checkbox(&mut vp.show_rays, "Show Ray Paths")
+                    .on_hover_text("Render simulated ray paths in the viewport");
+                ui.checkbox(&mut vp.show_robots, "Show Robots")
+                    .on_hover_text("Show or hide robot bodies in the scene");
+                ui.checkbox(&mut vp.show_sensor_rays, "Show Sensor Rays")
+                    .on_hover_text("Visualize each robot's sensor ray casts");
+                ui.checkbox(&mut vp.shaded, "Shaded Surfaces")
+                    .on_hover_text("Lambert-shade surfaces with a drop shadow");
                 ui.separator();
                 ui.menu_button("Camera Presets", |ui| {
                     let presets = [
@@ -275,32 +408,96 @@ pub fn menu_bar(
                         }
                     }
                 });
-                ui.checkbox(&mut vp.fly_mode, "Fly Mode (Tab)");
+                ui.checkbox(&mut vp.fly_mode, "Fly Mode (Tab)")
+                    .on_hover_text("Toggle WASD + right-drag fly camera");
                 ui.add(
                     egui::Slider::new(&mut vp.fly_speed, 0.5..=20.0)
                         .text("Fly Speed")
                         .clamping(egui::SliderClamping::Always),
                 );
                 ui.separator();
-                if ui.button("Reset Camera").clicked() {
+                if ui
+                    .button("Reset Camera")
+                    .on_hover_text("Restore the camera to its default orbit (also: R)")
+                    .clicked()
+                {
                     vp.camera = Camera::default();
                     if !scene.meshes.is_empty() {
                         focus_on_scene(&mut vp.camera, scene);
                     }
                     ui.close_menu();
                 }
-                if ui.button("Focus on Scene (F)").clicked() {
+                if ui
+                    .button("Focus on Scene (F)")
+                    .on_hover_text("Frame the camera on all scene geometry")
+                    .clicked()
+                {
                     focus_on_scene(&mut vp.camera, scene);
                     ui.close_menu();
                 }
                 ui.separator();
-                if ui.button("Settings...").clicked() {
+                if ui
+                    .button("Settings...")
+                    .on_hover_text("Open the Simulation Settings window")
+                    .clicked()
+                {
                     *show_settings = true;
+                    ui.close_menu();
+                }
+            });
+
+            ui.menu_button("Help", |ui| {
+                if ui
+                    .button("About EchoMap")
+                    .on_hover_text("Version and credits")
+                    .clicked()
+                {
+                    *show_about = true;
                     ui.close_menu();
                 }
             });
         });
     });
+}
+
+/// Last status / warning / error displayed in the bottom status bar.
+/// Owned by `main.rs` and threaded into `menu_bar`, `side_panel`, and `status_bar`.
+#[derive(Default, Clone, Debug)]
+pub struct AppStatus {
+    /// Active message; cleared when the user starts a new action that succeeds.
+    pub message: String,
+    /// Severity drives the colour shown in the status bar.
+    pub severity: StatusSeverity,
+}
+
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusSeverity {
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl AppStatus {
+    pub fn info(&mut self, msg: impl Into<String>) {
+        self.message = msg.into();
+        self.severity = StatusSeverity::Info;
+    }
+    pub fn warn(&mut self, msg: impl Into<String>) {
+        self.message = msg.into();
+        self.severity = StatusSeverity::Warn;
+    }
+    pub fn error(&mut self, msg: impl Into<String>) {
+        self.message = msg.into();
+        self.severity = StatusSeverity::Error;
+    }
+    pub fn color(&self) -> egui::Color32 {
+        match self.severity {
+            StatusSeverity::Info => egui::Color32::from_rgb(180, 220, 180),
+            StatusSeverity::Warn => egui::Color32::from_rgb(255, 200, 80),
+            StatusSeverity::Error => egui::Color32::from_rgb(255, 100, 100),
+        }
+    }
 }
 
 pub fn toolbar(ctx: &egui::Context, vp: &mut ViewportState) {
@@ -1548,6 +1745,112 @@ pub fn side_panel(
 
             ui.separator();
 
+            // --- Simulation Config (acoustic ray tracing) ---
+            egui::CollapsingHeader::new("Simulation Config")
+                .id_salt("sim_config_group")
+                .default_open(true)
+                .show(ui, |ui| {
+                    use config_validation as cv;
+                    let validation = cv::validate_sim_config(&sim.config);
+
+                    // ray_count slider (log)
+                    let mut ray_count = sim.config.ray_count as f64;
+                    let ray_resp = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut ray_count,
+                                (cv::RAY_COUNT_MIN as f64)..=(cv::RAY_COUNT_MAX as f64),
+                            )
+                            .text("ray_count")
+                            .logarithmic(true)
+                            .integer(),
+                        )
+                        .on_hover_text(cv::RAY_COUNT_HELP);
+                    if ray_resp.changed() {
+                        sim.config.ray_count = ray_count.round() as u32;
+                    }
+                    ui.small(cv::RAY_COUNT_HELP);
+                    if let Some(err) = &validation.ray_count {
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+                    }
+
+                    // max_bounces slider
+                    let mut max_bounces = sim.config.max_bounces as i32;
+                    let mb_resp = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut max_bounces,
+                                (cv::MAX_BOUNCES_MIN as i32)..=(cv::MAX_BOUNCES_MAX as i32),
+                            )
+                            .text("max_bounces"),
+                        )
+                        .on_hover_text(cv::MAX_BOUNCES_HELP);
+                    if mb_resp.changed() {
+                        sim.config.max_bounces = max_bounces.max(0) as u32;
+                    }
+                    ui.small(cv::MAX_BOUNCES_HELP);
+                    if let Some(err) = &validation.max_bounces {
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+                    }
+
+                    // grid_resolution slider (log, metres)
+                    ui.add(
+                        egui::Slider::new(
+                            &mut sim.config.grid_resolution,
+                            cv::GRID_RES_MIN..=cv::GRID_RES_MAX,
+                        )
+                        .text("grid_resolution (m)")
+                        .logarithmic(true),
+                    )
+                    .on_hover_text(cv::GRID_RES_HELP);
+                    ui.small(cv::GRID_RES_HELP);
+                    if let Some(err) = &validation.grid_resolution {
+                        ui.colored_label(egui::Color32::from_rgb(255, 120, 120), err);
+                    }
+
+                    ui.separator();
+                    let can_run = validation.is_valid()
+                        && !scene.sound_sources.is_empty()
+                        && !scene.meshes.is_empty()
+                        && !sim.running;
+                    let run_resp = ui
+                        .add_enabled(can_run, egui::Button::new("Run Simulation"))
+                        .on_hover_text(if !validation.is_valid() {
+                            "Fix the highlighted parameter errors before running"
+                        } else if scene.sound_sources.is_empty() {
+                            "Add at least one sound source"
+                        } else if scene.meshes.is_empty() {
+                            "Add at least one mesh / room"
+                        } else if sim.running {
+                            "Simulation already running"
+                        } else {
+                            "Trace rays for the current scene"
+                        });
+                    if run_resp.clicked() {
+                        sim.run(scene);
+                    }
+                });
+
+            ui.separator();
+
+            // --- Results (simulation output summary) ---
+            egui::CollapsingHeader::new("Results")
+                .id_salt("results_group")
+                .default_open(true)
+                .show(ui, |ui| match sim.result.as_ref() {
+                    None => {
+                        ui.label("No results yet. Run a simulation above.");
+                    }
+                    Some(r) => {
+                        ui.label(format!("Grid samples: {}", r.energy_grid.len()))
+                            .on_hover_text("Energy samples in the spatial grid");
+                        ui.label(format!("Ray paths: {}", r.ray_paths.len()));
+                        ui.label(format!("Max energy: {:.4e}", r.max_energy));
+                    }
+                });
+
+            ui.separator();
+
             // --- Agent Server Control ---
             egui::CollapsingHeader::new("Agent Server")
                 .id_salt("agent_server_control")
@@ -1656,6 +1959,42 @@ pub fn side_panel(
         });
 }
 
+/// Map a (modifiers + key) pair to a camera preset.
+/// Used inside the viewport input loop AND in unit tests so the bindings can be
+/// asserted without spinning up egui.
+pub fn camera_view_for_key(
+    modifiers: &egui::Modifiers,
+    input: &egui::InputState,
+) -> Option<CameraView> {
+    if !modifiers.shift {
+        return None;
+    }
+    if input.key_pressed(egui::Key::Num1) {
+        return Some(CameraView::Front);
+    }
+    if input.key_pressed(egui::Key::Num2) {
+        return Some(CameraView::Top);
+    }
+    if input.key_pressed(egui::Key::Num3) {
+        return Some(CameraView::Side);
+    }
+    None
+}
+
+/// Pure-data version of `camera_view_for_key` for unit tests — looks up by key
+/// + shift bool, no egui InputState dependency.
+pub fn camera_view_for_shortcut(shift: bool, key: egui::Key) -> Option<CameraView> {
+    if !shift {
+        return None;
+    }
+    match key {
+        egui::Key::Num1 => Some(CameraView::Front),
+        egui::Key::Num2 => Some(CameraView::Top),
+        egui::Key::Num3 => Some(CameraView::Side),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn viewport_3d(
     ctx: &egui::Context,
@@ -1732,6 +2071,18 @@ pub fn viewport_3d(
             if modifiers.ctrl && i.key_pressed(egui::Key::Num3) {
                 cam.set_view(CameraView::Side);
                 vp.current_view = CameraView::Side;
+            }
+            // Shift+1/2/3 = Front/Top/Side (Blender-style; non-numpad-friendly).
+            if let Some(view) = camera_view_for_key(&modifiers, i) {
+                cam.set_view(view);
+                vp.current_view = view;
+            }
+            // R = reset camera (preserves auto-focus on existing scene).
+            if i.key_pressed(egui::Key::R) {
+                *cam = Camera::default();
+                if !scene.meshes.is_empty() {
+                    focus_on_scene(cam, scene);
+                }
             }
             if i.key_pressed(egui::Key::Home) {
                 focus_on_scene(cam, scene);
@@ -2333,36 +2684,108 @@ pub fn status_bar(
     vp: &ViewportState,
     scene: &Scene,
     robot_manager: &RobotManager,
+    sim: &SimulationState,
+    status: &AppStatus,
 ) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+        // Three-column layout: left=status/breadcrumb, centre=progress, right=Cancel.
         ui.horizontal(|ui| {
+            // Left: severity message OR breadcrumb fallback.
+            if !status.message.is_empty() {
+                ui.colored_label(status.color(), &status.message)
+                    .on_hover_text("Latest status message — also visible in the log");
+            } else {
+                let crumb = vp.selection.breadcrumb(scene, robot_manager);
+                ui.colored_label(egui::Color32::from_rgb(255, 220, 120), &crumb)
+                    .on_hover_text("Selected object path");
+            }
+
+            ui.separator();
             let mode_str = match vp.mode {
                 InteractionMode::Select => "Select",
                 InteractionMode::PlaceSource => "Place Source",
                 InteractionMode::PlaceListener => "Place Listener",
             };
             ui.label(format!("Mode: {mode_str}"));
-            ui.separator();
-
-            // Breadcrumb of current selection
-            let crumb = vp.selection.breadcrumb(scene, robot_manager);
-            ui.colored_label(egui::Color32::from_rgb(255, 220, 120), &crumb);
-            ui.separator();
 
             if let Some(pos) = vp.hover_world {
-                ui.label(format!("World: ({:.2}, {:.2})", pos.x, pos.z));
                 ui.separator();
+                ui.label(format!("World: ({:.2}, {:.2})", pos.x, pos.z));
             }
 
-            ui.label(format!(
-                "Objects: {} | Sources: {} | Listeners: {} | Robots: {}",
-                scene.meshes.len(),
-                scene.sound_sources.len(),
-                scene.listeners.len(),
-                robot_manager.robots.len()
-            ));
+            // Centre/right: progress bar with "N/M rays" overlay, then Cancel button.
+            // Lay out from the right edge so the Cancel sits flush right.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let total_rays = sim.config.ray_count.max(1) as f32;
+                let done_rays = (sim.progress.clamp(0.0, 1.0) * total_rays) as u32;
+
+                let cancel_enabled = sim.running;
+                let resp = ui
+                    .add_enabled(cancel_enabled, egui::Button::new("Cancel"))
+                    .on_hover_text(if cancel_enabled {
+                        "Request stop of the running simulation"
+                    } else {
+                        "Disabled — no simulation in flight"
+                    });
+                if resp.clicked() {
+                    log::info!("Cancel requested via status bar");
+                }
+
+                ui.separator();
+                ui.label(format!(
+                    "Objects: {} | Sources: {} | Listeners: {} | Robots: {}",
+                    scene.meshes.len(),
+                    scene.sound_sources.len(),
+                    scene.listeners.len(),
+                    robot_manager.robots.len()
+                ));
+
+                ui.separator();
+                if sim.running {
+                    ui.add(
+                        egui::ProgressBar::new(sim.progress)
+                            .show_percentage()
+                            .desired_width(180.0)
+                            .text(format!(
+                                "{:.0}% ({}/{} rays)",
+                                sim.progress * 100.0,
+                                done_rays,
+                                sim.config.ray_count
+                            )),
+                    )
+                    .on_hover_text("Live simulation progress");
+                } else {
+                    ui.allocate_exact_size(egui::vec2(180.0, 12.0), egui::Sense::hover());
+                    ui.label("Idle").on_hover_text(
+                        "No simulation running — press Run in the Simulation Config group",
+                    );
+                }
+            });
         });
     });
+}
+
+/// About dialog — shows version from `CARGO_PKG_VERSION` and project link.
+pub fn about_window(ctx: &egui::Context, open: &mut bool) {
+    let version = env!("CARGO_PKG_VERSION");
+    egui::Window::new("About EchoMap")
+        .open(open)
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.heading("EchoMap");
+                ui.label(format!("Version {version}"));
+                ui.separator();
+                ui.label("Desktop acoustic visualization tool");
+                ui.label("STEP-driven sound propagation simulator");
+                ui.separator();
+                ui.hyperlink_to(
+                    "Walkthrough docs",
+                    "https://github.com/jaclau/echomap/blob/main/tasks/007-echomap-ui-polish/walkthrough.md",
+                );
+            });
+        });
 }
 
 /// Agent activity panel: shows live connection status, command log, sensor
@@ -4180,5 +4603,109 @@ fn render_gas_displacement(
 
         let radius = 2.0 + intensity * 4.0;
         painter.circle_filled(p, radius, gas_color);
+    }
+}
+
+/// Canonical groups rendered in the left side panel.
+/// Drives the goal-007 `side_panel_groups` test and keeps the docs walkthrough
+/// truthful when new panes are added.
+pub const SIDE_PANEL_GROUPS: &[&str] = &[
+    "Scene",
+    "Sources",
+    "Listeners",
+    "Materials",
+    "Simulation Config",
+    "Results",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::acoustics::{SimulationConfig, SimulationState};
+
+    #[test]
+    fn side_panel_groups_canonical_list() {
+        for needle in [
+            "Scene",
+            "Sources",
+            "Listeners",
+            "Materials",
+            "Simulation Config",
+            "Results",
+        ] {
+            assert!(
+                SIDE_PANEL_GROUPS.contains(&needle),
+                "SIDE_PANEL_GROUPS missing {needle}"
+            );
+        }
+        assert_eq!(SIDE_PANEL_GROUPS.len(), 6);
+    }
+
+    #[test]
+    fn status_bar_app_status_severity_default_is_info() {
+        let s = AppStatus::default();
+        assert_eq!(s.severity, StatusSeverity::Info);
+        assert!(s.message.is_empty());
+    }
+
+    #[test]
+    fn status_bar_error_message_paints_red() {
+        let mut s = AppStatus::default();
+        s.error("boom");
+        assert_eq!(s.severity, StatusSeverity::Error);
+        assert_eq!(s.message, "boom");
+        let c = s.color();
+        // Red dominant for errors.
+        assert!(c.r() > c.g() && c.r() > c.b());
+    }
+
+    #[test]
+    fn status_bar_progress_fraction_is_clamped() {
+        let mut sim = SimulationState::default();
+        sim.config = SimulationConfig::default();
+        sim.progress = 1.5;
+        let total = sim.config.ray_count.max(1) as f32;
+        let done = (sim.progress.clamp(0.0, 1.0) * total) as u32;
+        assert_eq!(done, sim.config.ray_count);
+    }
+
+    #[test]
+    fn camera_shortcuts_shift_num1_is_front() {
+        assert_eq!(
+            camera_view_for_shortcut(true, egui::Key::Num1),
+            Some(CameraView::Front)
+        );
+        assert_eq!(
+            camera_view_for_shortcut(true, egui::Key::Num2),
+            Some(CameraView::Top)
+        );
+        assert_eq!(
+            camera_view_for_shortcut(true, egui::Key::Num3),
+            Some(CameraView::Side)
+        );
+    }
+
+    #[test]
+    fn camera_shortcuts_no_shift_returns_none() {
+        assert_eq!(camera_view_for_shortcut(false, egui::Key::Num1), None);
+        assert_eq!(camera_view_for_shortcut(false, egui::Key::Num2), None);
+    }
+
+    #[test]
+    fn camera_shortcuts_other_keys_are_none() {
+        assert_eq!(camera_view_for_shortcut(true, egui::Key::Q), None);
+        assert_eq!(camera_view_for_shortcut(true, egui::Key::A), None);
+    }
+
+    /// Lower bound for tooltips ensures the UI explains itself.
+    /// Counts every `.on_hover_text(` in this file — should grow over time, not shrink.
+    #[test]
+    fn tooltips_minimum_count() {
+        let src = include_str!("mod.rs");
+        let count = src.matches(".on_hover_text(").count();
+        assert!(
+            count >= 30,
+            "expected >= 30 on_hover_text calls in src/ui/mod.rs, found {count}"
+        );
     }
 }

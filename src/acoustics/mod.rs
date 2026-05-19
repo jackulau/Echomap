@@ -2,4 +2,4 @@ pub mod bvh;
 pub mod ray;
 pub mod simulation;
 
-pub use simulation::SimulationState;
+pub use simulation::{GridPoint, SimulationConfig, SimulationResult, SimulationState};

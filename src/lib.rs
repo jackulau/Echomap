@@ -8,6 +8,7 @@ pub mod robot;
 pub mod scenarios;
 pub mod scene;
 pub mod surface;
+pub mod teleop;
 pub mod ui;
 
 pub mod benchmarks;

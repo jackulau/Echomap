@@ -158,6 +158,16 @@ mod app {
                 &mut self.activity_log,
             );
 
+            // Drain the acoustic sim's bounded mpsc — new ray paths arrive
+            // from the worker thread here. If anything arrived, schedule
+            // another paint so the new geometry shows up immediately.
+            // While the sim is still running we keep requesting repaints
+            // so progress and live ray paths update at the display rate.
+            let drained = self.simulation.tick();
+            if drained || self.simulation.is_running() {
+                ctx.request_repaint();
+            }
+
             echomap::ui::menu_bar(
                 ctx,
                 &mut self.show_settings,

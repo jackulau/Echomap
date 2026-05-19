@@ -23,6 +23,14 @@ the updated baselines alongside the optimisation.
 | collision/detect_robot_collisions_2bots     | time   | 223 ns     | broad+narrow phase, 2 robots       |
 | acoustics/ray_triangle_intersect            | time   | 6.64 ns    | Möller–Trumbore                    |
 | acoustics/ray_refract_air_water             | time   | 31.7 ns    | Fresnel + Snell                    |
+| acoustics_box_room/brute_force/1k           | time   | ≤50 ms     | 5×5×3 m, 1 000 rays, brute scan    |
+| acoustics_box_room/bvh/1k                   | time   | ≤30 ms     | same scene, BVH path               |
+| acoustics_studio/brute_force/10k            | time   | record†    | studio.step, 10 000 rays, baseline |
+| acoustics_studio/bvh/10k                    | time   | ≥5x speedup vs studio brute_force baseline | BVH spatial accel target |
+
+† Captured fresh per host on first `cargo bench --bench acoustics`. The
+brute_force/10k number is the rolling baseline that the BVH bench is
+required to beat by ≥5x — see `acoustics_studio/bvh/10k` row above.
 
 ## Regression Gate
 

@@ -99,6 +99,7 @@ impl SceneObject {
     }
 }
 
+#[derive(Clone)]
 pub struct SoundSource {
     pub position: Vec3,
     pub frequency_hz: f32,

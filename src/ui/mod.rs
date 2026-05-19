@@ -1076,20 +1076,27 @@ pub fn side_panel(
 
             ui.add_space(8.0);
 
-            let can_run =
-                !sim.running && !scene.meshes.is_empty() && !scene.sound_sources.is_empty();
+            let can_run = !sim.is_running()
+                && !scene.meshes.is_empty()
+                && !scene.sound_sources.is_empty();
             if ui
                 .add_enabled(can_run, egui::Button::new("Run Simulation"))
                 .clicked()
             {
-                sim.run(scene);
+                sim.start(scene);
             }
 
-            if sim.running {
-                ui.spinner();
+            if sim.is_running() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("{:.0}%", sim.progress() * 100.0));
+                    if ui.button("Cancel").clicked() {
+                        sim.cancel();
+                    }
+                });
             }
 
-            if let Some(ref result) = sim.result {
+            if let Some(result) = sim.result() {
                 ui.label(format!(
                     "Rays: {} | Grid: {}",
                     result.ray_paths.len(),
@@ -2007,22 +2014,32 @@ pub fn viewport_3d(
             }
         }
 
-        // Ray paths
+        // Ray paths — render the running stream as it arrives, then the
+        // final result once the worker has joined. This is the visible
+        // non-blocking behaviour: rays keep appearing while the worker is
+        // still tracing.
         if vp.show_rays {
-            if let Some(ref result) = sim.result {
-                let ray_color = egui::Color32::from_rgba_premultiplied(255, 200, 50, 30);
-                let max_draw = 500.min(result.ray_paths.len());
-                for path in &result.ray_paths[..max_draw] {
-                    for segment in path.windows(2) {
-                        let p1 = project_3d(segment[0], cam, center, scale);
-                        let p2 = project_3d(segment[1], cam, center, scale);
-                        painter.line_segment([p1, p2], egui::Stroke::new(0.5, ray_color));
-                    }
+            let ray_color = egui::Color32::from_rgba_premultiplied(255, 200, 50, 30);
+            let live_paths = sim.partial_paths();
+            let max_draw = 500.min(live_paths.len());
+            for path in &live_paths[..max_draw] {
+                for segment in path.windows(2) {
+                    let p1 = project_3d(segment[0], cam, center, scale);
+                    let p2 = project_3d(segment[1], cam, center, scale);
+                    painter.line_segment([p1, p2], egui::Stroke::new(0.5, ray_color));
                 }
+            }
 
+            if let Some(result) = sim.result() {
+                // Visualise the band-summed total. SimulationResult now
+                // carries per-band data; the 2D viewport collapses it to a
+                // single scalar so the heat map stays meaningful until a
+                // band-aware UI surfaces it explicitly.
+                let max_total = result.max_energy.iter().sum::<f32>();
                 for gp in &result.energy_grid {
-                    if gp.energy > 0.01 {
-                        let color = energy_to_color(gp.energy, result.max_energy);
+                    let total = gp.energy_total();
+                    if total > 0.01 {
+                        let color = energy_to_color(total, max_total);
                         let p = project_3d(gp.position, cam, center, scale);
                         if rect.contains(p) {
                             painter.circle_filled(p, 2.0, color);

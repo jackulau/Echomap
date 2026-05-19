@@ -118,7 +118,11 @@ pub fn benchmark_fresnel_reflection() -> BenchmarkResult {
     );
     let normal = Vec3::new(0.0, 1.0, 0.0);
     let result = ray.refract(normal, water).unwrap();
-    let actual = result.reflected_energy as f64;
+    // Reflected energy is per-band; at normal incidence all bands carry the
+    // same scalar, so reading band 0 reproduces the original Fresnel
+    // benchmark exactly without leaking per-band detail to the analytical
+    // suite.
+    let actual = result.reflected_energy[0] as f64;
 
     BenchmarkResult::new("fresnel_reflection", expected, actual, 0.01)
 }

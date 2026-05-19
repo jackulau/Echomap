@@ -41,6 +41,31 @@ impl Default for SimulationConfig {
     }
 }
 
+impl SimulationConfig {
+    /// Validate the config: `ray_count > 0`, `max_bounces >= 0` (always
+    /// true for u32, kept for symmetry), `grid_resolution > 0 && finite`.
+    /// `energy_threshold` may be zero (rays trace until max_bounces) but
+    /// must be finite and non-negative. Returns descriptive errors so the
+    /// UI status bar can surface them verbatim.
+    pub fn validate(&self) -> Result<(), crate::scene::primitives::ValidationError> {
+        use crate::scene::primitives::{validate_positive_dim, ValidationError};
+        if self.ray_count == 0 {
+            return Err(ValidationError::NonPositiveU32 {
+                name: "ray_count".into(),
+                value: self.ray_count,
+            });
+        }
+        validate_positive_dim("grid_resolution", self.grid_resolution)?;
+        if !self.energy_threshold.is_finite() || self.energy_threshold < 0.0 {
+            return Err(ValidationError::NotFinite {
+                name: "energy_threshold".into(),
+                value: self.energy_threshold,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// A traced ray's full path: positions and per-point band energies.
 /// `positions[i]` is the ray's location after its i-th interaction, and
 /// `band_energies[i]` is the 6-band energy it carried at that point.

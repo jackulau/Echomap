@@ -183,8 +183,11 @@ pub fn menu_bar(
                         .pick_file()
                     {
                         match crate::io::load_step_file(&path) {
-                            Ok(objects) => {
-                                scene.meshes.extend(objects);
+                            Ok(result) => {
+                                for w in &result.warnings {
+                                    log::warn!("STEP warning: {w}");
+                                }
+                                scene.meshes.extend(result.objects);
                                 focus_on_scene(&mut vp.camera, scene);
                                 log::info!("Loaded STEP: {}", path.display());
                             }

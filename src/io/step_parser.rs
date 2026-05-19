@@ -9,7 +9,6 @@ use crate::scene::{AcousticMaterial, Mesh, SceneObject, Triangle, Vertex};
 pub enum StepError {
     Io(std::io::Error),
     InvalidFormat(String),
-    NoGeometry,
 }
 
 impl std::fmt::Display for StepError {
@@ -17,9 +16,21 @@ impl std::fmt::Display for StepError {
         match self {
             StepError::Io(e) => write!(f, "IO error: {e}"),
             StepError::InvalidFormat(s) => write!(f, "Invalid STEP: {s}"),
-            StepError::NoGeometry => write!(f, "No geometry found in STEP file"),
         }
     }
+}
+
+impl std::error::Error for StepError {}
+
+/// Successful parse result. `warnings` collects every malformed-but-skipped
+/// entity / missing reference / self-referencing record encountered during
+/// the parse. The parser never panics — anything it cannot interpret turns
+/// into a warning, and parsing continues. Callers should surface warnings
+/// in the UI status bar (handoff to goal 007).
+#[derive(Default, Clone)]
+pub struct StepLoadResult {
+    pub objects: Vec<SceneObject>,
+    pub warnings: Vec<String>,
 }
 
 struct StepEntity {
@@ -27,24 +38,37 @@ struct StepEntity {
     raw_args: String,
 }
 
-pub fn load_step_file(path: &Path) -> Result<Vec<SceneObject>, StepError> {
+/// Maximum entity ID we'll accept. Real STEP files rarely exceed millions
+/// of entities; anything past this cap is almost certainly malformed input
+/// and risks DoS via hash-map blowup.
+pub const MAX_ENTITY_ID: u32 = 10_000_000;
+
+/// Maximum recursion depth when resolving nested entity references. Belt-
+/// and-suspenders against self-referencing cycles even though the current
+/// resolver is non-recursive.
+const MAX_RESOLUTION_DEPTH: usize = 32;
+
+pub fn load_step_file(path: &Path) -> Result<StepLoadResult, StepError> {
     let content = std::fs::read_to_string(path).map_err(StepError::Io)?;
 
     if !content.contains("ISO-10303-21") {
         return Err(StepError::InvalidFormat("Not a valid STEP file".into()));
     }
 
-    let entities = parse_all_entities(&content);
-    let objects = build_objects(&entities);
+    let mut warnings: Vec<String> = Vec::new();
+    let entities = parse_all_entities(&content, &mut warnings);
+    let objects = build_objects(&entities, &mut warnings);
 
+    // Empty geometry is allowed — emit a warning, return Ok with empty list.
+    // Callers can decide whether that's a deal-breaker.
     if objects.is_empty() {
-        return Err(StepError::NoGeometry);
+        warnings.push("STEP file parsed successfully but contains no recognisable geometry".into());
     }
 
-    Ok(objects)
+    Ok(StepLoadResult { objects, warnings })
 }
 
-fn parse_all_entities(content: &str) -> HashMap<u32, StepEntity> {
+fn parse_all_entities(content: &str, warnings: &mut Vec<String>) -> HashMap<u32, StepEntity> {
     let mut entities = HashMap::new();
 
     let data_start = content.find("DATA;").unwrap_or(0);
@@ -67,14 +91,41 @@ fn parse_all_entities(content: &str) -> HashMap<u32, StepEntity> {
             continue;
         }
 
-        if let Some((id, entity)) = parse_entity_line(&current_line) {
-            entities.insert(id, entity);
+        match parse_entity_line(&current_line) {
+            Some((id, entity)) => {
+                if id > MAX_ENTITY_ID {
+                    warnings.push(format!(
+                        "skipping entity #{id}: exceeds MAX_ENTITY_ID ({MAX_ENTITY_ID})"
+                    ));
+                } else {
+                    entities.insert(id, entity);
+                }
+            }
+            None => {
+                // Only warn for non-trivial lines so we don't spam on
+                // comments or fragments.
+                if current_line.len() > 4 && current_line.contains('#') {
+                    warnings.push(format!(
+                        "malformed entity record skipped: {}",
+                        truncate_for_message(&current_line)
+                    ));
+                }
+            }
         }
 
         current_line.clear();
     }
 
     entities
+}
+
+fn truncate_for_message(s: &str) -> String {
+    const MAX: usize = 80;
+    if s.len() <= MAX {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..MAX])
+    }
 }
 
 fn parse_entity_line(line: &str) -> Option<(u32, StepEntity)> {
@@ -176,21 +227,47 @@ fn extract_point(entity: &StepEntity) -> Option<Vec3> {
     }
 }
 
-fn resolve_vertex_point(entities: &HashMap<u32, StepEntity>, vp_id: u32) -> Option<Vec3> {
+fn resolve_vertex_point(
+    entities: &HashMap<u32, StepEntity>,
+    vp_id: u32,
+    visited: &mut std::collections::HashSet<u32>,
+    depth: usize,
+) -> Option<Vec3> {
+    if depth > MAX_RESOLUTION_DEPTH {
+        return None;
+    }
+    if !visited.insert(vp_id) {
+        // Already visited — cycle detected, abort this branch.
+        return None;
+    }
     let vp = entities.get(&vp_id)?;
     if vp.entity_type != "VERTEX_POINT" {
         return None;
     }
     let refs = extract_refs(&vp.raw_args);
-    let point_id = refs.first()?;
-    let point = entities.get(point_id)?;
+    let point_id = *refs.first()?;
+    if point_id == vp_id {
+        // Direct self-reference.
+        return None;
+    }
+    let point = entities.get(&point_id)?;
     extract_point(point)
 }
 
-fn resolve_face_vertices(entities: &HashMap<u32, StepEntity>, face_id: u32) -> Vec<Vec3> {
+fn resolve_face_vertices(
+    entities: &HashMap<u32, StepEntity>,
+    face_id: u32,
+    warnings: &mut Vec<String>,
+) -> Vec<Vec3> {
     let face = match entities.get(&face_id) {
         Some(e) if e.entity_type == "ADVANCED_FACE" => e,
-        _ => return Vec::new(),
+        Some(_) => return Vec::new(), // wrong-type face ref — silently skip
+        None => {
+            warnings.push(format!(
+                "missing entity ref #{face_id} (expected ADVANCED_FACE)"
+            ));
+            return Vec::new();
+        }
     };
 
     let face_args = split_top_args(&face.raw_args);
@@ -259,7 +336,8 @@ fn resolve_face_vertices(entities: &HashMap<u32, StepEntity>, face_id: u32) -> V
             let vertex_ref = if forward { v1_ref } else { v2_ref };
 
             if let Some(vr) = vertex_ref {
-                if let Some(point) = resolve_vertex_point(entities, vr) {
+                let mut visited = std::collections::HashSet::new();
+                if let Some(point) = resolve_vertex_point(entities, vr, &mut visited, 0) {
                     vertices.push(point);
                 }
             }
@@ -308,7 +386,10 @@ fn compute_face_normal(vertices: &[Vec3]) -> Vec3 {
     e1.cross(e2).normalize_or_zero()
 }
 
-fn build_objects(entities: &HashMap<u32, StepEntity>) -> Vec<SceneObject> {
+fn build_objects(
+    entities: &HashMap<u32, StepEntity>,
+    warnings: &mut Vec<String>,
+) -> Vec<SceneObject> {
     let mut objects = Vec::new();
 
     let breps: Vec<(u32, &StepEntity)> = entities
@@ -318,10 +399,10 @@ fn build_objects(entities: &HashMap<u32, StepEntity>) -> Vec<SceneObject> {
         .collect();
 
     if breps.is_empty() {
-        return build_from_shells(entities);
+        return build_from_shells(entities, warnings);
     }
 
-    for (_brep_id, brep) in &breps {
+    for (brep_id, brep) in &breps {
         let brep_args = split_top_args(&brep.raw_args);
         let name = brep_args
             .first()
@@ -331,10 +412,17 @@ fn build_objects(entities: &HashMap<u32, StepEntity>) -> Vec<SceneObject> {
         let shell_ref = extract_refs(&brep.raw_args).last().copied();
         let shell_id = match shell_ref {
             Some(id) => id,
-            None => continue,
+            None => {
+                warnings.push(format!("BREP #{brep_id} has no shell reference"));
+                continue;
+            }
         };
+        if shell_id == *brep_id {
+            warnings.push(format!("BREP #{brep_id} self-references — skipping"));
+            continue;
+        }
 
-        if let Some(obj) = build_shell_object(entities, shell_id, &name) {
+        if let Some(obj) = build_shell_object(entities, shell_id, &name, warnings) {
             objects.push(obj);
         }
     }
@@ -342,7 +430,10 @@ fn build_objects(entities: &HashMap<u32, StepEntity>) -> Vec<SceneObject> {
     objects
 }
 
-fn build_from_shells(entities: &HashMap<u32, StepEntity>) -> Vec<SceneObject> {
+fn build_from_shells(
+    entities: &HashMap<u32, StepEntity>,
+    warnings: &mut Vec<String>,
+) -> Vec<SceneObject> {
     let mut objects = Vec::new();
 
     for (&shell_id, entity) in entities {
@@ -355,7 +446,7 @@ fn build_from_shells(entities: &HashMap<u32, StepEntity>) -> Vec<SceneObject> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("Shell #{shell_id}"));
 
-        if let Some(obj) = build_shell_object(entities, shell_id, &name) {
+        if let Some(obj) = build_shell_object(entities, shell_id, &name, warnings) {
             objects.push(obj);
         }
     }
@@ -367,8 +458,17 @@ fn build_shell_object(
     entities: &HashMap<u32, StepEntity>,
     shell_id: u32,
     name: &str,
+    warnings: &mut Vec<String>,
 ) -> Option<SceneObject> {
-    let shell = entities.get(&shell_id)?;
+    let shell = match entities.get(&shell_id) {
+        Some(e) => e,
+        None => {
+            warnings.push(format!(
+                "missing entity ref #{shell_id} (expected CLOSED_SHELL)"
+            ));
+            return None;
+        }
+    };
     if shell.entity_type != "CLOSED_SHELL" {
         return None;
     }
@@ -383,7 +483,13 @@ fn build_shell_object(
     let mut all_triangles = Vec::new();
 
     for &face_id in &face_refs {
-        let face_verts = resolve_face_vertices(entities, face_id);
+        if face_id == shell_id {
+            warnings.push(format!(
+                "shell #{shell_id} face reference points to itself — skipping"
+            ));
+            continue;
+        }
+        let face_verts = resolve_face_vertices(entities, face_id, warnings);
         all_triangles.extend(triangulate_face(&face_verts));
     }
 
@@ -410,9 +516,12 @@ mod tests {
     #[test]
     fn test_box_room_step() {
         let path = PathBuf::from("test_files/box_room.step");
-        let objects = load_step_file(&path).expect("Failed to load box_room.step");
-        assert!(!objects.is_empty(), "Should have at least one object");
-        let obj = &objects[0];
+        let result = load_step_file(&path).expect("Failed to load box_room.step");
+        assert!(
+            !result.objects.is_empty(),
+            "Should have at least one object"
+        );
+        let obj = &result.objects[0];
         assert!(!obj.mesh.triangles.is_empty(), "Should have triangles");
         println!("Box room: {} triangles", obj.mesh.triangles.len());
     }
@@ -420,12 +529,12 @@ mod tests {
     #[test]
     fn test_l_room_step() {
         let path = PathBuf::from("test_files/l_room.step");
-        let objects = load_step_file(&path).expect("Failed to load l_room.step");
-        assert!(!objects.is_empty());
-        let total_tris: usize = objects.iter().map(|o| o.mesh.triangles.len()).sum();
+        let result = load_step_file(&path).expect("Failed to load l_room.step");
+        assert!(!result.objects.is_empty());
+        let total_tris: usize = result.objects.iter().map(|o| o.mesh.triangles.len()).sum();
         println!(
             "L-room: {} objects, {} total triangles",
-            objects.len(),
+            result.objects.len(),
             total_tris
         );
     }
@@ -433,10 +542,167 @@ mod tests {
     #[test]
     fn test_studio_step() {
         let path = PathBuf::from("test_files/studio.step");
-        let objects = load_step_file(&path).expect("Failed to load studio.step");
-        assert!(objects.len() >= 2, "Studio should have room + partition");
-        for obj in &objects {
+        let result = load_step_file(&path).expect("Failed to load studio.step");
+        assert!(
+            result.objects.len() >= 2,
+            "Studio should have room + partition"
+        );
+        for obj in &result.objects {
             println!("{}: {} triangles", obj.name, obj.mesh.triangles.len());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // D7 — STEP parser robustness verify tests (echomap-v1 T9)
+    // -----------------------------------------------------------------------
+
+    fn write_fixture(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("echomap_step_fixtures");
+        std::fs::create_dir_all(&dir).expect("create temp fixture dir");
+        let path = dir.join(name);
+        std::fs::write(&path, body).expect("write fixture");
+        path
+    }
+
+    /// A STEP file with garbage records in the DATA section must parse
+    /// successfully (no panic) and surface warnings for the malformed lines.
+    #[test]
+    fn malformed_entity() {
+        let body = "ISO-10303-21;\n\
+                    HEADER;\n\
+                    ENDSEC;\n\
+                    DATA;\n\
+                    #1 = CARTESIAN_POINT('p1',(0.0,0.0,0.0));\n\
+                    garbage line with no = sign;\n\
+                    #not_a_number = SOMETHING;\n\
+                    #2 = ;\n\
+                    ENDSEC;\n\
+                    END-ISO-10303-21;\n";
+        let path = write_fixture("malformed_entity.step", body);
+        let result = load_step_file(&path).expect("parser must NOT panic on garbage");
+        assert!(
+            !result.warnings.is_empty(),
+            "expected warnings for malformed entries, got none"
+        );
+    }
+
+    /// A STEP file referencing entities that don't exist must skip the
+    /// references gracefully and warn about each missing ID.
+    #[test]
+    fn missing_entity_ref() {
+        let body = "ISO-10303-21;\n\
+                    HEADER;\n\
+                    ENDSEC;\n\
+                    DATA;\n\
+                    #10 = MANIFOLD_SOLID_BREP('Box',#999);\n\
+                    ENDSEC;\n\
+                    END-ISO-10303-21;\n";
+        let path = write_fixture("missing_ref.step", body);
+        let result = load_step_file(&path).expect("parser must not error on missing refs");
+        // shell ref #999 is missing — we expect a warning.
+        let has_missing_warning = result.warnings.iter().any(|w| w.contains("#999"));
+        assert!(
+            has_missing_warning,
+            "expected a missing-ref warning for #999, got {:?}",
+            result.warnings
+        );
+        // No objects should be built.
+        assert!(
+            result.objects.is_empty(),
+            "objects should not be built from dangling refs"
+        );
+    }
+
+    /// A self-referencing entity (e.g. `#1 = X(#1, ...)`) must NOT cause an
+    /// infinite loop. The parser walks the chain with a visited-set guard.
+    #[test]
+    fn self_referencing_entity() {
+        let body = "ISO-10303-21;\n\
+                    HEADER;\n\
+                    ENDSEC;\n\
+                    DATA;\n\
+                    #1 = MANIFOLD_SOLID_BREP('Self',#1);\n\
+                    #2 = CLOSED_SHELL('Self',(#2));\n\
+                    #3 = VERTEX_POINT('vp',#3);\n\
+                    ENDSEC;\n\
+                    END-ISO-10303-21;\n";
+        let path = write_fixture("self_ref.step", body);
+        let start = std::time::Instant::now();
+        let result = load_step_file(&path).expect("parser must not error on self-refs");
+        let elapsed = start.elapsed();
+        // Bound the time aggressively: if the parser looped we'd never reach
+        // here, but a 250 ms ceiling also catches accidental quadratic blowup.
+        assert!(
+            elapsed.as_millis() < 250,
+            "parser should be near-instant on self-ref file, took {} ms",
+            elapsed.as_millis()
+        );
+        // At least one warning about self-reference or shell skip.
+        let has_self_ref_warning = result
+            .warnings
+            .iter()
+            .any(|w| w.contains("self-references") || w.contains("itself"));
+        assert!(
+            has_self_ref_warning,
+            "expected a self-ref warning, got {:?}",
+            result.warnings
+        );
+    }
+
+    /// A STEP file with only HEADER metadata (no DATA entities) must return
+    /// Ok with empty geometry — never error. Useful for round-tripping
+    /// header-only exports without breaking the importer.
+    #[test]
+    fn metadata_only_file() {
+        let body = "ISO-10303-21;\n\
+                    HEADER;\n\
+                    FILE_DESCRIPTION(('test'),'2;1');\n\
+                    FILE_NAME('empty.step','2026-05-18',(''),(''),'','','');\n\
+                    FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\n\
+                    ENDSEC;\n\
+                    DATA;\n\
+                    ENDSEC;\n\
+                    END-ISO-10303-21;\n";
+        let path = write_fixture("metadata_only.step", body);
+        let result = load_step_file(&path).expect("metadata-only must parse OK");
+        assert!(
+            result.objects.is_empty(),
+            "no geometry expected, got {} objects",
+            result.objects.len()
+        );
+        // The "no recognisable geometry" warning should fire.
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("no recognisable geometry")),
+            "expected empty-geometry warning, got {:?}",
+            result.warnings
+        );
+    }
+
+    /// Entity IDs above MAX_ENTITY_ID must be rejected with a warning, not
+    /// inserted into the entity map (which could DoS via huge allocations).
+    #[test]
+    fn large_entity_ids() {
+        let body = format!(
+            "ISO-10303-21;\n\
+             HEADER;\n\
+             ENDSEC;\n\
+             DATA;\n\
+             #{}  = CARTESIAN_POINT('huge',(0.0,0.0,0.0));\n\
+             #1  = CARTESIAN_POINT('ok',(1.0,2.0,3.0));\n\
+             ENDSEC;\n\
+             END-ISO-10303-21;\n",
+            MAX_ENTITY_ID + 100
+        );
+        let path = write_fixture("large_ids.step", &body);
+        let result = load_step_file(&path).expect("parser must not error on huge IDs");
+        let saw_large_warning = result.warnings.iter().any(|w| w.contains("MAX_ENTITY_ID"));
+        assert!(
+            saw_large_warning,
+            "expected MAX_ENTITY_ID warning, got {:?}",
+            result.warnings
+        );
     }
 }

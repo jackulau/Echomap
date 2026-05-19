@@ -2013,7 +2013,7 @@ pub fn viewport_3d(
                 let ray_color = egui::Color32::from_rgba_premultiplied(255, 200, 50, 30);
                 let max_draw = 500.min(result.ray_paths.len());
                 for path in &result.ray_paths[..max_draw] {
-                    for segment in path.windows(2) {
+                    for segment in path.positions.windows(2) {
                         let p1 = project_3d(segment[0], cam, center, scale);
                         let p2 = project_3d(segment[1], cam, center, scale);
                         painter.line_segment([p1, p2], egui::Stroke::new(0.5, ray_color));

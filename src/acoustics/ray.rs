@@ -8,20 +8,57 @@ use glam::Vec3;
 /// entry, with headroom for refraction-branched paths.
 pub const DEFAULT_MAX_PATH_LENGTH: usize = 64;
 
+/// Number of frequency bands tracked per ray. Order matches
+/// [`crate::scene::material::FrequencyBands::as_array`]:
+/// 125, 250, 500, 1000, 2000, 4000 Hz.
+pub const BAND_COUNT: usize = 6;
+
+/// Fallback absorption coefficient used when a material reports a non-finite
+/// or out-of-range value for one of its bands.
+pub const DEFAULT_ABSORPTION: f32 = 0.5;
+
+/// Per-band acoustic energy across the 6 standard frequency bands.
+pub type BandEnergies = [f32; BAND_COUNT];
+
+/// Linear average of all 6 bands — used as the broadband summary.
+pub fn broadband(bands: &BandEnergies) -> f32 {
+    bands.iter().sum::<f32>() / BAND_COUNT as f32
+}
+
+/// Sanitize an absorption coefficient — non-finite or out-of-range values
+/// fall back to [`DEFAULT_ABSORPTION`] per the spec ("Missing band uses 0.5
+/// default"). Clamping prevents negative or super-unity absorption from
+/// inverting / amplifying energy.
+pub fn sanitize_absorption(a: f32) -> f32 {
+    if a.is_finite() && (0.0..=1.0).contains(&a) {
+        a
+    } else {
+        DEFAULT_ABSORPTION
+    }
+}
+
 #[allow(dead_code)]
 pub struct RefractionResult {
     pub reflected_direction: Vec3,
     pub reflected_energy: f32,
+    pub reflected_band_energies: BandEnergies,
     pub transmitted_direction: Option<Vec3>,
     pub transmitted_energy: f32,
+    pub transmitted_band_energies: BandEnergies,
 }
 
 pub struct AcousticRay {
     pub origin: Vec3,
     pub direction: Vec3,
+    /// Broadband cache — synced from `energy_bands` after every mutation.
     pub energy: f32,
+    /// Per-band energy across the 6 standard frequency bands.
+    pub energy_bands: BandEnergies,
     pub bounces: u32,
     pub path: Vec<Vec3>,
+    /// Band energies at each path point — parallel to `path`. Captures the
+    /// ray's current per-band energy at the moment that point was recorded.
+    pub band_path: Vec<BandEnergies>,
     pub current_medium: MediumProperties,
     pub frequency_hz: f32,
     /// Maximum number of points retained in `path`. Older points are dropped
@@ -38,17 +75,34 @@ pub struct RayHit {
 }
 
 impl AcousticRay {
-    pub fn new(origin: Vec3, direction: Vec3, energy: f32, medium: MediumProperties) -> Self {
+    /// Construct a new ray with `broadband_energy` distributed equally across
+    /// all 6 frequency bands. Source spectrum is flat by default; callers can
+    /// override `energy_bands` after construction for non-flat sources.
+    pub fn new(
+        origin: Vec3,
+        direction: Vec3,
+        broadband_energy: f32,
+        medium: MediumProperties,
+    ) -> Self {
+        let bands: BandEnergies = [broadband_energy; BAND_COUNT];
         Self {
             origin,
             direction: direction.normalize(),
-            energy,
+            energy: broadband_energy,
+            energy_bands: bands,
             bounces: 0,
             path: vec![origin],
+            band_path: vec![bands],
             current_medium: medium,
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
         }
+    }
+
+    /// Recompute the broadband `energy` cache from `energy_bands`.
+    #[inline]
+    fn sync_broadband(&mut self) {
+        self.energy = broadband(&self.energy_bands);
     }
 
     /// Re-derive the speed of sound for the current medium from a measured
@@ -71,11 +125,17 @@ impl AcousticRay {
 
     /// Append a point to `path`, evicting the oldest entry once
     /// `max_path_length` is reached. Keeps memory bounded over long traces.
+    /// The current `energy_bands` snapshot is recorded in parallel so the grid
+    /// builder can attribute per-band energy to passing rays.
     pub fn push_path_point(&mut self, p: Vec3) {
         if self.path.len() >= self.max_path_length {
             self.path.remove(0);
+            if !self.band_path.is_empty() {
+                self.band_path.remove(0);
+            }
         }
         self.path.push(p);
+        self.band_path.push(self.energy_bands);
     }
 
     pub fn intersect_triangle(&self, tri: &Triangle) -> Option<f32> {
@@ -114,8 +174,12 @@ impl AcousticRay {
     }
 
     pub fn reflect(&mut self, hit: &RayHit, material: &AcousticMaterial) {
-        let absorption = material.absorption.average();
-        self.energy *= 1.0 - absorption;
+        let abs_bands = material.absorption.as_array();
+        for i in 0..BAND_COUNT {
+            let a = sanitize_absorption(abs_bands[i]);
+            self.energy_bands[i] *= 1.0 - a;
+        }
+        self.sync_broadband();
         self.origin = hit.point + hit.normal * 1e-4;
         self.direction = self.direction - 2.0 * self.direction.dot(hit.normal) * hit.normal;
         self.direction = self.direction.normalize();
@@ -142,8 +206,10 @@ impl AcousticRay {
             return Some(RefractionResult {
                 reflected_direction: self.direction,
                 reflected_energy: 0.0,
+                reflected_band_energies: [0.0; BAND_COUNT],
                 transmitted_direction: Some(self.direction),
                 transmitted_energy: self.energy,
+                transmitted_band_energies: self.energy_bands,
             });
         }
 
@@ -169,8 +235,10 @@ impl AcousticRay {
             return Some(RefractionResult {
                 reflected_direction: reflected_dir.normalize(),
                 reflected_energy: self.energy,
+                reflected_band_energies: self.energy_bands,
                 transmitted_direction: None,
                 transmitted_energy: 0.0,
+                transmitted_band_energies: [0.0; BAND_COUNT],
             });
         }
 
@@ -196,26 +264,35 @@ impl AcousticRay {
         let ratio = c2 / c1;
         let transmitted_dir = ratio * self.direction + (ratio * cos_theta1 - cos_theta2) * n;
 
+        // Fresnel R/T depends on impedance + angle — not frequency — so the
+        // same scalar coefficient applies to every band.
+        let mut refl_bands: BandEnergies = [0.0; BAND_COUNT];
+        let mut trans_bands: BandEnergies = [0.0; BAND_COUNT];
+        for i in 0..BAND_COUNT {
+            refl_bands[i] = self.energy_bands[i] * r;
+            trans_bands[i] = self.energy_bands[i] * t;
+        }
+
         Some(RefractionResult {
             reflected_direction: reflected_dir.normalize(),
             reflected_energy: self.energy * r,
+            reflected_band_energies: refl_bands,
             transmitted_direction: Some(transmitted_dir.normalize()),
             transmitted_energy: self.energy * t,
+            transmitted_band_energies: trans_bands,
         })
     }
 
-    /// Apply volumetric attenuation based on distance traveled in the current
-    /// medium. Uses the frequency-dependent attenuation coefficient from
-    /// `current_medium.attenuation`.
+    /// Apply volumetric attenuation per band, using each band's attenuation
+    /// coefficient from `current_medium.attenuation`. High-frequency bands
+    /// attenuate faster than low-frequency bands in real media.
     pub fn apply_volumetric_attenuation(&mut self, distance: f32) {
-        let atten_db_per_m = self
-            .current_medium
-            .attenuation
-            .at_frequency(self.frequency_hz);
-        // Convert dB attenuation to linear factor: factor = 10^(-atten*distance/10)
-        let total_atten_db = atten_db_per_m * distance;
-        let factor = 10.0_f32.powf(-total_atten_db / 10.0);
-        self.energy *= factor;
+        let atten_bands = self.current_medium.attenuation.as_array();
+        for i in 0..BAND_COUNT {
+            let factor = 10.0_f32.powf(-atten_bands[i] * distance / 10.0);
+            self.energy_bands[i] *= factor;
+        }
+        self.sync_broadband();
     }
 }
 
@@ -241,8 +318,10 @@ mod tests {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: Vec3::new(0.0, -1.0, 0.0),
             energy: 1.0,
+            energy_bands: [1.0; BAND_COUNT],
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            band_path: vec![[1.0; BAND_COUNT]],
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -291,8 +370,10 @@ mod tests {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
             energy: 1.0,
+            energy_bands: [1.0; BAND_COUNT],
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            band_path: vec![[1.0; BAND_COUNT]],
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -323,8 +404,10 @@ mod tests {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
             energy: 1.0,
+            energy_bands: [1.0; BAND_COUNT],
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            band_path: vec![[1.0; BAND_COUNT]],
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -361,8 +444,10 @@ mod tests {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
             energy: 1.0,
+            energy_bands: [1.0; BAND_COUNT],
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            band_path: vec![[1.0; BAND_COUNT]],
             current_medium: water(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -459,8 +544,10 @@ mod tests {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
             energy: 1.0,
+            energy_bands: [1.0; BAND_COUNT],
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            band_path: vec![[1.0; BAND_COUNT]],
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -501,8 +588,10 @@ mod tests {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: Vec3::new(0.0, -1.0, 0.0),
             energy: 1.0,
+            energy_bands: [1.0; BAND_COUNT],
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            band_path: vec![[1.0; BAND_COUNT]],
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -556,8 +645,10 @@ mod tests {
                 origin: Vec3::new(0.0, 1.0, 0.0),
                 direction: dir,
                 energy: 1.0,
+                energy_bands: [1.0; BAND_COUNT],
                 bounces: 0,
                 path: vec![Vec3::new(0.0, 1.0, 0.0)],
+                band_path: vec![[1.0; BAND_COUNT]],
                 current_medium: air(),
                 frequency_hz: 1000.0,
                 max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -602,32 +693,34 @@ mod tests {
 
     #[test]
     fn test_volumetric_attenuation_frequency_dependent() {
-        // High frequency should attenuate more than low frequency
-        let mut ray_low = AcousticRay::new(
+        // Per-band attenuation: high bands attenuate more than low bands.
+        // Single ray, single distance — check the band ARRAY divergence.
+        let mut ray = AcousticRay::new(
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
             1.0,
             water(),
         );
-        ray_low.frequency_hz = 125.0;
+        ray.apply_volumetric_attenuation(100.0);
 
-        let mut ray_high = AcousticRay::new(
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            1.0,
-            water(),
-        );
-        ray_high.frequency_hz = 4000.0;
-
-        ray_low.apply_volumetric_attenuation(100.0);
-        ray_high.apply_volumetric_attenuation(100.0);
-
+        // In water, 4 kHz attenuates more than 125 Hz over 100 m.
         assert!(
-            ray_high.energy < ray_low.energy,
-            "High freq ({}) should attenuate more than low freq ({}) in water",
-            ray_high.energy,
-            ray_low.energy
+            ray.energy_bands[5] < ray.energy_bands[0],
+            "4 kHz band ({}) should attenuate more than 125 Hz band ({}) in water",
+            ray.energy_bands[5],
+            ray.energy_bands[0]
         );
+        // Sanity: monotonic decrease across bands (atten coefficient grows w/ freq).
+        for i in 1..BAND_COUNT {
+            assert!(
+                ray.energy_bands[i] <= ray.energy_bands[i - 1] + 1e-6,
+                "band {} energy ({}) should not exceed band {} ({})",
+                i,
+                ray.energy_bands[i],
+                i - 1,
+                ray.energy_bands[i - 1]
+            );
+        }
     }
 
     #[test]
@@ -638,8 +731,10 @@ mod tests {
             origin: Vec3::new(0.0, 1.0, 0.0),
             direction: dir,
             energy: 1.0,
+            energy_bands: [1.0; BAND_COUNT],
             bounces: 0,
             path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            band_path: vec![[1.0; BAND_COUNT]],
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,

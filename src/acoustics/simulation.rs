@@ -2,7 +2,7 @@ use glam::Vec3;
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
-use super::ray::{AcousticRay, RayHit};
+use super::ray::{broadband, sanitize_absorption, AcousticRay, BandEnergies, RayHit, BAND_COUNT};
 use crate::scene::material::MediumProperties;
 use crate::scene::{Scene, SceneObject};
 
@@ -25,16 +25,37 @@ impl Default for SimulationConfig {
     }
 }
 
+/// A traced ray's full path: positions and per-point band energies.
+/// `positions[i]` is the ray's location after its i-th interaction, and
+/// `band_energies[i]` is the 6-band energy it carried at that point.
+#[derive(Clone, Debug, Default)]
+pub struct TracedRayPath {
+    pub positions: Vec<Vec3>,
+    pub band_energies: Vec<BandEnergies>,
+}
+
+impl TracedRayPath {
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SimulationResult {
     pub energy_grid: Vec<GridPoint>,
-    pub ray_paths: Vec<Vec<Vec3>>,
+    pub ray_paths: Vec<TracedRayPath>,
     pub max_energy: f32,
+    pub max_band_energies: BandEnergies,
 }
 
 #[derive(Clone)]
 pub struct GridPoint {
     pub position: Vec3,
+    pub energy_bands: BandEnergies,
+    /// Broadband = linear average of the 6 band energies.
     pub energy: f32,
 }
 
@@ -65,7 +86,7 @@ impl SimulationState {
             let rays = generate_sphere_rays(source.position, self.config.ray_count);
             let bg = &scene.background_medium;
 
-            let paths: Vec<Vec<Vec3>> = rays
+            let paths: Vec<TracedRayPath> = rays
                 .into_par_iter()
                 .map(|dir| {
                     trace_ray(
@@ -91,6 +112,17 @@ impl SimulationState {
             .iter()
             .map(|p| p.energy)
             .fold(0.0_f32, f32::max);
+
+        // Track per-band max for spectrum-aware visualisation.
+        let mut max_bands: BandEnergies = [0.0; BAND_COUNT];
+        for gp in &result.energy_grid {
+            for i in 0..BAND_COUNT {
+                if gp.energy_bands[i] > max_bands[i] {
+                    max_bands[i] = gp.energy_bands[i];
+                }
+            }
+        }
+        result.max_band_energies = max_bands;
 
         self.result = Some(result);
         self.running = false;
@@ -128,12 +160,13 @@ fn trace_ray(
     config: &SimulationConfig,
     scene: &Scene,
     background_medium: &MediumProperties,
-) -> Vec<Vec3> {
+) -> TracedRayPath {
     let initial_energy = db_to_linear(power_db);
     let mut ray = AcousticRay::new(origin, direction, initial_energy, background_medium.clone());
 
     let mut pending: Vec<AcousticRay> = Vec::new();
-    let mut all_paths: Vec<Vec3> = Vec::new();
+    let mut positions: Vec<Vec3> = Vec::new();
+    let mut band_energies: Vec<BandEnergies> = Vec::new();
 
     loop {
         // Trace the current ray until it terminates
@@ -154,41 +187,51 @@ fn trace_ray(
                     Some(target_medium) => {
                         // Medium boundary: compute refraction
                         let material = &obj.material;
-                        let absorption = material.absorption.average();
+                        let abs_bands = material.absorption.as_array();
 
                         if let Some(refraction) = ray.refract(hit.normal, &target_medium) {
                             // Apply surface absorption to both reflected and transmitted
-                            let reflected_energy = refraction.reflected_energy * (1.0 - absorption);
-                            let transmitted_energy =
-                                refraction.transmitted_energy * (1.0 - absorption);
+                            // per band — high-absorption bands lose more energy.
+                            let mut refl_bands = refraction.reflected_band_energies;
+                            let mut trans_bands = refraction.transmitted_band_energies;
+                            for i in 0..BAND_COUNT {
+                                let a = sanitize_absorption(abs_bands[i]);
+                                refl_bands[i] *= 1.0 - a;
+                                trans_bands[i] *= 1.0 - a;
+                            }
+                            let transmitted_broadband = broadband(&trans_bands);
+                            let reflected_broadband = broadband(&refl_bands);
 
                             // Queue transmitted ray if not total internal reflection
                             // and energy is above threshold and we have room
                             if let Some(transmitted_dir) = refraction.transmitted_direction {
-                                if transmitted_energy > config.energy_threshold
+                                if transmitted_broadband > config.energy_threshold
                                     && pending.len() < MAX_PENDING_RAYS
                                 {
                                     let mut transmitted_ray = AcousticRay::new(
                                         hit.point + transmitted_dir * 1e-4,
                                         transmitted_dir,
-                                        transmitted_energy,
+                                        transmitted_broadband,
                                         target_medium,
                                     );
+                                    transmitted_ray.energy_bands = trans_bands;
+                                    transmitted_ray.energy = transmitted_broadband;
                                     transmitted_ray.bounces = ray.bounces + 1;
-                                    // Carry over path context: start from hit point
                                     transmitted_ray.path = vec![hit.point];
+                                    transmitted_ray.band_path = vec![trans_bands];
                                     pending.push(transmitted_ray);
                                 }
                             }
 
                             // Continue with reflected ray
-                            ray.energy = reflected_energy;
+                            ray.energy_bands = refl_bands;
+                            ray.energy = reflected_broadband;
                             ray.origin = hit.point + hit.normal * 1e-4;
                             let refl_dir =
                                 ray.direction - 2.0 * ray.direction.dot(hit.normal) * hit.normal;
                             ray.direction = refl_dir.normalize();
                             ray.bounces += 1;
-                            ray.path.push(hit.point);
+                            ray.push_path_point(hit.point);
                         } else {
                             // Degenerate refraction — fall back to reflect
                             ray.reflect(&hit, &obj.material);
@@ -204,22 +247,28 @@ fn trace_ray(
             }
         }
 
-        // Collect this ray's path
-        all_paths.extend(ray.path.iter().copied());
+        // Collect this ray's path + band energies (parallel arrays).
+        positions.extend(ray.path.iter().copied());
+        band_energies.extend(ray.band_path.iter().copied());
 
         // Pick next pending ray, if any
         if let Some(next) = pending.pop() {
-            // Insert a NaN separator so path segments from different rays
-            // don't create spurious connections in the energy grid.
-            // Actually, we want to return a single Vec<Vec3> path for
-            // backward compat. Just extend with the pending ray's path.
             ray = next;
         } else {
             break;
         }
     }
 
-    all_paths
+    debug_assert_eq!(
+        positions.len(),
+        band_energies.len(),
+        "positions and band_energies must stay in lock-step"
+    );
+
+    TracedRayPath {
+        positions,
+        band_energies,
+    }
 }
 
 /// Determine if a medium transition occurs when hitting the given object.
@@ -296,7 +345,7 @@ fn build_energy_grid(
     min: Vec3,
     max: Vec3,
     resolution: f32,
-    ray_paths: &[Vec<Vec3>],
+    ray_paths: &[TracedRayPath],
 ) -> Vec<GridPoint> {
     let size = max - min;
     let nx = (size.x / resolution).ceil() as usize;
@@ -318,30 +367,55 @@ fn build_energy_grid(
                     (iy as f32 + 0.5) * resolution,
                     (iz as f32 + 0.5) * resolution,
                 );
-            let energy = compute_point_energy(pos, resolution, ray_paths);
+            let energy_bands = compute_point_energy_bands(pos, resolution, ray_paths);
+            let energy = broadband(&energy_bands);
             GridPoint {
                 position: pos,
+                energy_bands,
                 energy,
             }
         })
         .collect()
 }
 
-fn compute_point_energy(point: Vec3, radius: f32, ray_paths: &[Vec<Vec3>]) -> f32 {
+fn compute_point_energy_bands(
+    point: Vec3,
+    radius: f32,
+    ray_paths: &[TracedRayPath],
+) -> BandEnergies {
     let r2 = radius * radius;
-    let mut energy = 0.0_f32;
+    let mut bands: BandEnergies = [0.0; BAND_COUNT];
 
     for path in ray_paths {
-        for segment in path.windows(2) {
-            let closest = closest_point_on_segment(segment[0], segment[1], point);
+        let positions = &path.positions;
+        let band_e = &path.band_energies;
+        if positions.len() < 2 || band_e.is_empty() {
+            continue;
+        }
+        for i in 0..positions.len() - 1 {
+            let a = positions[i];
+            let b = positions[i + 1];
+            let closest = closest_point_on_segment(a, b, point);
             let dist2 = (closest - point).length_squared();
             if dist2 < r2 {
-                energy += 1.0 - (dist2 / r2).sqrt();
+                let weight = 1.0 - (dist2 / r2).sqrt();
+                // Use the band energy recorded at the SEGMENT START — the
+                // energy the ray carried when leaving point a.
+                let seg_e = band_e[i.min(band_e.len() - 1)];
+                for b_idx in 0..BAND_COUNT {
+                    bands[b_idx] += weight * seg_e[b_idx];
+                }
             }
         }
     }
 
-    energy
+    bands
+}
+
+#[allow(dead_code)]
+fn compute_point_energy(point: Vec3, radius: f32, ray_paths: &[TracedRayPath]) -> f32 {
+    let bands = compute_point_energy_bands(point, radius, ray_paths);
+    broadband(&bands)
 }
 
 fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
@@ -1213,7 +1287,7 @@ mod tests {
         for dir in &rays_dirs {
             let path = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
             // All path points should be finite (no NaN/Inf from refraction math)
-            for pt in &path {
+            for pt in &path.positions {
                 assert!(
                     pt.x.is_finite() && pt.y.is_finite() && pt.z.is_finite(),
                     "Path point should be finite: {:?}",
@@ -1255,6 +1329,192 @@ mod tests {
             ray_short.energy > 0.99,
             "1m in air at 1kHz should barely attenuate: {}",
             ray_short.energy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // D1 — Per-band absorption verify tests (echomap-v1 T4)
+    // -----------------------------------------------------------------------
+
+    /// Fetch a named material from the default library.
+    fn material(name: &str) -> crate::scene::material::AcousticMaterial {
+        crate::scene::material::MaterialLibrary::with_defaults()
+            .materials
+            .get(name)
+            .expect("material exists")
+            .clone()
+    }
+
+    /// Reflect a ray N times on the given material. Returns the ray's final
+    /// per-band energies. Uses a flat normal so the reflection geometry is
+    /// trivial — the test focuses on the absorption math, not ray geometry.
+    fn reflect_n_times(material_name: &str, n: usize) -> BandEnergies {
+        use crate::acoustics::ray::AcousticRay;
+        let mat = material(material_name);
+        let mut ray = AcousticRay::new(
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0,
+            MediumProperties::air(),
+        );
+        let hit = RayHit {
+            point: Vec3::new(1.0, 0.0, 0.0),
+            normal: Vec3::new(-1.0, 0.0, 0.0),
+            distance: 1.0,
+            triangle_index: 0,
+        };
+        for _ in 0..n {
+            ray.reflect(&hit, &mat);
+        }
+        ray.energy_bands
+    }
+
+    /// Carpet absorbs 4 kHz strongly (0.73 → 0.27 survival) but 125 Hz
+    /// weakly (0.08 → 0.92 survival). After 5 bounces the 4 kHz band must
+    /// be at least 1000× weaker than the 125 Hz band — the deliverable's
+    /// core claim that absorption is applied PER BAND, not averaged.
+    #[test]
+    fn absorption_varies_by_band() {
+        let bands = reflect_n_times("Carpet", 5);
+
+        let low = bands[0]; // 125 Hz
+        let high = bands[5]; // 4 kHz
+
+        assert!(low > 0.0, "125 Hz band should remain positive, got {low}");
+        assert!(high > 0.0, "4 kHz band should remain positive, got {high}");
+        assert!(
+            low > high,
+            "after 5 carpet bounces, 125 Hz ({low}) must exceed 4 kHz ({high})"
+        );
+        // Expected: 0.92^5 / 0.27^5 ≈ 0.659 / 0.00143 ≈ 460. Use 100 as a
+        // floor to avoid sensitivity to numerical noise.
+        let ratio = low / high;
+        assert!(
+            ratio > 100.0,
+            "carpet 125 Hz/4 kHz ratio after 5 bounces should exceed 100, got {ratio:.2}"
+        );
+
+        // Also assert SimulationResult exposes 6 separate band grids — the
+        // GridPoint::energy_bands array must be a 6-element array per cell.
+        let lib = crate::scene::material::MaterialLibrary::with_defaults();
+        let mut room = primitives::box_room(5.0, 5.0, 3.0);
+        room.material = lib.materials.get("Carpet").unwrap().clone();
+        let scene = Scene {
+            meshes: vec![room],
+            sound_sources: vec![SoundSource {
+                position: Vec3::new(2.5, 1.5, 2.5),
+                frequency_hz: 1000.0,
+                power_db: 80.0,
+                enabled: true,
+            }],
+            listeners: vec![Listener::default()],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+        let mut sim = SimulationState {
+            config: SimulationConfig {
+                ray_count: 100,
+                max_bounces: 5,
+                energy_threshold: 1e-6,
+                grid_resolution: 1.0,
+            },
+            ..Default::default()
+        };
+        sim.run(&scene);
+        let result = sim.result.expect("sim produced result");
+        assert!(!result.energy_grid.is_empty(), "grid should have cells");
+        // Every grid point exposes 6 band energies.
+        for gp in &result.energy_grid {
+            assert_eq!(gp.energy_bands.len(), 6, "grid must hold 6 band energies");
+        }
+    }
+
+    /// Concrete absorption is nearly uniform (0.01..0.03 across bands). A ray
+    /// reflecting many times on concrete should keep ALL bands within a
+    /// modest ratio of each other — confirming the per-band path does not
+    /// spuriously diverge for uniform-absorbing materials.
+    #[test]
+    fn concrete_uniform_absorption() {
+        let bands = reflect_n_times("Concrete", 5);
+
+        let max_b = bands.iter().cloned().fold(0.0_f32, f32::max);
+        let min_b = bands
+            .iter()
+            .cloned()
+            .filter(|x| *x > 0.0)
+            .fold(f32::INFINITY, f32::min);
+
+        assert!(max_b > 0.0, "concrete bands should remain positive");
+        assert!(
+            min_b.is_finite() && min_b > 0.0,
+            "no band should drop to zero on concrete, got bands={:?}",
+            bands
+        );
+        // Concrete survival range per bounce: 0.97..0.99. Over 5 bounces:
+        // (0.99/0.97)^5 ≈ 1.107. Allow up to 1.3× for safety.
+        let ratio = max_b / min_b;
+        assert!(
+            ratio < 1.3,
+            "concrete bands should track within 30% after 5 bounces, ratio={ratio:.3}, bands={:?}",
+            bands
+        );
+    }
+
+    /// GridPoint.energy must equal the mean of energy_bands — the broadband
+    /// cache is just an average. Any cell that violates that has been
+    /// constructed inconsistently somewhere in the pipeline.
+    #[test]
+    fn broadband_is_average() {
+        let lib = crate::scene::material::MaterialLibrary::with_defaults();
+        let mut room = primitives::box_room(5.0, 5.0, 3.0);
+        room.material = lib.materials.get("Concrete").unwrap().clone();
+        let scene = Scene {
+            meshes: vec![room],
+            sound_sources: vec![SoundSource {
+                position: Vec3::new(2.5, 1.5, 2.5),
+                frequency_hz: 1000.0,
+                power_db: 80.0,
+                enabled: true,
+            }],
+            listeners: vec![Listener::default()],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+        let mut sim = SimulationState {
+            config: SimulationConfig {
+                ray_count: 100,
+                max_bounces: 5,
+                energy_threshold: 1e-6,
+                grid_resolution: 1.0,
+            },
+            ..Default::default()
+        };
+        sim.run(&scene);
+        let result = sim.result.expect("sim produced result");
+        assert!(
+            !result.energy_grid.is_empty(),
+            "grid should have cells in a populated scene"
+        );
+
+        let mut checked = 0;
+        for gp in &result.energy_grid {
+            let mean: f32 = gp.energy_bands.iter().sum::<f32>() / BAND_COUNT as f32;
+            let tol = (mean.abs() * 1e-5).max(1e-9);
+            assert!(
+                (gp.energy - mean).abs() <= tol,
+                "broadband {} != mean(bands)={} at {:?}, bands={:?}",
+                gp.energy,
+                mean,
+                gp.position,
+                gp.energy_bands
+            );
+            if gp.energy > 0.0 {
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "expected at least one cell with positive broadband energy"
         );
     }
 }

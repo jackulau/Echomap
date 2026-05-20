@@ -57,3 +57,59 @@ Open the printed log directory:
 Files: `plugins.log`, `hardware.log`, `server.log`, `boxing.log`. The
 failing phase prints its tail to stdout before exit; the full log lives
 in that directory.
+
+## Quality gate (goal/010)
+
+The ship-readiness gate is broader than smoke. Run every line below and
+expect each to exit 0 before tagging a release. Output snippets show the
+shape of a passing run so reviewers can spot regressions at a glance.
+
+### 1. Cargo workspace tests
+```bash
+cargo test --workspace
+```
+Expected tail: `test result: ok. 1076 passed; 5 ignored; 0 measured`
+(give or take new tests landed since this doc was written).
+
+### 2. Cargo clippy — zero warnings
+```bash
+cargo clippy --workspace -- -D warnings
+```
+Expected tail: `Finished \`dev\` profile [unoptimized + debuginfo] target(s) in …`
+with no `warning:` lines above the Finished marker.
+
+### 3. Cargo fmt — clean
+```bash
+cargo fmt -- --check
+```
+Expected: no output, exit 0. Any output means run `cargo fmt` before
+committing.
+
+### 4. Integration tests
+```bash
+cargo test --test integration
+```
+Expected tail: `test result: ok. 9 passed; 2 ignored` — the 7 acoustics
+cases (`test_*`), the boxing-round smoke, and the export-CSV deep case.
+
+### 5. Python pytest live gate
+```bash
+bash scripts/test_python_vs_live.sh
+```
+Expected tail: `========== 125 passed in N.NNs ==========`.
+Two-phase: smoke-binds release server on WS:9002 once, then runs the
+full `pytest python/ -v` suite with each live-server class spawning its
+own short-lived server.
+
+### Preflight (copy-pastable, single command)
+```bash
+cargo test --workspace \
+  && cargo clippy --workspace -- -D warnings \
+  && cargo fmt -- --check \
+  && cargo test --test integration \
+  && bash scripts/test_python_vs_live.sh \
+  && bash scripts/smoke_all.sh \
+  && echo "PREFLIGHT GREEN"
+```
+A clean run ends with the literal string `PREFLIGHT GREEN`. The first
+non-zero exit short-circuits the chain.

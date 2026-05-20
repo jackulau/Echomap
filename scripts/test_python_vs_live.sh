@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 # Live-server Python integration gate (goal/008 deliverable 6).
 #
-# Builds the release echomap_server binary, spawns a single long-lived
-# instance on port 9002, runs the full Python test suite against it, and
-# tears the server back down on exit (success or failure). Exit code is
-# pytest's.
+# Two-phase gate:
+#   1. Build the release `echomap_server` binary and prove it binds the
+#      goal's reference port (WS:9002). Smoke-tests connect + observe +
+#      stop so a broken build fails fast before pytest starts.
+#   2. Run the full Python suite (`pytest python/ -v`). The live-server
+#      test classes (test_agent_bind, test_agent_platform_e2e,
+#      test_bridge_parity) spawn their own short-lived servers on
+#      per-class ports — we explicitly UNSET WS_PORT/TCP_PORT so those
+#      spawns get clean defaults instead of inheriting ours.
+#
+# Exit code mirrors pytest's, modulo build/smoke failures (which return
+# distinct non-zero codes).
 #
 # Usage:
 #   bash scripts/test_python_vs_live.sh
 #   bash scripts/test_python_vs_live.sh -k bind   # forwarded to pytest
 #
 # Env overrides:
-#   ECHOMAP_LIVE_PORT  — port for the long-lived server (default 9002)
+#   ECHOMAP_LIVE_PORT  — WS port for the smoke phase (default 9002)
 #   ECHOMAP_LIVE_HOST  — bind host (default 127.0.0.1)
-#   ECHOMAP_LIVE_TIMEOUT — seconds to wait for the server to bind (default 30)
-#
-# Tests in python/tests/ that prefer to spawn their own short-lived server
-# (test_agent_bind, test_agent_platform_e2e) honor the WS_PORT env var, so
-# pointing them at our long-lived instance via WS_PORT keeps the surface
-# uniform across the suite.
+#   ECHOMAP_LIVE_TIMEOUT — seconds to wait for smoke server to bind (default 30)
 
 set -euo pipefail
 
@@ -30,7 +33,7 @@ TIMEOUT="${ECHOMAP_LIVE_TIMEOUT:-30}"
 
 log() { printf '==> %s\n' "$*"; }
 
-log "Building release echomap_server"
+log "Phase 1/2 — build release echomap_server"
 cargo build --release --manifest-path "${REPO_ROOT}/Cargo.toml" --bin echomap_server >/dev/null
 
 if [ ! -x "$SERVER_BIN" ]; then
@@ -38,37 +41,25 @@ if [ ! -x "$SERVER_BIN" ]; then
     exit 2
 fi
 
+log "Phase 1/2 — smoke-spawning server on ${HOST}:${PORT}"
 LOG_FILE="$(mktemp -t echomap_live_server.XXXXXX.log)"
-log "Spawning echomap_server on ${HOST}:${PORT} (log: ${LOG_FILE})"
-
-# Subshell so we can cleanly trap and kill on exit.
-WS_PORT="$PORT" ROUND_DURATION=30 NUM_ROUNDS=1 \
+WS_PORT="$PORT" TCP_PORT="$((PORT - 1))" ROUND_DURATION=30 NUM_ROUNDS=1 \
     "$SERVER_BIN" >"$LOG_FILE" 2>&1 &
-SERVER_PID=$!
+SMOKE_PID=$!
 
-cleanup() {
-    local rc=$?
-    if kill -0 "$SERVER_PID" 2>/dev/null; then
-        log "Stopping server (pid=${SERVER_PID})"
-        kill -TERM "$SERVER_PID" 2>/dev/null || true
-        # Wait briefly then SIGKILL if needed.
+cleanup_smoke() {
+    if kill -0 "$SMOKE_PID" 2>/dev/null; then
+        kill -TERM "$SMOKE_PID" 2>/dev/null || true
         for _ in 1 2 3 4 5; do
-            kill -0 "$SERVER_PID" 2>/dev/null || break
+            kill -0 "$SMOKE_PID" 2>/dev/null || break
             sleep 0.2
         done
-        kill -KILL "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
+        kill -KILL "$SMOKE_PID" 2>/dev/null || true
+        wait "$SMOKE_PID" 2>/dev/null || true
     fi
-    if [ "$rc" -ne 0 ]; then
-        echo "---- last 60 lines of server log ----" >&2
-        tail -n 60 "$LOG_FILE" >&2 || true
-    fi
-    rm -f "$LOG_FILE"
-    exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap 'rc=$?; cleanup_smoke; rm -f "$LOG_FILE"; exit $rc' EXIT INT TERM
 
-log "Waiting for port ${PORT} to accept connections (timeout ${TIMEOUT}s)"
 deadline=$(( $(date +%s) + TIMEOUT ))
 until python3 - "$HOST" "$PORT" <<'PY' 2>/dev/null
 import socket, sys
@@ -79,8 +70,9 @@ s.connect((host, port))
 s.close()
 PY
 do
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    if ! kill -0 "$SMOKE_PID" 2>/dev/null; then
         echo "FATAL: server died before binding port ${PORT}" >&2
+        tail -n 60 "$LOG_FILE" >&2 || true
         exit 3
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
@@ -89,11 +81,17 @@ do
     fi
     sleep 0.25
 done
-log "Server is accepting connections"
 
+log "Phase 1/2 — server bound port ${PORT}; tearing down smoke instance"
+cleanup_smoke
+rm -f "$LOG_FILE"
+trap - EXIT INT TERM
+
+log "Phase 2/2 — running pytest python/ -v"
+# Unset port env so each live test class gets to use its own port without
+# inheriting our smoke-phase values. PYTHONPATH wires up the in-tree
+# echomap_client without requiring `pip install -e`.
+unset WS_PORT TCP_PORT
 export PYTHONPATH="${REPO_ROOT}/python:${PYTHONPATH:-}"
-export WS_PORT="$PORT"
-
-log "Running pytest python/ -v"
 cd "$REPO_ROOT"
 python3 -m pytest python/ -v "$@"

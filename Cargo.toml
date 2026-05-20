@@ -5,26 +5,17 @@ edition = "2021"
 description = "Desktop acoustic visualization tool — load STEP models, simulate sound propagation, visualize results"
 
 [dependencies]
-# GUI + windowing
+# GUI + windowing — egui + eframe drive the entire desktop app.
 eframe = "0.31"
 egui = "0.31"
-egui_extras = "0.31"
 
-# 3D rendering
-wgpu = "24"
+# 3D math — glam is used pervasively (Vec3/Mat4/etc).
 glam = { version = "0.29", features = ["mint", "serde"] }
-bytemuck = { version = "1", features = ["derive"] }
 
-# Math / linear algebra
-nalgebra = "0.33"
-
-# Parallelism
+# Parallelism — rayon backs the multi-robot physics step + ray-cast.
 rayon = "1.10"
 
-# Audio playback
-cpal = "0.15"
-
-# File dialogs
+# File dialogs — STEP load, CSV export.
 rfd = "0.15"
 
 # Logging

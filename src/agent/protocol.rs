@@ -2,6 +2,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::robot::state::{ActionSpace, GymRobotState, ObservationSpace, RobotAction};
 
+pub const CAP_OBSERVE: &str = "observe";
+pub const CAP_STEP: &str = "step";
+pub const CAP_MOTORS: &str = "motors";
+pub const CAP_GRIPPERS: &str = "grippers";
+pub const CAP_SENSORS: &str = "sensors";
+pub const CAP_MESSAGING: &str = "messaging";
+pub const CAP_COMBAT: &str = "combat";
+
+/// Derive the capability list advertised in `ServerMessage::Bound` from the
+/// resolved observation and action spaces. Boxing humanoids (motors+sensors)
+/// get the full set including `"combat"` when `has_combat` is true; bare arm
+/// targets get a strict subset reflecting only wired features.
+pub fn capabilities_from_spaces(
+    obs: &ObservationSpace,
+    act: &ActionSpace,
+    has_combat: bool,
+) -> Vec<String> {
+    let mut caps = Vec::with_capacity(7);
+    caps.push(CAP_OBSERVE.to_string());
+    caps.push(CAP_STEP.to_string());
+    if act.num_motors > 0 {
+        caps.push(CAP_MOTORS.to_string());
+    }
+    if act.num_grippers > 0 {
+        caps.push(CAP_GRIPPERS.to_string());
+    }
+    if obs.num_sensors > 0 {
+        caps.push(CAP_SENSORS.to_string());
+    }
+    caps.push(CAP_MESSAGING.to_string());
+    if has_combat {
+        caps.push(CAP_COMBAT.to_string());
+    }
+    caps
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentMessage {
     pub from_robot_id: usize,
@@ -40,6 +76,10 @@ pub enum ClientMessage {
         to_robot_id: usize,
         content: String,
     },
+    /// Cancel any in-flight step on this session. Server replies with
+    /// `ServerMessage::Cancelled`. Safe to send even when no step is in
+    /// flight (idempotent — still returns Cancelled).
+    Cancel,
 }
 
 /// Messages sent from the server to the client (agent).
@@ -76,8 +116,54 @@ pub enum ServerMessage {
     MessageSent,
     Error {
         message: String,
+        /// Optional echo of the offending raw input (truncated to 512 chars)
+        /// so the client can diagnose schema drift without reproducing the
+        /// failure. Absent for non-protocol errors (e.g. simulation crashes).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        echo: Option<String>,
     },
+    /// Reply to a `Cancel` request. Confirms the in-flight step (if any) was
+    /// dropped and the session is back to idle.
+    Cancelled,
     Closed,
+}
+
+/// Truncate an arbitrary client input string to the limit used by
+/// `ServerMessage::Error.echo`. Keeps the first `MAX_ECHO_LEN` bytes,
+/// snapping to a UTF-8 boundary, and appends an ellipsis when truncated.
+pub const MAX_ECHO_LEN: usize = 512;
+pub fn truncate_echo(raw: &str) -> String {
+    if raw.len() <= MAX_ECHO_LEN {
+        return raw.to_string();
+    }
+    let mut end = MAX_ECHO_LEN;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = raw[..end].to_string();
+    out.push('…');
+    out
+}
+
+impl ServerMessage {
+    /// Build a protocol error without an echo. Use this everywhere except
+    /// session entry points that have access to the offending raw input.
+    pub fn error(message: impl Into<String>) -> Self {
+        ServerMessage::Error {
+            message: message.into(),
+            echo: None,
+        }
+    }
+
+    /// Build a protocol error carrying a truncated echo of the offending raw
+    /// client input. Use this from ws_server/tcp_server when JSON parsing or
+    /// schema validation fails so the client can diagnose drift.
+    pub fn error_with_echo(message: impl Into<String>, raw_input: &str) -> Self {
+        ServerMessage::Error {
+            message: message.into(),
+            echo: Some(truncate_echo(raw_input)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -266,11 +352,12 @@ mod tests {
     fn test_server_message_error_roundtrip() {
         let msg = ServerMessage::Error {
             message: "robot not found".to_string(),
+            echo: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ServerMessage = serde_json::from_str(&json).unwrap();
         match deser {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert_eq!(message, "robot not found");
             }
             other => panic!("Expected Error, got {:?}", other),
@@ -360,7 +447,7 @@ mod tests {
 
         let error: ServerMessage = serde_json::from_str(error_json).unwrap();
         match error {
-            ServerMessage::Error { message } => assert_eq!(message, "test error"),
+            ServerMessage::Error { message, .. } => assert_eq!(message, "test error"),
             other => panic!("Expected Error, got {:?}", other),
         }
 
@@ -459,11 +546,12 @@ mod tests {
     fn test_server_error_with_empty_message() {
         let msg = ServerMessage::Error {
             message: String::new(),
+            echo: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ServerMessage = serde_json::from_str(&json).unwrap();
         match deser {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(message.is_empty(), "empty error message should round-trip");
             }
             other => panic!("Expected Error, got {:?}", other),
@@ -538,11 +626,12 @@ mod tests {
     fn test_unicode_in_error_message() {
         let msg = ServerMessage::Error {
             message: "robot \u{1F916} not found \u{00E9}\u{00F1}".to_string(),
+            echo: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deser: ServerMessage = serde_json::from_str(&json).unwrap();
         match deser {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains('\u{1F916}'),
                     "unicode emoji should survive roundtrip"
@@ -843,5 +932,164 @@ mod tests {
             }
             other => panic!("Expected Observation, got {:?}", other),
         }
+    }
+
+    fn humanoid_spaces() -> (ObservationSpace, ActionSpace) {
+        (
+            ObservationSpace {
+                num_joint_positions: 3,
+                num_joint_velocities: 3,
+                num_sensors: 4,
+                joint_position_limits: vec![(-1.0, 1.0); 3],
+            },
+            ActionSpace {
+                num_motors: 3,
+                motor_limits: vec![(-10.0, 10.0); 3],
+                num_grippers: 0,
+            },
+        )
+    }
+
+    fn arm_spaces(
+        num_joints: usize,
+        grippers: usize,
+        sensors: usize,
+    ) -> (ObservationSpace, ActionSpace) {
+        (
+            ObservationSpace {
+                num_joint_positions: num_joints,
+                num_joint_velocities: num_joints,
+                num_sensors: sensors,
+                joint_position_limits: vec![(-1.0, 1.0); num_joints],
+            },
+            ActionSpace {
+                num_motors: num_joints,
+                motor_limits: vec![(-5.0, 5.0); num_joints],
+                num_grippers: grippers,
+            },
+        )
+    }
+
+    #[test]
+    fn capabilities_humanoid_with_combat_includes_combat_string() {
+        let (obs, act) = humanoid_spaces();
+        let caps = capabilities_from_spaces(&obs, &act, true);
+        let want: Vec<String> = [
+            CAP_OBSERVE,
+            CAP_STEP,
+            CAP_MOTORS,
+            CAP_SENSORS,
+            CAP_MESSAGING,
+            CAP_COMBAT,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(caps, want);
+    }
+
+    #[test]
+    fn capabilities_humanoid_without_combat_drops_combat_string() {
+        let (obs, act) = humanoid_spaces();
+        let caps = capabilities_from_spaces(&obs, &act, false);
+        assert!(!caps.iter().any(|c| c == CAP_COMBAT));
+        assert!(caps.contains(&CAP_MOTORS.to_string()));
+        assert!(caps.contains(&CAP_SENSORS.to_string()));
+    }
+
+    #[test]
+    fn capabilities_arm_with_grippers_only_advertises_wired_features() {
+        let (obs, act) = arm_spaces(6, 1, 0);
+        let caps = capabilities_from_spaces(&obs, &act, false);
+        let want: Vec<String> = [
+            CAP_OBSERVE,
+            CAP_STEP,
+            CAP_MOTORS,
+            CAP_GRIPPERS,
+            CAP_MESSAGING,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(caps, want);
+        assert!(!caps.iter().any(|c| c == CAP_SENSORS));
+        assert!(!caps.iter().any(|c| c == CAP_COMBAT));
+    }
+
+    #[test]
+    fn capabilities_observe_only_target_drops_motors_and_grippers() {
+        let (obs, act) = arm_spaces(0, 0, 2);
+        let caps = capabilities_from_spaces(&obs, &act, false);
+        let want: Vec<String> = [CAP_OBSERVE, CAP_STEP, CAP_SENSORS, CAP_MESSAGING]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(caps, want);
+    }
+
+    #[test]
+    fn capabilities_observe_step_messaging_always_present() {
+        let (obs, act) = arm_spaces(0, 0, 0);
+        let caps = capabilities_from_spaces(&obs, &act, false);
+        assert!(caps.contains(&CAP_OBSERVE.to_string()));
+        assert!(caps.contains(&CAP_STEP.to_string()));
+        assert!(caps.contains(&CAP_MESSAGING.to_string()));
+    }
+
+    #[test]
+    fn truncate_echo_preserves_short_input_unchanged() {
+        assert_eq!(truncate_echo("hello"), "hello");
+    }
+
+    #[test]
+    fn truncate_echo_truncates_long_input_with_ellipsis() {
+        let big = "x".repeat(2000);
+        let out = truncate_echo(&big);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), MAX_ECHO_LEN + 1);
+    }
+
+    #[test]
+    fn truncate_echo_handles_multibyte_boundary() {
+        let mut s = "a".repeat(MAX_ECHO_LEN - 1);
+        s.push('🦀');
+        s.push_str("tail");
+        let out = truncate_echo(&s);
+        // Must be valid UTF-8 (would not be a valid String if it weren't).
+        let _ = out.len();
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn cancel_client_message_roundtrip() {
+        let msg = ClientMessage::Cancel;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"cancel"}"#);
+        let back: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ClientMessage::Cancel));
+    }
+
+    #[test]
+    fn cancelled_server_message_roundtrip() {
+        let msg = ServerMessage::Cancelled;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"cancelled"}"#);
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, ServerMessage::Cancelled));
+    }
+
+    #[test]
+    fn error_with_echo_serializes_echo_field() {
+        let msg = ServerMessage::error_with_echo("bad shape", r#"{"type":"step","action":42}"#);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"echo\":"));
+        assert!(json.contains("\"message\":\"bad shape\""));
+    }
+
+    #[test]
+    fn error_without_echo_omits_echo_field() {
+        let msg = ServerMessage::error("internal failure");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("echo"), "echo skipped when None: {json}");
     }
 }

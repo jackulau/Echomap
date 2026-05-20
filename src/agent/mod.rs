@@ -1459,7 +1459,7 @@ mod tests {
         };
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action }).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "step after close should say not connected, got: {}",
@@ -1472,7 +1472,7 @@ mod tests {
         // Observe after close.
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Observe).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "observe after close should say not connected, got: {}",
@@ -1485,7 +1485,7 @@ mod tests {
         // Reset after close.
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "reset after close should say not connected, got: {}",
@@ -1591,7 +1591,7 @@ mod tests {
 
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 999 }).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid robot_id"),
                     "should mention invalid robot_id, got: {}",
@@ -1621,7 +1621,7 @@ mod tests {
         )
         .await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid robot_id"),
                     "usize::MAX robot_id should yield error, got: {}",
@@ -2268,7 +2268,7 @@ mod tests {
                 Some(Ok(WsMsg::Text(text))) => {
                     let msg: ServerMessage = serde_json::from_str(&text).unwrap();
                     match msg {
-                        ServerMessage::Error { message } => {
+                        ServerMessage::Error { message, .. } => {
                             assert!(
                                 message.contains("invalid JSON"),
                                 "WS malformed JSON error, got: {}",

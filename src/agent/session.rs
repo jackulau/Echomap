@@ -68,6 +68,7 @@ impl AgentSession {
                 to_robot_id,
                 content,
             } => self.handle_send_message(to_robot_id, content).await,
+            ClientMessage::Cancel => ServerMessage::Cancelled,
         }
     }
 
@@ -102,12 +103,13 @@ impl AgentSession {
         if self.robot_id.is_some() {
             return ServerMessage::Error {
                 message: "already bound to a target".to_string(),
+                echo: None,
             };
         }
 
         let (robot_id, normalized) = match Self::resolve_target(&target_id) {
             Ok(pair) => pair,
-            Err(message) => return ServerMessage::Error { message },
+            Err(message) => return ServerMessage::Error { message, echo: None },
         };
 
         match self
@@ -123,17 +125,17 @@ impl AgentSession {
                 self.step_count = 0;
                 self.observation_space = Some(observation_space.clone());
                 self.action_space = Some(action_space.clone());
-                let mut capabilities = vec!["observe".to_string(), "step".to_string()];
-                if action_space.num_motors > 0 {
-                    capabilities.push("motors".to_string());
-                }
-                if action_space.num_grippers > 0 {
-                    capabilities.push("grippers".to_string());
-                }
-                if observation_space.num_sensors > 0 {
-                    capabilities.push("sensors".to_string());
-                }
-                capabilities.push("messaging".to_string());
+                let has_combat = matches!(
+                    self.bridge
+                        .send_command(SimCommand::HasCombat { robot_id })
+                        .await,
+                    Ok(SimResponse::HasCombat { has_combat: true })
+                );
+                let capabilities = crate::agent::protocol::capabilities_from_spaces(
+                    &observation_space,
+                    &action_space,
+                    has_combat,
+                );
                 ServerMessage::Bound {
                     target_id: normalized,
                     observation_space,
@@ -141,11 +143,12 @@ impl AgentSession {
                     capabilities,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -154,6 +157,7 @@ impl AgentSession {
         if self.robot_id.is_some() {
             return ServerMessage::Error {
                 message: "already connected to a robot".to_string(),
+                echo: None,
             };
         }
 
@@ -177,11 +181,12 @@ impl AgentSession {
                     action_space,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -190,8 +195,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                    message: "not connected to a robot".to_string(),
-                }
+                message: "not connected to a robot".to_string(),
+                echo: None,
+            }
             }
         };
 
@@ -222,11 +228,12 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -235,8 +242,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                    message: "not connected to a robot".to_string(),
-                }
+                message: "not connected to a robot".to_string(),
+                echo: None,
+            }
             }
         };
 
@@ -268,11 +276,12 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -281,8 +290,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                    message: "not connected to a robot".to_string(),
-                }
+                message: "not connected to a robot".to_string(),
+                echo: None,
+            }
             }
         };
 
@@ -312,11 +322,12 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -325,8 +336,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                    message: "not connected to a robot".to_string(),
-                }
+                message: "not connected to a robot".to_string(),
+                echo: None,
+            }
             }
         };
 
@@ -340,11 +352,12 @@ impl AgentSession {
             .await
         {
             Ok(SimResponse::MessageSent) => ServerMessage::MessageSent,
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -572,7 +585,7 @@ mod tests {
         let response = session.handle_message(ClientMessage::Step { action }).await;
 
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "error should mention not connected, got: {}",
@@ -585,7 +598,7 @@ mod tests {
         // Also test observe before connect
         let response = session.handle_message(ClientMessage::Observe).await;
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "observe error should mention not connected, got: {}",
@@ -598,7 +611,7 @@ mod tests {
         // Also test reset before connect
         let response = session.handle_message(ClientMessage::Reset).await;
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "reset error should mention not connected, got: {}",
@@ -629,7 +642,7 @@ mod tests {
             .handle_message(ClientMessage::Connect { robot_id: 0 })
             .await;
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("already connected"),
                     "error should mention already connected, got: {}",
@@ -652,7 +665,7 @@ mod tests {
             .await;
 
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid robot_id"),
                     "error should mention invalid robot_id, got: {}",
@@ -688,7 +701,7 @@ mod tests {
         };
         let resp = session.handle_message(ClientMessage::Step { action }).await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "step after close should say not connected, got: {}",
@@ -716,7 +729,7 @@ mod tests {
         // Observe after close should error
         let resp = session.handle_message(ClientMessage::Observe).await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "observe after close should say not connected, got: {}",
@@ -744,7 +757,7 @@ mod tests {
         // Reset after close should error
         let resp = session.handle_message(ClientMessage::Reset).await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "reset after close should say not connected, got: {}",
@@ -1029,7 +1042,7 @@ mod tests {
             })
             .await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(message.contains("not connected"));
             }
             other => panic!("Expected Error, got {:?}", other),

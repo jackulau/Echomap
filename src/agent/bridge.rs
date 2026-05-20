@@ -175,6 +175,11 @@ pub enum SimCommand {
         to_robot_id: usize,
         content: String,
     },
+    /// Ask the main-loop side whether `robot_id` has a `CombatState`. Used
+    /// by `handle_bind_target` to set the `"combat"` capability bit.
+    HasCombat {
+        robot_id: usize,
+    },
 }
 
 /// A response sent from the simulation main loop back to the agent server.
@@ -207,6 +212,10 @@ pub enum SimResponse {
     },
     Error {
         message: String,
+    },
+    /// Reply to `SimCommand::HasCombat`.
+    HasCombat {
+        has_combat: bool,
     },
 }
 
@@ -523,6 +532,14 @@ impl SimBridgeClient {
                 }
             }
 
+            SimCommand::HasCombat { robot_id } => {
+                let has_combat = manager
+                    .get_robot(robot_id)
+                    .map(|r| r.state.combat.is_some())
+                    .unwrap_or(false);
+                SimResponse::HasCombat { has_combat }
+            }
+
             SimCommand::SendMessage {
                 from_robot_id,
                 to_robot_id,
@@ -590,6 +607,9 @@ fn log_command(cmd: &SimCommand, log: &mut AgentActivityLog) {
                 Some(*from_robot_id),
                 format!("Message {} -> {}", from_robot_id, to_robot_id),
             );
+        }
+        SimCommand::HasCombat { .. } => {
+            // Capability probe — not interesting to surface in the activity log.
         }
     }
 }

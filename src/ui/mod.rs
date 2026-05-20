@@ -352,6 +352,7 @@ mod teleop_tests {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn menu_bar(
     ctx: &egui::Context,
     show_settings: &mut bool,

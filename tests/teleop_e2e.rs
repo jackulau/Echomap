@@ -124,8 +124,7 @@ async fn recv(read: &mut WsRead) -> ServerMessage {
             .expect("timed out waiting for server message");
         match next {
             Some(Ok(Message::Text(text))) => {
-                return serde_json::from_str::<ServerMessage>(&text)
-                    .expect("decode ServerMessage")
+                return serde_json::from_str::<ServerMessage>(&text).expect("decode ServerMessage")
             }
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
             Some(Ok(Message::Binary(_))) => panic!("unexpected binary frame"),

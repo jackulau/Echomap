@@ -109,7 +109,12 @@ impl AgentSession {
 
         let (robot_id, normalized) = match Self::resolve_target(&target_id) {
             Ok(pair) => pair,
-            Err(message) => return ServerMessage::Error { message, echo: None },
+            Err(message) => {
+                return ServerMessage::Error {
+                    message,
+                    echo: None,
+                }
+            }
         };
 
         match self
@@ -143,12 +148,18 @@ impl AgentSession {
                     capabilities,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error {
+                message,
+                echo: None,
+            },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
                 echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e, echo: None },
+            Err(e) => ServerMessage::Error {
+                message: e,
+                echo: None,
+            },
         }
     }
 
@@ -181,12 +192,18 @@ impl AgentSession {
                     action_space,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error {
+                message,
+                echo: None,
+            },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
                 echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e, echo: None },
+            Err(e) => ServerMessage::Error {
+                message: e,
+                echo: None,
+            },
         }
     }
 
@@ -195,9 +212,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                message: "not connected to a robot".to_string(),
-                echo: None,
-            }
+                    message: "not connected to a robot".to_string(),
+                    echo: None,
+                }
             }
         };
 
@@ -228,12 +245,18 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error {
+                message,
+                echo: None,
+            },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
                 echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e, echo: None },
+            Err(e) => ServerMessage::Error {
+                message: e,
+                echo: None,
+            },
         }
     }
 
@@ -319,12 +342,18 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error {
+                message,
+                echo: None,
+            },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
                 echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e, echo: None },
+            Err(e) => ServerMessage::Error {
+                message: e,
+                echo: None,
+            },
         }
     }
 
@@ -333,9 +362,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                message: "not connected to a robot".to_string(),
-                echo: None,
-            }
+                    message: "not connected to a robot".to_string(),
+                    echo: None,
+                }
             }
         };
 
@@ -365,12 +394,18 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error {
+                message,
+                echo: None,
+            },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
                 echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e, echo: None },
+            Err(e) => ServerMessage::Error {
+                message: e,
+                echo: None,
+            },
         }
     }
 
@@ -379,9 +414,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                message: "not connected to a robot".to_string(),
-                echo: None,
-            }
+                    message: "not connected to a robot".to_string(),
+                    echo: None,
+                }
             }
         };
 
@@ -395,12 +430,18 @@ impl AgentSession {
             .await
         {
             Ok(SimResponse::MessageSent) => ServerMessage::MessageSent,
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error {
+                message,
+                echo: None,
+            },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
                 echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e, echo: None },
+            Err(e) => ServerMessage::Error {
+                message: e,
+                echo: None,
+            },
         }
     }
 
@@ -1142,7 +1183,9 @@ mod tests {
             gripper_commands: vec![],
             base_velocity: [0.0, 0.0],
         };
-        let resp = session.handle_message(ClientMessage::Step { action: bad }).await;
+        let resp = session
+            .handle_message(ClientMessage::Step { action: bad })
+            .await;
         match resp {
             ServerMessage::Error { message, echo } => {
                 assert!(
@@ -1172,7 +1215,9 @@ mod tests {
             gripper_commands: vec![],
             base_velocity: [0.0, 0.0],
         };
-        let resp = session.handle_message(ClientMessage::Step { action: bad }).await;
+        let resp = session
+            .handle_message(ClientMessage::Step { action: bad })
+            .await;
         match resp {
             ServerMessage::Error { message, echo } => {
                 assert!(message.contains("NaN") || message.contains("infinite"));
@@ -1220,7 +1265,9 @@ mod tests {
             gripper_commands: vec![],
             base_velocity: [0.0, 0.0],
         };
-        let resp = session.handle_message(ClientMessage::Step { action: bad }).await;
+        let resp = session
+            .handle_message(ClientMessage::Step { action: bad })
+            .await;
         assert!(matches!(resp, ServerMessage::Error { .. }));
 
         let good = RobotAction {

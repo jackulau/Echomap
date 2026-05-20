@@ -858,7 +858,11 @@ mod tests {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     let msg: ServerMessage =
                         serde_json::from_str(&text).expect("server should send valid JSON");
-                    if let ServerMessage::Error { message, echo: None } = msg {
+                    if let ServerMessage::Error {
+                        message,
+                        echo: None,
+                    } = msg
+                    {
                         if message.contains("timeout") {
                             saw_timeout_error = true;
                         }

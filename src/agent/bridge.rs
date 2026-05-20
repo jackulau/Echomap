@@ -98,7 +98,13 @@ impl AgentActivityLog {
     /// `push_message` when you have a wire payload to capture for the
     /// Agent Inspector.
     pub fn push(&mut self, kind: AgentEventKind, robot_id: Option<usize>, description: String) {
-        self.push_message(kind, robot_id, description, MessageDirection::Internal, None);
+        self.push_message(
+            kind,
+            robot_id,
+            description,
+            MessageDirection::Internal,
+            None,
+        );
     }
 
     /// Push an event with full wire context: direction + optional JSON
@@ -776,7 +782,13 @@ fn log_response(response: &SimResponse, log: &mut AgentActivityLog) {
                 "match_state": match_state,
             }))
             .ok();
-            log.push_message(AgentEventKind::Reset, None, "Reset ack".into(), dir, payload);
+            log.push_message(
+                AgentEventKind::Reset,
+                None,
+                "Reset ack".into(),
+                dir,
+                payload,
+            );
         }
         SimResponse::Spaces {
             observation_space,
@@ -793,7 +805,9 @@ fn log_response(response: &SimResponse, log: &mut AgentActivityLog) {
                 None,
                 format!(
                     "Bound (motors={}, grippers={}, sensors={})",
-                    action_space.num_motors, action_space.num_grippers, observation_space.num_sensors
+                    action_space.num_motors,
+                    action_space.num_grippers,
+                    observation_space.num_sensors
                 ),
                 dir,
                 payload,
@@ -2178,13 +2192,16 @@ mod tests {
         // GetObservation path for combat robot
         let s = server.clone();
         let handle = tokio::spawn(async move {
-            s.send_command(SimCommand::GetObservation { robot_id: 0 }).await
+            s.send_command(SimCommand::GetObservation { robot_id: 0 })
+                .await
         });
         tokio::task::yield_now().await;
         client.process_pending(&mut manager, &[]);
         match handle.await.unwrap().unwrap() {
             SimResponse::Observation { state, .. } => {
-                let c = state.combat.expect("combat robot should expose combat state");
+                let c = state
+                    .combat
+                    .expect("combat robot should expose combat state");
                 assert!((c.max_health - 75.0).abs() < 1e-3);
                 assert!((c.stamina - 50.0).abs() < 1e-3);
             }
@@ -2194,7 +2211,8 @@ mod tests {
         // GetObservation path for non-combat robot
         let s = server.clone();
         let handle = tokio::spawn(async move {
-            s.send_command(SimCommand::GetObservation { robot_id: 1 }).await
+            s.send_command(SimCommand::GetObservation { robot_id: 1 })
+                .await
         });
         tokio::task::yield_now().await;
         client.process_pending(&mut manager, &[]);

@@ -1225,14 +1225,14 @@ mod tests {
         )
         .await;
 
+        // D5 contract: a shape mismatch (0 motors for a 2-joint robot) now
+        // returns a descriptive Error instead of silently clamping.
         match &resp {
-            ServerMessage::Observation { step_count, .. } => {
-                assert_eq!(
-                    *step_count, 1,
-                    "step with empty action should still increment count"
-                );
+            ServerMessage::Error { message, echo } => {
+                assert!(message.contains("malformed action"), "got: {message}");
+                assert!(echo.is_some(), "wrong-shape action should echo input");
             }
-            other => panic!("Expected Observation with empty action, got {:?}", other),
+            other => panic!("Expected Error for empty action, got {:?}", other),
         }
 
         drop(handle);
@@ -1241,8 +1241,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_oversized_action_vector() {
-        // Step with more motor velocities than joints. apply_action should
-        // clamp to min(action_len, joint_count).
+        // D5 contract: oversized motor_velocities is a malformed action and
+        // gets a descriptive Error reply with the offending payload echoed,
+        // instead of being silently truncated by `apply_action`.
         let (handle, bridge_thread) = start_test_server(1);
         let tcp_port = handle.status().tcp_port;
         let (mut w, mut r) = tcp_connect(tcp_port).await;
@@ -1259,13 +1260,14 @@ mod tests {
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: big_action }).await;
 
         match &resp {
-            ServerMessage::Observation { step_count, .. } => {
-                assert_eq!(*step_count, 1, "oversized action should still work");
+            ServerMessage::Error { message, echo } => {
+                assert!(
+                    message.contains("expected 2"),
+                    "message should name expected size, got: {message}"
+                );
+                assert!(echo.is_some(), "oversized action should echo input");
             }
-            other => panic!(
-                "Expected Observation with oversized action, got {:?}",
-                other
-            ),
+            other => panic!("Expected Error for oversized action, got {:?}", other),
         }
 
         drop(handle);

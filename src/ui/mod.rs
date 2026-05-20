@@ -2,7 +2,8 @@ use glam::Vec3;
 
 use crate::acoustics::SimulationState;
 use crate::agent::bridge::{
-    create_bridge, AgentActivityLog, AgentEventKind, SimBridgeClient, SimBridgeServer,
+    create_bridge, AgentActivityLog, AgentEventKind, MessageDirection, SimBridgeClient,
+    SimBridgeServer,
 };
 use crate::agent::demo::{DemoAgentHandle, DemoBehavior};
 use crate::agent::{AgentServerConfig, AgentServerHandle};
@@ -170,6 +171,7 @@ impl Default for ViewportState {
 pub fn menu_bar(
     ctx: &egui::Context,
     show_settings: &mut bool,
+    show_agent_inspector: &mut bool,
     scene: &mut Scene,
     vp: &mut ViewportState,
 ) {
@@ -294,6 +296,13 @@ pub fn menu_bar(
                     ui.close_menu();
                 }
                 ui.separator();
+                if ui
+                    .checkbox(show_agent_inspector, "Agent Inspector")
+                    .on_hover_text("Live observation/action message inspector")
+                    .clicked()
+                {
+                    ui.close_menu();
+                }
                 if ui.button("Settings...").clicked() {
                     *show_settings = true;
                     ui.close_menu();
@@ -4163,5 +4172,422 @@ fn render_gas_displacement(
 
         let radius = 2.0 + intensity * 4.0;
         painter.circle_filled(p, radius, gas_color);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Agent Inspector (D8) — live observation/action message lane window.
+// ---------------------------------------------------------------------------
+
+/// Per-session state for the Agent Inspector window.
+///
+/// Holds the inspector's filter/UI state separately from the rolling event
+/// log so opening + closing the window does not lose user preferences and
+/// so the same log can be inspected from multiple windows in the future.
+#[derive(Clone, Debug)]
+pub struct AgentInspectorState {
+    pub show_incoming: bool,
+    pub show_outgoing: bool,
+    pub show_internal: bool,
+    pub show_errors_only: bool,
+    pub robot_filter: Option<usize>,
+    pub autoscroll: bool,
+    pub expanded_index: Option<usize>,
+}
+
+impl Default for AgentInspectorState {
+    fn default() -> Self {
+        Self {
+            show_incoming: true,
+            show_outgoing: true,
+            show_internal: false,
+            show_errors_only: false,
+            robot_filter: None,
+            autoscroll: true,
+            expanded_index: None,
+        }
+    }
+}
+
+impl AgentInspectorState {
+    pub fn matches(&self, ev: &crate::agent::bridge::AgentEvent) -> bool {
+        if self.show_errors_only && ev.kind != AgentEventKind::Error {
+            return false;
+        }
+        match ev.direction {
+            MessageDirection::Incoming if !self.show_incoming => return false,
+            MessageDirection::Outgoing if !self.show_outgoing => return false,
+            MessageDirection::Internal if !self.show_internal => return false,
+            _ => {}
+        }
+        if let Some(r) = self.robot_filter {
+            if ev.robot_id != Some(r) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Color the inspector uses for each protocol-message direction. Chosen
+/// to match the existing `agent_activity_panel` event palette so the two
+/// surfaces stay visually consistent.
+fn direction_color(d: MessageDirection) -> egui::Color32 {
+    match d {
+        MessageDirection::Incoming => egui::Color32::from_rgb(120, 180, 255), // azure
+        MessageDirection::Outgoing => egui::Color32::from_rgb(140, 230, 160), // mint
+        MessageDirection::Internal => egui::Color32::from_rgb(160, 160, 180), // slate
+    }
+}
+
+fn direction_glyph(d: MessageDirection) -> &'static str {
+    match d {
+        MessageDirection::Incoming => "▶",
+        MessageDirection::Outgoing => "◀",
+        MessageDirection::Internal => "·",
+    }
+}
+
+fn kind_chip(k: &AgentEventKind) -> (&'static str, egui::Color32) {
+    match k {
+        AgentEventKind::Connect => ("bind", egui::Color32::from_rgb(100, 200, 130)),
+        AgentEventKind::Step => ("step", egui::Color32::from_rgb(150, 200, 255)),
+        AgentEventKind::Observe => ("obs", egui::Color32::from_rgb(180, 220, 240)),
+        AgentEventKind::Reset => ("reset", egui::Color32::from_rgb(240, 180, 100)),
+        AgentEventKind::Remove => ("close", egui::Color32::from_rgb(220, 150, 90)),
+        AgentEventKind::Error => ("err", egui::Color32::from_rgb(240, 100, 100)),
+        AgentEventKind::Message => ("msg", egui::Color32::from_rgb(200, 160, 240)),
+    }
+}
+
+/// Format a JSON string with two-space indentation. Falls back to the raw
+/// payload when parsing fails so the inspector still shows *something*
+/// for malformed packets.
+fn pretty_json(raw: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(v) => serde_json::to_string_pretty(&v).unwrap_or_else(|_| raw.to_string()),
+        Err(_) => raw.to_string(),
+    }
+}
+
+/// Live observation/action inspector window — the user-visible artifact of
+/// D8. Renders a tight, lane-style log: time | direction arrow | kind chip |
+/// summary | byte size, with click-to-expand pretty-printed JSON per row.
+///
+/// The window is toggled by `*open` so the caller can drive visibility
+/// from a menu item or sidebar checkbox.
+pub fn agent_inspector_window(
+    ctx: &egui::Context,
+    state: &mut AgentInspectorState,
+    log: &AgentActivityLog,
+    capabilities: &[String],
+    open: &mut bool,
+) {
+    if !*open {
+        return;
+    }
+    let mut window_open = true;
+    egui::Window::new("Agent Inspector")
+        .open(&mut window_open)
+        .default_width(640.0)
+        .default_height(480.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            // --- header row: capability badges + connected robot count ---
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("CAPS").small().weak());
+                if capabilities.is_empty() {
+                    ui.label(egui::RichText::new("none advertised yet").italics().weak());
+                } else {
+                    for cap in capabilities {
+                        ui.label(
+                            egui::RichText::new(cap)
+                                .small()
+                                .monospace()
+                                .background_color(egui::Color32::from_rgb(40, 60, 90))
+                                .color(egui::Color32::from_rgb(180, 220, 255)),
+                        );
+                    }
+                }
+            });
+            ui.separator();
+
+            // --- filter row ---
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut state.show_incoming, "▶ in");
+                ui.checkbox(&mut state.show_outgoing, "◀ out");
+                ui.checkbox(&mut state.show_internal, "· int");
+                ui.separator();
+                ui.checkbox(&mut state.show_errors_only, "errors only");
+                ui.separator();
+                ui.checkbox(&mut state.autoscroll, "follow tail");
+                ui.separator();
+                let mut label = state
+                    .robot_filter
+                    .map(|r| format!("robot/{r}"))
+                    .unwrap_or_else(|| "all robots".to_string());
+                egui::ComboBox::from_id_salt("agent_inspector_robot_filter")
+                    .selected_text(&label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(state.robot_filter.is_none(), "all robots")
+                            .clicked()
+                        {
+                            state.robot_filter = None;
+                            label = "all robots".to_string();
+                        }
+                        for id in 0..log.connected_robots.len() {
+                            let txt = format!("robot/{id}");
+                            if ui
+                                .selectable_label(state.robot_filter == Some(id), &txt)
+                                .clicked()
+                            {
+                                state.robot_filter = Some(id);
+                            }
+                        }
+                    });
+            });
+            ui.separator();
+
+            // --- message lane ---
+            let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+            let scroll = if state.autoscroll {
+                scroll.stick_to_bottom(true)
+            } else {
+                scroll
+            };
+            scroll.show(ui, |ui| {
+                let mut shown = 0usize;
+                let filter_state = state.clone();
+                let mut to_expand: Option<usize> = None;
+                for (idx, ev) in log
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| filter_state.matches(e))
+                {
+                    let (chip_text, chip_color) = kind_chip(&ev.kind);
+                    let dir_color = direction_color(ev.direction);
+                    let header = ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{:>7.2}s", ev.timestamp))
+                                .monospace()
+                                .weak()
+                                .small(),
+                        );
+                        ui.label(
+                            egui::RichText::new(direction_glyph(ev.direction))
+                                .color(dir_color)
+                                .monospace(),
+                        );
+                        ui.label(
+                            egui::RichText::new(chip_text)
+                                .small()
+                                .monospace()
+                                .color(chip_color),
+                        );
+                        if let Some(r) = ev.robot_id {
+                            ui.label(egui::RichText::new(format!("r/{r}")).small().weak());
+                        }
+                        let summary = if ev.description.len() > 60 {
+                            format!("{}…", &ev.description[..60])
+                        } else {
+                            ev.description.clone()
+                        };
+                        ui.label(egui::RichText::new(summary).small());
+                        if let Some(p) = &ev.payload_json {
+                            ui.label(
+                                egui::RichText::new(format!("{}B", p.len()))
+                                    .small()
+                                    .weak()
+                                    .monospace(),
+                            );
+                        }
+                    });
+                    if header.response.clicked() {
+                        to_expand = Some(idx);
+                    }
+                    // Inline expanded JSON for the selected row.
+                    if filter_state.expanded_index == Some(idx) {
+                        if let Some(payload) = &ev.payload_json {
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(pretty_json(payload))
+                                        .monospace()
+                                        .small(),
+                                );
+                            });
+                        }
+                    }
+                    shown += 1;
+                }
+                if let Some(idx) = to_expand {
+                    state.expanded_index = if state.expanded_index == Some(idx) {
+                        None
+                    } else {
+                        Some(idx)
+                    };
+                }
+                if shown == 0 {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(40.0);
+                        ui.label(
+                            egui::RichText::new("no traffic matches the current filters")
+                                .italics()
+                                .weak(),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "bind an agent or start the demo to see live messages",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    });
+                }
+            });
+        });
+    if !window_open {
+        *open = false;
+    }
+}
+
+#[cfg(test)]
+mod agent_inspector_tests {
+    use super::*;
+    use crate::agent::bridge::{AgentActivityLog, AgentEventKind, MessageDirection};
+
+    fn log_with_events() -> AgentActivityLog {
+        let mut log = AgentActivityLog::new(50);
+        log.elapsed = 0.0;
+        log.push_message(
+            AgentEventKind::Connect,
+            Some(0),
+            "Bind robot/0".into(),
+            MessageDirection::Incoming,
+            Some(r#"{"type":"bind_target","robot_id":0}"#.to_string()),
+        );
+        log.push_message(
+            AgentEventKind::Step,
+            Some(0),
+            "Step (motors=3)".into(),
+            MessageDirection::Incoming,
+            Some(r#"{"type":"step","action":{"motor_velocities":[0,0,0]}}"#.to_string()),
+        );
+        log.push_message(
+            AgentEventKind::Observe,
+            Some(0),
+            "Observation (joints=3)".into(),
+            MessageDirection::Outgoing,
+            Some(r#"{"type":"observation","state":{}}"#.to_string()),
+        );
+        log.push_message(
+            AgentEventKind::Error,
+            Some(0),
+            "Error: malformed action".into(),
+            MessageDirection::Outgoing,
+            Some(r#"{"type":"error","message":"malformed action"}"#.to_string()),
+        );
+        log
+    }
+
+    #[test]
+    fn agent_inspector_state_defaults_to_user_friendly_filters() {
+        let s = AgentInspectorState::default();
+        assert!(s.show_incoming);
+        assert!(s.show_outgoing);
+        assert!(!s.show_internal, "internal events too noisy by default");
+        assert!(s.autoscroll);
+        assert!(!s.show_errors_only);
+        assert!(s.robot_filter.is_none());
+    }
+
+    #[test]
+    fn agent_inspector_filter_errors_only_drops_observations() {
+        let log = log_with_events();
+        let mut s = AgentInspectorState::default();
+        s.show_errors_only = true;
+        let kept: Vec<_> = log.iter().filter(|e| s.matches(e)).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].kind, AgentEventKind::Error);
+    }
+
+    #[test]
+    fn agent_inspector_filter_direction_excludes_outgoing() {
+        let log = log_with_events();
+        let mut s = AgentInspectorState::default();
+        s.show_outgoing = false;
+        let kept: Vec<_> = log.iter().filter(|e| s.matches(e)).collect();
+        // 2 incoming events (bind, step) — both observation + error were outgoing.
+        assert_eq!(kept.len(), 2);
+        assert!(kept
+            .iter()
+            .all(|e| e.direction == MessageDirection::Incoming));
+    }
+
+    #[test]
+    fn agent_inspector_robot_filter_scopes_to_one_robot() {
+        let mut log = log_with_events();
+        // Add an event for a different robot.
+        log.push_message(
+            AgentEventKind::Step,
+            Some(1),
+            "Step robot 1".into(),
+            MessageDirection::Incoming,
+            Some(r#"{"type":"step"}"#.to_string()),
+        );
+        let mut s = AgentInspectorState::default();
+        s.robot_filter = Some(1);
+        let kept: Vec<_> = log.iter().filter(|e| s.matches(e)).collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].robot_id, Some(1));
+    }
+
+    #[test]
+    fn agent_inspector_iter_messages_skips_payloadless_events() {
+        let mut log = AgentActivityLog::new(10);
+        log.push(AgentEventKind::Connect, Some(0), "no payload".into());
+        log.push_message(
+            AgentEventKind::Step,
+            Some(0),
+            "with payload".into(),
+            MessageDirection::Incoming,
+            Some(r#"{"x":1}"#.to_string()),
+        );
+        let msgs: Vec<_> = log.iter_messages().collect();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].description, "with payload");
+    }
+
+    #[test]
+    fn agent_inspector_pretty_json_indents_well_formed_input() {
+        let p = pretty_json(r#"{"type":"observation","reward":1.0}"#);
+        assert!(p.contains("\n"));
+        assert!(p.contains("\"type\": \"observation\""));
+    }
+
+    #[test]
+    fn agent_inspector_pretty_json_passes_through_malformed_input() {
+        let p = pretty_json("not json at all");
+        assert_eq!(p, "not json at all");
+    }
+
+    #[test]
+    fn agent_inspector_window_renders_without_panic() {
+        // Headless egui smoke test — ensures the window function can run
+        // through one frame against a non-empty log without panicking.
+        let ctx = egui::Context::default();
+        let mut state = AgentInspectorState::default();
+        let log = log_with_events();
+        let caps = vec![
+            "observe".to_string(),
+            "step".to_string(),
+            "motors".to_string(),
+        ];
+        let mut open = true;
+        let _ = ctx.run(Default::default(), |ctx| {
+            agent_inspector_window(ctx, &mut state, &log, &caps, &mut open);
+        });
+        assert!(open, "window should remain open through one frame");
     }
 }

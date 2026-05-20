@@ -27,6 +27,25 @@ pub struct AgentEvent {
     pub description: String,
     /// Event category for filtering/coloring.
     pub kind: AgentEventKind,
+    /// Direction of travel — used by the Agent Inspector to render the
+    /// bidirectional message lane. `Internal` is for housekeeping events
+    /// (capability probes, status pulses).
+    pub direction: MessageDirection,
+    /// Full JSON payload of the protocol message, when known. Captured at
+    /// the bridge boundary so the inspector can show the exact bytes sent
+    /// or received without a separate hook into the wire transport.
+    pub payload_json: Option<String>,
+}
+
+/// Direction of an agent-bridge message relative to the simulator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageDirection {
+    /// Client → server (action, observe request, bind, message).
+    Incoming,
+    /// Server → client (observation, bound reply, error, cancelled).
+    Outgoing,
+    /// No wire counterpart — derived state change.
+    Internal,
 }
 
 /// Category of agent event.
@@ -74,8 +93,26 @@ impl AgentActivityLog {
         }
     }
 
-    /// Push an event, evicting the oldest if at capacity.
+    /// Push an event, evicting the oldest if at capacity. Direction
+    /// defaults to `Internal` and `payload_json` to `None` — use
+    /// `push_message` when you have a wire payload to capture for the
+    /// Agent Inspector.
     pub fn push(&mut self, kind: AgentEventKind, robot_id: Option<usize>, description: String) {
+        self.push_message(kind, robot_id, description, MessageDirection::Internal, None);
+    }
+
+    /// Push an event with full wire context: direction + optional JSON
+    /// payload. Used by the bridge log_command/log_response hooks so the
+    /// Agent Inspector window can show the exact protocol bytes flowing
+    /// in each direction (D8).
+    pub fn push_message(
+        &mut self,
+        kind: AgentEventKind,
+        robot_id: Option<usize>,
+        description: String,
+        direction: MessageDirection,
+        payload_json: Option<String>,
+    ) {
         if self.events.len() >= self.capacity {
             self.events.pop_front();
         }
@@ -84,7 +121,15 @@ impl AgentActivityLog {
             robot_id,
             description,
             kind,
+            direction,
+            payload_json,
         });
+    }
+
+    /// Iterate only the events that have a captured wire payload —
+    /// what the Agent Inspector renders in its message lane.
+    pub fn iter_messages(&self) -> impl Iterator<Item = &AgentEvent> {
+        self.events.iter().filter(|e| e.payload_json.is_some())
     }
 
     /// Return an iterator over events (oldest first).
@@ -567,45 +612,93 @@ impl SimBridgeClient {
     }
 }
 
-/// Log a bridge command to the activity log.
+/// Log a bridge command to the activity log. Captures a JSON snapshot of
+/// the request when feasible so the Agent Inspector can render the exact
+/// payload (D8). Commands without a meaningful payload (`HasCombat`)
+/// remain unlogged to keep the inspector signal-to-noise high.
 fn log_command(cmd: &SimCommand, log: &mut AgentActivityLog) {
+    use serde_json::json;
+    let dir = MessageDirection::Incoming;
     match cmd {
         SimCommand::AddRobot { .. } => {
-            log.push(AgentEventKind::Connect, None, "AddRobot request".into());
+            log.push_message(
+                AgentEventKind::Connect,
+                None,
+                "AddRobot request".into(),
+                dir,
+                Some(json!({ "type": "add_robot" }).to_string()),
+            );
         }
-        SimCommand::Step { robot_id, .. } => {
-            log.push(AgentEventKind::Step, Some(*robot_id), "Step".into());
+        SimCommand::Step { robot_id, action } => {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "type": "step",
+                "robot_id": robot_id,
+                "action": action,
+            }))
+            .ok();
+            log.push_message(
+                AgentEventKind::Step,
+                Some(*robot_id),
+                format!("Step (motors={})", action.motor_velocities.len()),
+                dir,
+                payload,
+            );
         }
         SimCommand::GetObservation { robot_id } => {
-            log.push(AgentEventKind::Observe, Some(*robot_id), "Observe".into());
+            log.push_message(
+                AgentEventKind::Observe,
+                Some(*robot_id),
+                "Observe".into(),
+                dir,
+                Some(json!({ "type": "observe", "robot_id": robot_id }).to_string()),
+            );
         }
         SimCommand::Reset { robot_id } => {
-            log.push(AgentEventKind::Reset, Some(*robot_id), "Reset".into());
+            log.push_message(
+                AgentEventKind::Reset,
+                Some(*robot_id),
+                "Reset".into(),
+                dir,
+                Some(json!({ "type": "reset", "robot_id": robot_id }).to_string()),
+            );
         }
         SimCommand::RemoveRobot { robot_id } => {
-            log.push(
+            log.push_message(
                 AgentEventKind::Remove,
                 Some(*robot_id),
                 "RemoveRobot".into(),
+                dir,
+                Some(json!({ "type": "remove_robot", "robot_id": robot_id }).to_string()),
             );
             log.set_disconnected(*robot_id);
         }
         SimCommand::GetSpaces { robot_id } => {
-            log.push(
+            log.push_message(
                 AgentEventKind::Connect,
                 Some(*robot_id),
-                "GetSpaces (connect)".into(),
+                "Bind (GetSpaces)".into(),
+                dir,
+                Some(json!({ "type": "bind_target", "robot_id": robot_id }).to_string()),
             );
         }
         SimCommand::SendMessage {
             from_robot_id,
             to_robot_id,
-            ..
+            content,
         } => {
-            log.push(
+            let payload = serde_json::to_string(&serde_json::json!({
+                "type": "send_message",
+                "from_robot_id": from_robot_id,
+                "to_robot_id": to_robot_id,
+                "content": content,
+            }))
+            .ok();
+            log.push_message(
                 AgentEventKind::Message,
                 Some(*from_robot_id),
-                format!("Message {} -> {}", from_robot_id, to_robot_id),
+                format!("Message {from_robot_id} -> {to_robot_id}"),
+                dir,
+                payload,
             );
         }
         SimCommand::HasCombat { .. } => {
@@ -614,29 +707,122 @@ fn log_command(cmd: &SimCommand, log: &mut AgentActivityLog) {
     }
 }
 
-/// Log a bridge response to the activity log.
+/// Log a bridge response to the activity log. Captures server-to-client
+/// payloads so the Agent Inspector can pair them with the originating
+/// request and show the full request/response trace per robot (D8).
 fn log_response(response: &SimResponse, log: &mut AgentActivityLog) {
+    let dir = MessageDirection::Outgoing;
     match response {
         SimResponse::RobotAdded { robot_id } => {
             log.set_step_count(*robot_id, 0);
             log.set_reward(*robot_id, 0.0);
             log.set_connected(*robot_id);
         }
-        SimResponse::Removed => {
-            // Robot removed; we don't have the id here but the command
-            // log captured it.
+        SimResponse::Removed => {}
+        SimResponse::Stepped {
+            state,
+            step_count,
+            messages,
+            match_state,
+        } => {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "type": "stepped",
+                "step_count": step_count,
+                "state": state,
+                "messages": messages,
+                "match_state": match_state,
+            }))
+            .ok();
+            log.push_message(
+                AgentEventKind::Step,
+                None,
+                format!(
+                    "Stepped (joints={}, sensors={})",
+                    state.joint_positions.len(),
+                    state.sensor_readings.distances.len()
+                        + state.sensor_readings.contacts.len()
+                        + state.sensor_readings.imu.len(),
+                ),
+                dir,
+                payload,
+            );
         }
-        SimResponse::Stepped { step_count, .. } => {
-            let _ = step_count;
+        SimResponse::Observation {
+            state,
+            messages,
+            match_state,
+        } => {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "type": "observation",
+                "state": state,
+                "messages": messages,
+                "match_state": match_state,
+            }))
+            .ok();
+            log.push_message(
+                AgentEventKind::Observe,
+                None,
+                format!("Observation (joints={})", state.joint_positions.len()),
+                dir,
+                payload,
+            );
         }
-        SimResponse::Spaces { .. } => {
-            // GetSpaces succeeded — marks a successful agent connection.
-            // Robot ID was logged in log_command.
+        SimResponse::Reset {
+            state, match_state, ..
+        } => {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "type": "reset",
+                "state": state,
+                "match_state": match_state,
+            }))
+            .ok();
+            log.push_message(AgentEventKind::Reset, None, "Reset ack".into(), dir, payload);
+        }
+        SimResponse::Spaces {
+            observation_space,
+            action_space,
+        } => {
+            let payload = serde_json::to_string(&serde_json::json!({
+                "type": "bound",
+                "observation_space": observation_space,
+                "action_space": action_space,
+            }))
+            .ok();
+            log.push_message(
+                AgentEventKind::Connect,
+                None,
+                format!(
+                    "Bound (motors={}, grippers={}, sensors={})",
+                    action_space.num_motors, action_space.num_grippers, observation_space.num_sensors
+                ),
+                dir,
+                payload,
+            );
+        }
+        SimResponse::MessageSent => {
+            log.push_message(
+                AgentEventKind::Message,
+                None,
+                "MessageSent ack".into(),
+                dir,
+                Some(r#"{"type":"message_sent"}"#.to_string()),
+            );
         }
         SimResponse::Error { message } => {
-            log.push(AgentEventKind::Error, None, format!("Error: {message}"));
+            let payload = serde_json::to_string(&serde_json::json!({
+                "type": "error",
+                "message": message,
+            }))
+            .ok();
+            log.push_message(
+                AgentEventKind::Error,
+                None,
+                format!("Error: {message}"),
+                dir,
+                payload,
+            );
         }
-        _ => {}
+        SimResponse::HasCombat { .. } => {}
     }
 }
 

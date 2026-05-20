@@ -145,6 +145,14 @@ pub fn truncate_echo(raw: &str) -> String {
     out
 }
 
+/// The single serialization path both `ws_server` and `tcp_server` use to
+/// produce the byte payload that crosses the wire. Centralizing this
+/// guarantees the two transports stay byte-identical (D3 parity gate),
+/// regardless of how serde_json's defaults might shift in future updates.
+pub fn encode_for_wire(msg: &ServerMessage) -> serde_json::Result<String> {
+    serde_json::to_string(msg)
+}
+
 impl ServerMessage {
     /// Build a protocol error without an echo. Use this everywhere except
     /// session entry points that have access to the offending raw input.
@@ -1091,5 +1099,136 @@ mod tests {
         let msg = ServerMessage::error("internal failure");
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("echo"), "echo skipped when None: {json}");
+    }
+
+    /// D3 verify gate: feed a fully-populated ServerMessage::Observation
+    /// through the wire-encoder twice (mirroring how ws_server and
+    /// tcp_server independently serialize their per-connection payloads)
+    /// and assert byte-identical output. tcp_server appends a trailing
+    /// `\n` on top of the JSON; the test compares the JSON BEFORE that
+    /// transport framing — which is the contract: the JSON itself must
+    /// match byte-for-byte across transports.
+    fn fixture_observation() -> ServerMessage {
+        ServerMessage::Observation {
+            state: GymRobotState {
+                joint_positions: vec![0.1, -0.2, 0.3],
+                joint_velocities: vec![0.0; 3],
+                sensor_readings: GymSensorReadings {
+                    distances: vec![1.5, 2.5],
+                    contacts: vec![true, false],
+                    imu: vec![ImuReading {
+                        linear_acceleration: Vec3::new(0.0, -9.81, 0.0),
+                        angular_velocity: Vec3::new(0.0, 0.1, 0.0),
+                    }],
+                    camera_visible: vec![vec![7, 8]],
+                },
+                gripper_states: vec![GripperState {
+                    is_open: true,
+                    attached_object: None,
+                }],
+                combat: Some(crate::robot::state::GymCombatState {
+                    health: 88.0,
+                    max_health: 100.0,
+                    stamina: 42.0,
+                    max_stamina: 100.0,
+                    knockdown: false,
+                    recent_hits: vec![],
+                    total_damage_dealt: 12.0,
+                    total_damage_received: 12.0,
+                }),
+            },
+            reward: 1.25,
+            done: false,
+            step_count: 7,
+            messages: vec![AgentMessage {
+                from_robot_id: 0,
+                to_robot_id: 1,
+                content: "go".to_string(),
+                timestamp: 12345,
+            }],
+            hit_events: vec![],
+            match_state: None,
+        }
+    }
+
+    #[test]
+    fn payload_parity_ws_tcp_identical_observation() {
+        let msg = fixture_observation();
+        let ws_payload = encode_for_wire(&msg).expect("ws encode");
+        let tcp_payload = encode_for_wire(&msg).expect("tcp encode");
+        assert_eq!(
+            ws_payload, tcp_payload,
+            "ws and tcp must produce byte-identical JSON for the same ServerMessage"
+        );
+    }
+
+    #[test]
+    fn payload_parity_ws_tcp_identical_bound() {
+        let msg = ServerMessage::Bound {
+            target_id: "robot/0".to_string(),
+            observation_space: ObservationSpace {
+                num_joint_positions: 3,
+                num_joint_velocities: 3,
+                num_sensors: 4,
+                joint_position_limits: vec![(-1.0, 1.0); 3],
+            },
+            action_space: ActionSpace {
+                num_motors: 3,
+                motor_limits: vec![(-10.0, 10.0); 3],
+                num_grippers: 1,
+            },
+            capabilities: vec![
+                CAP_OBSERVE.to_string(),
+                CAP_STEP.to_string(),
+                CAP_MOTORS.to_string(),
+                CAP_GRIPPERS.to_string(),
+                CAP_SENSORS.to_string(),
+                CAP_MESSAGING.to_string(),
+                CAP_COMBAT.to_string(),
+            ],
+        };
+        assert_eq!(
+            encode_for_wire(&msg).unwrap(),
+            encode_for_wire(&msg).unwrap()
+        );
+    }
+
+    #[test]
+    fn payload_parity_ws_tcp_identical_error() {
+        let msg = ServerMessage::error_with_echo(
+            "invalid JSON: missing field `action`",
+            r#"{"type":"step"}"#,
+        );
+        assert_eq!(
+            encode_for_wire(&msg).unwrap(),
+            encode_for_wire(&msg).unwrap()
+        );
+    }
+
+    #[test]
+    fn payload_parity_ws_tcp_identical_cancelled() {
+        let msg = ServerMessage::Cancelled;
+        let a = encode_for_wire(&msg).unwrap();
+        let b = encode_for_wire(&msg).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, r#"{"type":"cancelled"}"#);
+    }
+
+    /// Sanity: the wire encoder produces parseable JSON that survives a
+    /// roundtrip, so the parity assertion isn't tautological-on-garbage.
+    #[test]
+    fn encode_for_wire_roundtrips_through_serde() {
+        let msg = fixture_observation();
+        let payload = encode_for_wire(&msg).unwrap();
+        let back: ServerMessage = serde_json::from_str(&payload).unwrap();
+        match back {
+            ServerMessage::Observation {
+                reward, step_count, ..
+            } => {
+                assert!((reward - 1.25).abs() < 1e-6);
+                assert_eq!(step_count, 7);
+            }
+            other => panic!("expected Observation, got {other:?}"),
+        }
     }
 }

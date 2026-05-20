@@ -104,11 +104,8 @@ impl WsAgentServer {
                                 // Reject: upgrade then immediately send error and close.
                                 if let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await {
                                     let (mut write, _) = ws_stream.split();
-                                    let err_msg = ServerMessage::Error {
-                message: "max connections reached".to_string(),
-                echo: None,
-            };
-                                    if let Ok(json) = serde_json::to_string(&err_msg) {
+                                    let err_msg = ServerMessage::error("max connections reached");
+                                    if let Ok(json) = crate::agent::protocol::encode_for_wire(&err_msg) {
                                         let _ = write.send(Message::Text(json.into())).await;
                                         let _ = write.close().await;
                                     }
@@ -189,7 +186,7 @@ impl WsAgentServer {
                                 "read timeout after {:.0}s",
                                 config.read_timeout.as_secs_f32()
                             ));
-                            if let Ok(json) = serde_json::to_string(&err) {
+                            if let Ok(json) = crate::agent::protocol::encode_for_wire(&err) {
                                 let _ = write.send(Message::Text(json.into())).await;
                             }
                             let _ = write.close().await;
@@ -201,7 +198,7 @@ impl WsAgentServer {
                             match serde_json::from_str::<ClientMessage>(&text) {
                                 Ok(client_msg) => {
                                     let response = session.handle_message(client_msg).await;
-                                    let json = match serde_json::to_string(&response) {
+                                    let json = match crate::agent::protocol::encode_for_wire(&response) {
                                         Ok(j) => j,
                                         Err(_) => break,
                                     };
@@ -214,7 +211,7 @@ impl WsAgentServer {
                                         format!("invalid JSON: {}", e),
                                         &text,
                                     );
-                                    let json = match serde_json::to_string(&err) {
+                                    let json = match crate::agent::protocol::encode_for_wire(&err) {
                                         Ok(j) => j,
                                         Err(_) => break,
                                     };
@@ -225,11 +222,8 @@ impl WsAgentServer {
                             }
                         }
                         Some(Ok(Message::Binary(_))) => {
-                            let err = ServerMessage::Error {
-                message: "binary messages not supported".to_string(),
-                echo: None,
-            };
-                            let json = match serde_json::to_string(&err) {
+                            let err = ServerMessage::error("binary messages not supported");
+                            let json = match crate::agent::protocol::encode_for_wire(&err) {
                                 Ok(j) => j,
                                 Err(_) => break,
                             };

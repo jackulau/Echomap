@@ -176,11 +176,13 @@ impl TcpAgentServer {
     }
 
     /// Serialize a `ServerMessage` as JSON followed by a newline, and flush.
+    /// Delegates the JSON encoding to `protocol::encode_for_wire` so the
+    /// payload is byte-identical to the WebSocket transport (D3 parity).
     async fn write_message(
         bw: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
         msg: &ServerMessage,
     ) -> io::Result<()> {
-        let json = serde_json::to_string(msg)
+        let json = crate::agent::protocol::encode_for_wire(msg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         bw.write_all(json.as_bytes()).await?;
         bw.write_all(b"\n").await?;

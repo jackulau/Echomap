@@ -1523,4 +1523,37 @@ mod tests {
         assert!((combat.stamina - 60.0).abs() < 1e-6);
         assert!(!combat.knockdown);
     }
+
+    /// D2 verify gate: GymRobotState carries combat when RobotState has it,
+    /// `None` otherwise. Exercised via both constructors.
+    #[test]
+    fn gym_state_combat_populated_only_when_robot_has_combat() {
+        let def = gym_definition();
+
+        // With combat: both constructors should emit Some(...) with
+        // identical contents.
+        let mut state_with = RobotState::new(&def);
+        state_with.combat = Some(CombatState::new(90.0, 70.0));
+        let direct = GymRobotState::from_robot_state(&state_with, &def);
+        let mut buf = GymStateBuffer::new();
+        let buffered = GymRobotState::from_robot_state_into(&state_with, &def, &mut buf);
+        let a = direct.combat.as_ref().expect("direct path missing combat");
+        let b = buffered
+            .combat
+            .as_ref()
+            .expect("buffered path missing combat");
+        assert!((a.max_health - 90.0).abs() < 1e-6);
+        assert!((b.max_health - 90.0).abs() < 1e-6);
+        assert!((a.stamina - 70.0).abs() < 1e-6);
+        assert!((b.stamina - 70.0).abs() < 1e-6);
+        assert_eq!(a.knockdown, b.knockdown);
+
+        // Without combat: both constructors must emit None (no fake combat).
+        let state_without = RobotState::new(&def);
+        let direct = GymRobotState::from_robot_state(&state_without, &def);
+        let mut buf = GymStateBuffer::new();
+        let buffered = GymRobotState::from_robot_state_into(&state_without, &def, &mut buf);
+        assert!(direct.combat.is_none());
+        assert!(buffered.combat.is_none());
+    }
 }

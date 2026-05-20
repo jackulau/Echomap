@@ -73,8 +73,9 @@ impl TcpAgentServer {
                                 let (_, writer) = stream.into_split();
                                 let mut bw = BufWriter::new(writer);
                                 let err_msg = ServerMessage::Error {
-                                    message: "max connections reached".to_string(),
-                                };
+                message: "max connections reached".to_string(),
+                echo: None,
+            };
                                 let _ = Self::write_message(&mut bw, &err_msg).await;
                                 continue;
                             }
@@ -128,8 +129,9 @@ impl TcpAgentServer {
                         }
                         Ok(n) if n > Self::MAX_LINE_BYTES => {
                             let err = ServerMessage::Error {
-                                message: "message too large".to_string(),
-                            };
+                message: "message too large".to_string(),
+                echo: None,
+            };
                             if Self::write_message(&mut bw, &err).await.is_err() {
                                 break;
                             }
@@ -150,9 +152,10 @@ impl TcpAgentServer {
                                     }
                                 }
                                 Err(e) => {
-                                    let err = ServerMessage::Error {
-                                        message: format!("invalid JSON: {}", e),
-                                    };
+                                    let err = ServerMessage::error_with_echo(
+                                        format!("invalid JSON: {}", e),
+                                        trimmed,
+                                    );
                                     if Self::write_message(&mut bw, &err).await.is_err() {
                                         break;
                                     }
@@ -173,11 +176,13 @@ impl TcpAgentServer {
     }
 
     /// Serialize a `ServerMessage` as JSON followed by a newline, and flush.
+    /// Delegates the JSON encoding to `protocol::encode_for_wire` so the
+    /// payload is byte-identical to the WebSocket transport (D3 parity).
     async fn write_message(
         bw: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
         msg: &ServerMessage,
     ) -> io::Result<()> {
-        let json = serde_json::to_string(msg)
+        let json = crate::agent::protocol::encode_for_wire(msg)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         bw.write_all(json.as_bytes()).await?;
         bw.write_all(b"\n").await?;
@@ -403,7 +408,7 @@ mod tests {
         let resp = send_and_recv(&mut writer, &mut reader, "not json").await;
         let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
         match &parsed {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid JSON"),
                     "error should mention 'invalid JSON', got: {}",
@@ -544,7 +549,7 @@ mod tests {
         if n > 0 {
             let parsed: ServerMessage = serde_json::from_str(line.trim()).unwrap();
             match parsed {
-                ServerMessage::Error { message } => {
+                ServerMessage::Error { message, .. } => {
                     assert!(
                         message.contains("max connections"),
                         "should mention max connections, got: {}",
@@ -607,7 +612,7 @@ mod tests {
         let resp = send_and_recv(&mut writer, &mut reader, r#"{"type":"conn"#).await;
         let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
         match parsed {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid JSON"),
                     "partial JSON should produce invalid JSON error, got: {}",
@@ -699,7 +704,7 @@ mod tests {
             send_and_recv(&mut writer, &mut reader, r#"{"type":"fly","altitude":100}"#).await;
         let parsed: ServerMessage = serde_json::from_str(resp.trim()).unwrap();
         match parsed {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid JSON"),
                     "unknown type should produce invalid JSON error, got: {}",

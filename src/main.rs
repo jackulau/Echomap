@@ -52,6 +52,8 @@ mod app {
         viewport: ViewportState,
         show_settings: bool,
         show_about: bool,
+        show_agent_inspector: bool,
+        agent_inspector_state: echomap::ui::AgentInspectorState,
         status: AppStatus,
         bridge_client: SimBridgeClient,
         bridge_server: Option<SimBridgeServer>,
@@ -125,6 +127,8 @@ mod app {
                     viewport,
                     show_settings: false,
                     show_about: false,
+                    show_agent_inspector: true, // open by default in boxing mode
+                    agent_inspector_state: echomap::ui::AgentInspectorState::default(),
                     status: AppStatus::default(),
                     bridge_client,
                     bridge_server: Some(bridge_server),
@@ -160,6 +164,8 @@ mod app {
                 viewport: ViewportState::default(),
                 show_settings: false,
                 show_about: false,
+                show_agent_inspector: false,
+                agent_inspector_state: echomap::ui::AgentInspectorState::default(),
                 status: AppStatus::default(),
                 bridge_client,
                 bridge_server: retained_bridge,
@@ -204,6 +210,7 @@ mod app {
                 &mut self.show_about,
                 &mut self.status,
                 &mut self.simulation,
+                &mut self.show_agent_inspector,
                 &mut self.scene,
                 &mut self.viewport,
             );
@@ -287,6 +294,31 @@ mod app {
             if self.show_about {
                 echomap::ui::about_window(ctx, &mut self.show_about);
             }
+
+            // Agent Inspector — live observation/action message lane.
+            // Capabilities derived from the first connected robot so the
+            // inspector reflects what the actively bound agent sees.
+            let inspector_capabilities = self
+                .robot_manager
+                .get_robot(0)
+                .map(|r| {
+                    let obs =
+                        echomap::robot::state::ObservationSpace::from_definition(&r.definition);
+                    let act = echomap::robot::state::ActionSpace::from_definition(&r.definition);
+                    echomap::agent::protocol::capabilities_from_spaces(
+                        &obs,
+                        &act,
+                        r.state.combat.is_some(),
+                    )
+                })
+                .unwrap_or_default();
+            echomap::ui::agent_inspector_window(
+                ctx,
+                &mut self.agent_inspector_state,
+                &self.activity_log,
+                &inspector_capabilities,
+                &mut self.show_agent_inspector,
+            );
 
             // Request continuous repainting when demo agent or agent server is running.
             if self.demo_handle.as_ref().is_some_and(|h| h.is_running())

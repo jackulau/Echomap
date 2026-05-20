@@ -104,10 +104,8 @@ impl WsAgentServer {
                                 // Reject: upgrade then immediately send error and close.
                                 if let Ok(ws_stream) = tokio_tungstenite::accept_async(stream).await {
                                     let (mut write, _) = ws_stream.split();
-                                    let err_msg = ServerMessage::Error {
-                                        message: "max connections reached".to_string(),
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&err_msg) {
+                                    let err_msg = ServerMessage::error("max connections reached");
+                                    if let Ok(json) = crate::agent::protocol::encode_for_wire(&err_msg) {
                                         let _ = write.send(Message::Text(json.into())).await;
                                         let _ = write.close().await;
                                     }
@@ -184,13 +182,11 @@ impl WsAgentServer {
                         Ok(opt) => opt,
                         Err(_) => {
                             // Read timed out — agent went silent. Tell them, then drop.
-                            let err = ServerMessage::Error {
-                                message: format!(
-                                    "read timeout after {:.0}s",
-                                    config.read_timeout.as_secs_f32()
-                                ),
-                            };
-                            if let Ok(json) = serde_json::to_string(&err) {
+                            let err = ServerMessage::error(format!(
+                                "read timeout after {:.0}s",
+                                config.read_timeout.as_secs_f32()
+                            ));
+                            if let Ok(json) = crate::agent::protocol::encode_for_wire(&err) {
                                 let _ = write.send(Message::Text(json.into())).await;
                             }
                             let _ = write.close().await;
@@ -202,7 +198,7 @@ impl WsAgentServer {
                             match serde_json::from_str::<ClientMessage>(&text) {
                                 Ok(client_msg) => {
                                     let response = session.handle_message(client_msg).await;
-                                    let json = match serde_json::to_string(&response) {
+                                    let json = match crate::agent::protocol::encode_for_wire(&response) {
                                         Ok(j) => j,
                                         Err(_) => break,
                                     };
@@ -211,10 +207,11 @@ impl WsAgentServer {
                                     }
                                 }
                                 Err(e) => {
-                                    let err = ServerMessage::Error {
-                                        message: format!("invalid JSON: {}", e),
-                                    };
-                                    let json = match serde_json::to_string(&err) {
+                                    let err = ServerMessage::error_with_echo(
+                                        format!("invalid JSON: {}", e),
+                                        &text,
+                                    );
+                                    let json = match crate::agent::protocol::encode_for_wire(&err) {
                                         Ok(j) => j,
                                         Err(_) => break,
                                     };
@@ -225,10 +222,8 @@ impl WsAgentServer {
                             }
                         }
                         Some(Ok(Message::Binary(_))) => {
-                            let err = ServerMessage::Error {
-                                message: "binary messages not supported".to_string(),
-                            };
-                            let json = match serde_json::to_string(&err) {
+                            let err = ServerMessage::error("binary messages not supported");
+                            let json = match crate::agent::protocol::encode_for_wire(&err) {
                                 Ok(j) => j,
                                 Err(_) => break,
                             };
@@ -548,7 +543,7 @@ mod tests {
                     let msg: ServerMessage =
                         serde_json::from_str(&text).expect("should parse error response");
                     match msg {
-                        ServerMessage::Error { message } => {
+                        ServerMessage::Error { message, .. } => {
                             assert!(
                                 message.contains("binary messages not supported"),
                                 "error should mention binary not supported, got: {}",
@@ -651,7 +646,7 @@ mod tests {
                             let msg: ServerMessage =
                                 serde_json::from_str(&text).expect("should parse error message");
                             match msg {
-                                ServerMessage::Error { message } => {
+                                ServerMessage::Error { message, .. } => {
                                     assert!(
                                         message.contains("max connections"),
                                         "should mention max connections, got: {}",
@@ -708,7 +703,7 @@ mod tests {
                     let msg: ServerMessage =
                         serde_json::from_str(&text).expect("should parse error");
                     match msg {
-                        ServerMessage::Error { message } => {
+                        ServerMessage::Error { message, .. } => {
                             assert!(
                                 message.contains("invalid JSON"),
                                 "malformed text should produce invalid JSON error, got: {}",
@@ -819,7 +814,7 @@ mod tests {
         };
         let resp = ws_send_recv(&mut write, &mut read, &ClientMessage::Step { action }).await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "step before connect should say not connected, got: {}",
@@ -863,7 +858,7 @@ mod tests {
                 Ok(Some(Ok(Message::Text(text)))) => {
                     let msg: ServerMessage =
                         serde_json::from_str(&text).expect("server should send valid JSON");
-                    if let ServerMessage::Error { message } = msg {
+                    if let ServerMessage::Error { message, echo: None } = msg {
                         if message.contains("timeout") {
                             saw_timeout_error = true;
                         }

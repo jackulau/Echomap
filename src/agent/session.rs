@@ -68,6 +68,7 @@ impl AgentSession {
                 to_robot_id,
                 content,
             } => self.handle_send_message(to_robot_id, content).await,
+            ClientMessage::Cancel => ServerMessage::Cancelled,
         }
     }
 
@@ -102,12 +103,13 @@ impl AgentSession {
         if self.robot_id.is_some() {
             return ServerMessage::Error {
                 message: "already bound to a target".to_string(),
+                echo: None,
             };
         }
 
         let (robot_id, normalized) = match Self::resolve_target(&target_id) {
             Ok(pair) => pair,
-            Err(message) => return ServerMessage::Error { message },
+            Err(message) => return ServerMessage::Error { message, echo: None },
         };
 
         match self
@@ -123,17 +125,17 @@ impl AgentSession {
                 self.step_count = 0;
                 self.observation_space = Some(observation_space.clone());
                 self.action_space = Some(action_space.clone());
-                let mut capabilities = vec!["observe".to_string(), "step".to_string()];
-                if action_space.num_motors > 0 {
-                    capabilities.push("motors".to_string());
-                }
-                if action_space.num_grippers > 0 {
-                    capabilities.push("grippers".to_string());
-                }
-                if observation_space.num_sensors > 0 {
-                    capabilities.push("sensors".to_string());
-                }
-                capabilities.push("messaging".to_string());
+                let has_combat = matches!(
+                    self.bridge
+                        .send_command(SimCommand::HasCombat { robot_id })
+                        .await,
+                    Ok(SimResponse::HasCombat { has_combat: true })
+                );
+                let capabilities = crate::agent::protocol::capabilities_from_spaces(
+                    &observation_space,
+                    &action_space,
+                    has_combat,
+                );
                 ServerMessage::Bound {
                     target_id: normalized,
                     observation_space,
@@ -141,11 +143,12 @@ impl AgentSession {
                     capabilities,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -154,6 +157,7 @@ impl AgentSession {
         if self.robot_id.is_some() {
             return ServerMessage::Error {
                 message: "already connected to a robot".to_string(),
+                echo: None,
             };
         }
 
@@ -177,11 +181,12 @@ impl AgentSession {
                     action_space,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -190,8 +195,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                    message: "not connected to a robot".to_string(),
-                }
+                message: "not connected to a robot".to_string(),
+                echo: None,
+            }
             }
         };
 
@@ -222,11 +228,12 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -236,9 +243,53 @@ impl AgentSession {
             None => {
                 return ServerMessage::Error {
                     message: "not connected to a robot".to_string(),
+                    echo: None,
                 }
             }
         };
+
+        // Validate action shape against the cached ActionSpace before
+        // forwarding to the bridge. Malformed actions get a descriptive
+        // Error reply that echoes the action JSON so the client can
+        // diagnose the schema drift (D5).
+        if let Some(act_space) = &self.action_space {
+            if act_space.num_motors > 0 && action.motor_velocities.len() != act_space.num_motors {
+                let echo = serde_json::to_string(&action).ok();
+                return ServerMessage::Error {
+                    message: format!(
+                        "malformed action: motor_velocities has {} entries, expected {}",
+                        action.motor_velocities.len(),
+                        act_space.num_motors
+                    ),
+                    echo,
+                };
+            }
+            if act_space.num_grippers > 0
+                && !action.gripper_commands.is_empty()
+                && action.gripper_commands.len() != act_space.num_grippers
+            {
+                let echo = serde_json::to_string(&action).ok();
+                return ServerMessage::Error {
+                    message: format!(
+                        "malformed action: gripper_commands has {} entries, expected {} (or 0)",
+                        action.gripper_commands.len(),
+                        act_space.num_grippers
+                    ),
+                    echo,
+                };
+            }
+            for (i, v) in action.motor_velocities.iter().enumerate() {
+                if !v.is_finite() {
+                    let echo = serde_json::to_string(&action).ok();
+                    return ServerMessage::Error {
+                        message: format!(
+                            "malformed action: motor_velocities[{i}] is NaN or infinite ({v})"
+                        ),
+                        echo,
+                    };
+                }
+            }
+        }
 
         match self
             .bridge
@@ -268,11 +319,12 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -281,8 +333,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                    message: "not connected to a robot".to_string(),
-                }
+                message: "not connected to a robot".to_string(),
+                echo: None,
+            }
             }
         };
 
@@ -312,11 +365,12 @@ impl AgentSession {
                     match_state,
                 }
             }
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -325,8 +379,9 @@ impl AgentSession {
             Some(id) => id,
             None => {
                 return ServerMessage::Error {
-                    message: "not connected to a robot".to_string(),
-                }
+                message: "not connected to a robot".to_string(),
+                echo: None,
+            }
             }
         };
 
@@ -340,11 +395,12 @@ impl AgentSession {
             .await
         {
             Ok(SimResponse::MessageSent) => ServerMessage::MessageSent,
-            Ok(SimResponse::Error { message }) => ServerMessage::Error { message },
+            Ok(SimResponse::Error { message }) => ServerMessage::Error { message, echo: None },
             Ok(_) => ServerMessage::Error {
                 message: "unexpected response from bridge".to_string(),
+                echo: None,
             },
-            Err(e) => ServerMessage::Error { message: e },
+            Err(e) => ServerMessage::Error { message: e, echo: None },
         }
     }
 
@@ -572,7 +628,7 @@ mod tests {
         let response = session.handle_message(ClientMessage::Step { action }).await;
 
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "error should mention not connected, got: {}",
@@ -585,7 +641,7 @@ mod tests {
         // Also test observe before connect
         let response = session.handle_message(ClientMessage::Observe).await;
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "observe error should mention not connected, got: {}",
@@ -598,7 +654,7 @@ mod tests {
         // Also test reset before connect
         let response = session.handle_message(ClientMessage::Reset).await;
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "reset error should mention not connected, got: {}",
@@ -629,7 +685,7 @@ mod tests {
             .handle_message(ClientMessage::Connect { robot_id: 0 })
             .await;
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("already connected"),
                     "error should mention already connected, got: {}",
@@ -652,7 +708,7 @@ mod tests {
             .await;
 
         match response {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid robot_id"),
                     "error should mention invalid robot_id, got: {}",
@@ -688,7 +744,7 @@ mod tests {
         };
         let resp = session.handle_message(ClientMessage::Step { action }).await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "step after close should say not connected, got: {}",
@@ -716,7 +772,7 @@ mod tests {
         // Observe after close should error
         let resp = session.handle_message(ClientMessage::Observe).await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "observe after close should say not connected, got: {}",
@@ -744,7 +800,7 @@ mod tests {
         // Reset after close should error
         let resp = session.handle_message(ClientMessage::Reset).await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "reset after close should say not connected, got: {}",
@@ -1029,7 +1085,7 @@ mod tests {
             })
             .await;
         match resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(message.contains("not connected"));
             }
             other => panic!("Expected Error, got {:?}", other),
@@ -1068,6 +1124,117 @@ mod tests {
             }
             other => panic!("Expected Observation with messages, got {:?}", other),
         }
+        handle.abort();
+    }
+
+    /// D5: wrong-shape Step (motor_velocities length ≠ ActionSpace.num_motors)
+    /// should produce a descriptive Error with the offending action echoed.
+    #[tokio::test]
+    async fn malformed_action_wrong_motor_count_returns_error_with_echo() {
+        let (mut session, handle) = setup_test_env();
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        // simple_arm(2) has num_motors = 2; we send 5 instead.
+        let bad = RobotAction {
+            motor_velocities: vec![1.0; 5],
+            gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
+        };
+        let resp = session.handle_message(ClientMessage::Step { action: bad }).await;
+        match resp {
+            ServerMessage::Error { message, echo } => {
+                assert!(
+                    message.contains("malformed action"),
+                    "message should describe shape mismatch, got: {message}"
+                );
+                assert!(message.contains("expected 2"));
+                let echo = echo.expect("echo must be set for shape errors");
+                assert!(echo.contains("motor_velocities"));
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        handle.abort();
+    }
+
+    /// D5: motor_velocities containing NaN/inf must be rejected (silent NaN
+    /// makes the simulator unstable; clients must learn about it).
+    #[tokio::test]
+    async fn malformed_action_nan_velocity_returns_error() {
+        let (mut session, handle) = setup_test_env();
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        let bad = RobotAction {
+            motor_velocities: vec![1.0, f32::NAN],
+            gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
+        };
+        let resp = session.handle_message(ClientMessage::Step { action: bad }).await;
+        match resp {
+            ServerMessage::Error { message, echo } => {
+                assert!(message.contains("NaN") || message.contains("infinite"));
+                assert!(echo.is_some());
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        handle.abort();
+    }
+
+    /// D5: Cancel from a connected session returns Cancelled, no Error.
+    #[tokio::test]
+    async fn error_propagation_cancel_returns_cancelled() {
+        let (mut session, handle) = setup_test_env();
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        let resp = session.handle_message(ClientMessage::Cancel).await;
+        assert!(matches!(resp, ServerMessage::Cancelled));
+        handle.abort();
+    }
+
+    /// D5: Cancel on a fresh session (never connected) is still acked.
+    /// Idempotent — clients can fire Cancel for cleanup regardless of state.
+    #[tokio::test]
+    async fn error_propagation_cancel_idle_session_still_cancelled() {
+        let (mut session, handle) = setup_test_env();
+        let resp = session.handle_message(ClientMessage::Cancel).await;
+        assert!(matches!(resp, ServerMessage::Cancelled));
+        handle.abort();
+    }
+
+    /// D5: a well-formed Step right AFTER an Error must succeed — error
+    /// reply must not leave the session in a broken state.
+    #[tokio::test]
+    async fn error_propagation_session_recovers_after_malformed_action() {
+        let (mut session, handle) = setup_test_env();
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        let bad = RobotAction {
+            motor_velocities: vec![1.0; 5],
+            gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
+        };
+        let resp = session.handle_message(ClientMessage::Step { action: bad }).await;
+        assert!(matches!(resp, ServerMessage::Error { .. }));
+
+        let good = RobotAction {
+            motor_velocities: vec![0.0, 0.0],
+            gripper_commands: vec![],
+            base_velocity: [0.0, 0.0],
+        };
+        let resp = session
+            .handle_message(ClientMessage::Step { action: good })
+            .await;
+        assert!(
+            matches!(resp, ServerMessage::Observation { .. }),
+            "session must recover after a malformed-action error, got {resp:?}"
+        );
         handle.abort();
     }
 }

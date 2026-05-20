@@ -1225,14 +1225,14 @@ mod tests {
         )
         .await;
 
+        // D5 contract: a shape mismatch (0 motors for a 2-joint robot) now
+        // returns a descriptive Error instead of silently clamping.
         match &resp {
-            ServerMessage::Observation { step_count, .. } => {
-                assert_eq!(
-                    *step_count, 1,
-                    "step with empty action should still increment count"
-                );
+            ServerMessage::Error { message, echo } => {
+                assert!(message.contains("malformed action"), "got: {message}");
+                assert!(echo.is_some(), "wrong-shape action should echo input");
             }
-            other => panic!("Expected Observation with empty action, got {:?}", other),
+            other => panic!("Expected Error for empty action, got {:?}", other),
         }
 
         drop(handle);
@@ -1241,8 +1241,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_edge_oversized_action_vector() {
-        // Step with more motor velocities than joints. apply_action should
-        // clamp to min(action_len, joint_count).
+        // D5 contract: oversized motor_velocities is a malformed action and
+        // gets a descriptive Error reply with the offending payload echoed,
+        // instead of being silently truncated by `apply_action`.
         let (handle, bridge_thread) = start_test_server(1);
         let tcp_port = handle.status().tcp_port;
         let (mut w, mut r) = tcp_connect(tcp_port).await;
@@ -1259,13 +1260,14 @@ mod tests {
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action: big_action }).await;
 
         match &resp {
-            ServerMessage::Observation { step_count, .. } => {
-                assert_eq!(*step_count, 1, "oversized action should still work");
+            ServerMessage::Error { message, echo } => {
+                assert!(
+                    message.contains("expected 2"),
+                    "message should name expected size, got: {message}"
+                );
+                assert!(echo.is_some(), "oversized action should echo input");
             }
-            other => panic!(
-                "Expected Observation with oversized action, got {:?}",
-                other
-            ),
+            other => panic!("Expected Error for oversized action, got {:?}", other),
         }
 
         drop(handle);
@@ -1459,7 +1461,7 @@ mod tests {
         };
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Step { action }).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "step after close should say not connected, got: {}",
@@ -1472,7 +1474,7 @@ mod tests {
         // Observe after close.
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Observe).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "observe after close should say not connected, got: {}",
@@ -1485,7 +1487,7 @@ mod tests {
         // Reset after close.
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Reset).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("not connected"),
                     "reset after close should say not connected, got: {}",
@@ -1591,7 +1593,7 @@ mod tests {
 
         let resp = tcp_send_recv(&mut w, &mut r, &ClientMessage::Connect { robot_id: 999 }).await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid robot_id"),
                     "should mention invalid robot_id, got: {}",
@@ -1621,7 +1623,7 @@ mod tests {
         )
         .await;
         match &resp {
-            ServerMessage::Error { message } => {
+            ServerMessage::Error { message, .. } => {
                 assert!(
                     message.contains("invalid robot_id"),
                     "usize::MAX robot_id should yield error, got: {}",
@@ -2268,7 +2270,7 @@ mod tests {
                 Some(Ok(WsMsg::Text(text))) => {
                     let msg: ServerMessage = serde_json::from_str(&text).unwrap();
                     match msg {
-                        ServerMessage::Error { message } => {
+                        ServerMessage::Error { message, .. } => {
                             assert!(
                                 message.contains("invalid JSON"),
                                 "WS malformed JSON error, got: {}",

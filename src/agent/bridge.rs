@@ -1974,4 +1974,75 @@ mod tests {
             other => panic!("Expected Observation with match_state, got {:?}", other),
         }
     }
+
+    /// D2: GymRobotState.combat should be populated for robots that carry a
+    /// CombatState, and `None` for plain arms. Asserts both the
+    /// GetObservation and Step paths populate it consistently.
+    #[tokio::test]
+    async fn combat_observations_populated_when_robot_has_combat_state() {
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+        let def = RobotDefinition::boxing_humanoid();
+        manager.add_robot(def.clone(), Mat4::IDENTITY);
+        manager.add_robot(RobotDefinition::simple_arm(3), Mat4::IDENTITY);
+        manager.get_robot_mut(0).unwrap().state.combat =
+            Some(crate::robot::state::CombatState::new(75.0, 50.0));
+        // robot 1 has no combat state — observations should reflect None.
+
+        // GetObservation path for combat robot
+        let s = server.clone();
+        let handle = tokio::spawn(async move {
+            s.send_command(SimCommand::GetObservation { robot_id: 0 }).await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        match handle.await.unwrap().unwrap() {
+            SimResponse::Observation { state, .. } => {
+                let c = state.combat.expect("combat robot should expose combat state");
+                assert!((c.max_health - 75.0).abs() < 1e-3);
+                assert!((c.stamina - 50.0).abs() < 1e-3);
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        // GetObservation path for non-combat robot
+        let s = server.clone();
+        let handle = tokio::spawn(async move {
+            s.send_command(SimCommand::GetObservation { robot_id: 1 }).await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        match handle.await.unwrap().unwrap() {
+            SimResponse::Observation { state, .. } => {
+                assert!(
+                    state.combat.is_none(),
+                    "non-combat robot should emit combat: None"
+                );
+            }
+            other => panic!("Expected Observation, got {:?}", other),
+        }
+
+        // Step path for combat robot — combat field still populated.
+        let s = server.clone();
+        let handle = tokio::spawn(async move {
+            s.send_command(SimCommand::Step {
+                robot_id: 0,
+                action: RobotAction {
+                    motor_velocities: vec![0.0; def.joints.len()],
+                    gripper_commands: vec![],
+                    base_velocity: [0.0, 0.0],
+                },
+            })
+            .await
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        match handle.await.unwrap().unwrap() {
+            SimResponse::Stepped { state, .. } => {
+                let c = state.combat.expect("combat must survive Step");
+                assert!((c.max_health - 75.0).abs() < 1e-3);
+            }
+            other => panic!("Expected Stepped, got {:?}", other),
+        }
+    }
 }

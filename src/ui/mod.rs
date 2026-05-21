@@ -1,19 +1,37 @@
 pub mod command_palette;
 pub mod config_validation;
+pub mod defaults;
 pub mod expr;
 pub mod gestures;
 pub mod gizmo;
 pub mod keymap;
+pub mod onboarding;
 pub mod outliner;
+pub mod pie_menu;
 pub mod quad_view;
 pub mod scene_io;
 pub mod selection_set;
 pub mod snap;
+pub mod status_hints;
 
 pub use outliner::OutlinerRows;
 pub use quad_view::{QuadView, Quadrant};
 
 pub use selection_set::{HiddenState, SelectionSet};
+pub use status_hints::{ActiveModifiers, StatusHints};
+
+/// Convenience wrapper: build a [`StatusHints`] from a viewport snapshot.
+/// Surfaces `next_step_hint` + `action_hint` so the bottom bar always
+/// shows a mode label, a next-step prompt, and (when set) the last
+/// action with its undo affordance.
+pub fn compute_status_hints(
+    mode: InteractionMode,
+    modifiers: ActiveModifiers,
+    last_action: Option<&str>,
+    selection_count: usize,
+) -> StatusHints {
+    StatusHints::compute(mode, modifiers, last_action, selection_count)
+}
 
 pub use command_palette::{Action as PaletteAction, CommandPalette};
 pub use gizmo::{AxisLock, GizmoState, TransformMode};

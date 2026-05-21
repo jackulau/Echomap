@@ -1,11 +1,13 @@
 pub mod command_palette;
 pub mod config_validation;
 pub mod gizmo;
+pub mod keymap;
 pub mod scene_io;
 pub mod snap;
 
 pub use command_palette::{Action as PaletteAction, CommandPalette};
 pub use gizmo::{AxisLock, GizmoState, TransformMode};
+pub use keymap::{ActionId, KeyBinding, Keymap};
 pub use snap::{SnapConfig, SnapMode};
 
 use glam::Vec3;

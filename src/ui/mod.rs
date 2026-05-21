@@ -2,9 +2,11 @@ pub mod command_palette;
 pub mod config_validation;
 pub mod gizmo;
 pub mod scene_io;
+pub mod snap;
 
 pub use command_palette::{Action as PaletteAction, CommandPalette};
 pub use gizmo::{AxisLock, GizmoState, TransformMode};
+pub use snap::{SnapConfig, SnapMode};
 
 use glam::Vec3;
 
@@ -173,6 +175,9 @@ pub struct ViewportState {
     /// Modal transform gizmo state — G/R/S activates, X/Y/Z constrains,
     /// Enter / LMB confirms, Esc / RMB cancels. `mode == None` ↔ inactive.
     pub gizmo: GizmoState,
+    /// Snap configuration. Default grid mode at 0.25 m increments. Hold
+    /// Shift during gizmo confirm to apply.
+    pub snap: SnapConfig,
 }
 
 impl Default for ViewportState {
@@ -222,6 +227,7 @@ impl Default for ViewportState {
             palette: CommandPalette::default(),
             pending_palette_action: None,
             gizmo: GizmoState::default(),
+            snap: SnapConfig::default(),
         }
     }
 }
@@ -2415,19 +2421,29 @@ pub fn viewport_3d(
                 } else if i.key_pressed(egui::Key::Enter) {
                     let mode = vp.gizmo.mode.expect("active gizmo has mode");
                     let delta = vp.gizmo.delta();
+                    let snap_active = vp.snap.active(modifiers.shift);
                     let applied = match (mode, vp.selection) {
                         (TransformMode::Translate, Selection::Source(idx))
                             if idx < scene.sound_sources.len() =>
                         {
                             let from = scene.sound_sources[idx].position;
-                            let to = from + delta;
+                            let raw_to = from + delta;
+                            let to = if snap_active {
+                                snap::apply_snap(raw_to, &vp.snap)
+                            } else {
+                                raw_to
+                            };
                             if (to - from).length() > 1e-9 {
                                 let _ = vp
                                     .history
                                     .push(SceneCommand::MoveSource { idx, from, to }, scene);
+                                let actual = to - from;
                                 Some(format!(
-                                    "Moved source by ({:+.2}, {:+.2}, {:+.2})",
-                                    delta.x, delta.y, delta.z
+                                    "Moved source by ({:+.2}, {:+.2}, {:+.2}){}",
+                                    actual.x,
+                                    actual.y,
+                                    actual.z,
+                                    if snap_active { " · snap" } else { "" }
                                 ))
                             } else {
                                 None
@@ -2437,14 +2453,23 @@ pub fn viewport_3d(
                             if idx < scene.listeners.len() =>
                         {
                             let from = scene.listeners[idx].position;
-                            let to = from + delta;
+                            let raw_to = from + delta;
+                            let to = if snap_active {
+                                snap::apply_snap(raw_to, &vp.snap)
+                            } else {
+                                raw_to
+                            };
                             if (to - from).length() > 1e-9 {
                                 let _ = vp
                                     .history
                                     .push(SceneCommand::MoveListener { idx, from, to }, scene);
+                                let actual = to - from;
                                 Some(format!(
-                                    "Moved listener by ({:+.2}, {:+.2}, {:+.2})",
-                                    delta.x, delta.y, delta.z
+                                    "Moved listener by ({:+.2}, {:+.2}, {:+.2}){}",
+                                    actual.x,
+                                    actual.y,
+                                    actual.z,
+                                    if snap_active { " · snap" } else { "" }
                                 ))
                             } else {
                                 None

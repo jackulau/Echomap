@@ -10,6 +10,53 @@ pub use gizmo::{AxisLock, GizmoState, TransformMode};
 pub use keymap::{ActionId, KeyBinding, Keymap};
 pub use snap::{SnapConfig, SnapMode};
 
+/// A right-click context menu entry. Labels are static so the menu can be
+/// built without allocation. The `action` is a [`PaletteAction`] so we
+/// reuse the existing dispatcher rather than maintain a parallel registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextMenuItem {
+    pub label: &'static str,
+    pub action: PaletteAction,
+}
+
+impl ContextMenuItem {
+    pub const fn new(label: &'static str, action: PaletteAction) -> Self {
+        Self { label, action }
+    }
+}
+
+/// Build the context menu for a selection. Pure function — easy to test.
+///
+/// Returns an empty vec when nothing is selected, signalling the caller
+/// should fall back to a scene-level menu.
+pub fn context_menu_items_for(selection: Selection) -> Vec<ContextMenuItem> {
+    use PaletteAction::*;
+    match selection {
+        Selection::None => vec![
+            ContextMenuItem::new("Add Source", AddSource),
+            ContextMenuItem::new("Add Listener", AddListener),
+            ContextMenuItem::new("Add Partition Wall", AddPartitionWall),
+            ContextMenuItem::new("Add Platform", AddPlatform),
+            ContextMenuItem::new("Reset Camera", ResetCamera),
+        ],
+        Selection::Source(_) => vec![
+            ContextMenuItem::new("Focus", FocusSelection),
+            ContextMenuItem::new("Delete", DeleteSelected),
+        ],
+        Selection::Listener(_) => vec![
+            ContextMenuItem::new("Focus", FocusSelection),
+            ContextMenuItem::new("Delete", DeleteSelected),
+        ],
+        Selection::Object(_) => vec![
+            ContextMenuItem::new("Focus", FocusSelection),
+            ContextMenuItem::new("Delete", DeleteSelected),
+        ],
+        Selection::Robot(_) | Selection::RobotLink(_, _) => {
+            vec![ContextMenuItem::new("Focus", FocusSelection)]
+        }
+    }
+}
+
 use glam::Vec3;
 
 use crate::acoustics::SimulationState;
@@ -2811,6 +2858,34 @@ pub fn viewport_3d(
             vp.dragging = false;
         }
 
+        // --- Right-click context menu ---
+        // Selecting on right-click (before showing the menu) lets the menu
+        // be selection-aware. If the right-click was a drag (panning), it
+        // won't trigger context_menu — egui treats drag and click as
+        // distinct on the secondary button.
+        if response.secondary_clicked() && !vp.gizmo.is_active() {
+            if let Some(hover) = response.hover_pos() {
+                vp.selection = hit_test(hover, scene, robot_manager, cam, center, scale);
+            }
+        }
+        let menu_selection = vp.selection;
+        // Field-scoped borrow so the closure doesn't clash with `cam`
+        // (which holds `&mut vp.camera` across this block).
+        let pending = &mut vp.pending_palette_action;
+        response.context_menu(|ui| {
+            let items = context_menu_items_for(menu_selection);
+            if items.is_empty() {
+                ui.label("(no actions)");
+                return;
+            }
+            for item in items {
+                if ui.button(item.label).clicked() {
+                    *pending = Some(item.action);
+                    ui.close_menu();
+                }
+            }
+        });
+
         // --- Drawing ---
 
         // Grid (distance-faded, axis-tinted)
@@ -5402,6 +5477,77 @@ mod tests {
             count >= 30,
             "expected >= 30 on_hover_text calls in src/ui/mod.rs, found {count}"
         );
+    }
+
+    // ---- Right-click context menu ----
+
+    #[test]
+    fn context_menu_no_selection_offers_scene_level_actions() {
+        let items = context_menu_items_for(Selection::None);
+        assert!(!items.is_empty());
+        let labels: Vec<&str> = items.iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"Add Source"));
+        assert!(labels.contains(&"Add Listener"));
+        assert!(labels.contains(&"Reset Camera"));
+    }
+
+    #[test]
+    fn context_menu_source_offers_focus_and_delete() {
+        let items = context_menu_items_for(Selection::Source(0));
+        let labels: Vec<&str> = items.iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"Focus"));
+        assert!(labels.contains(&"Delete"));
+    }
+
+    #[test]
+    fn context_menu_listener_offers_focus_and_delete() {
+        let items = context_menu_items_for(Selection::Listener(2));
+        let labels: Vec<&str> = items.iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"Focus"));
+        assert!(labels.contains(&"Delete"));
+    }
+
+    #[test]
+    fn context_menu_object_offers_focus_and_delete() {
+        let items = context_menu_items_for(Selection::Object(1));
+        let labels: Vec<&str> = items.iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"Focus"));
+        assert!(labels.contains(&"Delete"));
+    }
+
+    #[test]
+    fn context_menu_robot_omits_delete() {
+        // Robots aren't user-deletable from the viewport (they're owned by
+        // the robot manager). Focus-only is the expected behaviour.
+        let items = context_menu_items_for(Selection::Robot(0));
+        let labels: Vec<&str> = items.iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"Focus"));
+        assert!(!labels.contains(&"Delete"));
+    }
+
+    #[test]
+    fn context_menu_robot_link_focus_only() {
+        let items = context_menu_items_for(Selection::RobotLink(0, 3));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "Focus");
+    }
+
+    #[test]
+    fn context_menu_each_item_maps_to_palette_action() {
+        // Sanity: every item's action variant survives a clone. Catches
+        // panics if PaletteAction grows new variants with !Copy data.
+        for sel in [
+            Selection::None,
+            Selection::Source(0),
+            Selection::Listener(0),
+            Selection::Object(0),
+            Selection::Robot(0),
+            Selection::RobotLink(0, 0),
+        ] {
+            for item in context_menu_items_for(sel) {
+                let _ = item.action;
+            }
+        }
     }
 }
 

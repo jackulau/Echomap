@@ -21,7 +21,9 @@ use crate::robot::definition::{CollisionShape, RobotDefinition, SensorDefinition
 use crate::robot::sensors::sensor_world_pose;
 use crate::robot::state::ActuatorCommand;
 use crate::robot::RobotManager;
-use crate::scene::{Listener, MaterialLibrary, MediumLibrary, Scene, SoundSource};
+use crate::scene::{
+    History, Listener, MaterialLibrary, MediumLibrary, Scene, SceneCommand, SoundSource,
+};
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionMode {
@@ -149,6 +151,14 @@ pub struct ViewportState {
     /// when [`Self::teleop_mode`] is on (even when nothing is pressed — the
     /// next frame must zero stale commands). Drained by the main loop.
     pub teleop_pending: Option<crate::robot::state::RobotAction>,
+    /// Undo/redo history for user-driven scene edits. Add/remove/move
+    /// operations should funnel through `vp.history.push(cmd, scene)` rather
+    /// than mutating `scene` directly. Programmatic mutations (sim ticks,
+    /// agent server, tele-op) bypass history by design.
+    pub history: History,
+    /// Transient one-shot message from the last undo/redo action — drained
+    /// by the status bar each frame so the user sees "Undid: Move source".
+    pub last_history_msg: Option<String>,
 }
 
 impl Default for ViewportState {
@@ -193,6 +203,8 @@ impl Default for ViewportState {
             debug_ray_count: crate::renderer::DEFAULT_DEBUG_RAY_COUNT,
             teleop_mode: false,
             teleop_pending: None,
+            history: History::default(),
+            last_history_msg: None,
         }
     }
 }
@@ -525,12 +537,19 @@ pub fn menu_bar(
                     .on_hover_text("Insert a free-standing 2×2.5 m wall")
                     .clicked()
                 {
-                    scene.meshes.push(crate::scene::primitives::partition_wall(
+                    let obj = crate::scene::primitives::partition_wall(
                         Vec3::new(2.0, 0.0, 1.0),
                         2.0,
                         2.5,
                         0.15,
-                    ));
+                    );
+                    let _ = vp.history.push(
+                        SceneCommand::InsertObject {
+                            idx: scene.meshes.len(),
+                            obj,
+                        },
+                        scene,
+                    );
                     ui.close_menu();
                 }
                 if ui
@@ -538,12 +557,15 @@ pub fn menu_bar(
                     .on_hover_text("Add a 2×2×0.5 m raised platform")
                     .clicked()
                 {
-                    scene.meshes.push(crate::scene::primitives::platform(
-                        Vec3::new(1.0, 0.0, 1.0),
-                        2.0,
-                        2.0,
-                        0.5,
-                    ));
+                    let obj =
+                        crate::scene::primitives::platform(Vec3::new(1.0, 0.0, 1.0), 2.0, 2.0, 0.5);
+                    let _ = vp.history.push(
+                        SceneCommand::InsertObject {
+                            idx: scene.meshes.len(),
+                            obj,
+                        },
+                        scene,
+                    );
                     ui.close_menu();
                 }
                 ui.separator();
@@ -552,7 +574,13 @@ pub fn menu_bar(
                     .on_hover_text("Add a new omnidirectional source at the origin")
                     .clicked()
                 {
-                    scene.sound_sources.push(SoundSource::default());
+                    let _ = vp.history.push(
+                        SceneCommand::InsertSource {
+                            idx: scene.sound_sources.len(),
+                            src: SoundSource::default(),
+                        },
+                        scene,
+                    );
                     vp.selection = Selection::Source(scene.sound_sources.len() - 1);
                     ui.close_menu();
                 }
@@ -562,10 +590,17 @@ pub fn menu_bar(
                     .clicked()
                 {
                     let n = scene.listeners.len() + 1;
-                    scene.listeners.push(Listener {
+                    let listener = Listener {
                         name: format!("Listener {n}"),
                         ..Default::default()
-                    });
+                    };
+                    let _ = vp.history.push(
+                        SceneCommand::InsertListener {
+                            idx: scene.listeners.len(),
+                            listener,
+                        },
+                        scene,
+                    );
                     vp.selection = Selection::Listener(scene.listeners.len() - 1);
                     ui.close_menu();
                 }
@@ -1352,7 +1387,13 @@ pub fn side_panel(
                         }
                     }
                     if let Some(i) = to_remove {
-                        scene.meshes.remove(i);
+                        if i < scene.meshes.len() {
+                            let snap = scene.meshes[i].clone();
+                            let _ = vp.history.push(
+                                SceneCommand::RemoveObject { idx: i, snapshot: snap },
+                                scene,
+                            );
+                        }
                         vp.selection = Selection::None;
                     }
                 });
@@ -1411,7 +1452,13 @@ pub fn side_panel(
                         }
                     }
                     if let Some(i) = to_remove {
-                        scene.sound_sources.remove(i);
+                        if i < scene.sound_sources.len() {
+                            let snap = scene.sound_sources[i].clone();
+                            let _ = vp.history.push(
+                                SceneCommand::RemoveSource { idx: i, snapshot: snap },
+                                scene,
+                            );
+                        }
                         vp.selection = Selection::None;
                     }
                 });
@@ -1456,7 +1503,13 @@ pub fn side_panel(
                         }
                     }
                     if let Some(i) = to_remove {
-                        scene.listeners.remove(i);
+                        if i < scene.listeners.len() {
+                            let snap = scene.listeners[i].clone();
+                            let _ = vp.history.push(
+                                SceneCommand::RemoveListener { idx: i, snapshot: snap },
+                                scene,
+                            );
+                        }
                         vp.selection = Selection::None;
                     }
                 });
@@ -2322,18 +2375,59 @@ pub fn viewport_3d(
             if i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace) {
                 match vp.selection {
                     Selection::Source(idx) if idx < scene.sound_sources.len() => {
-                        scene.sound_sources.remove(idx);
+                        let snap = scene.sound_sources[idx].clone();
+                        let _ = vp.history.push(
+                            SceneCommand::RemoveSource {
+                                idx,
+                                snapshot: snap,
+                            },
+                            scene,
+                        );
                         vp.selection = Selection::None;
                     }
                     Selection::Listener(idx) if idx < scene.listeners.len() => {
-                        scene.listeners.remove(idx);
+                        let snap = scene.listeners[idx].clone();
+                        let _ = vp.history.push(
+                            SceneCommand::RemoveListener {
+                                idx,
+                                snapshot: snap,
+                            },
+                            scene,
+                        );
                         vp.selection = Selection::None;
                     }
                     Selection::Object(idx) if idx < scene.meshes.len() => {
-                        scene.meshes.remove(idx);
+                        let snap = scene.meshes[idx].clone();
+                        let _ = vp.history.push(
+                            SceneCommand::RemoveObject {
+                                idx,
+                                snapshot: snap,
+                            },
+                            scene,
+                        );
                         vp.selection = Selection::None;
                     }
                     _ => {}
+                }
+            }
+            // Undo / Redo — Cmd+Z (Mac) / Ctrl+Z (others), shift adds redo.
+            // `modifiers.command` resolves to Cmd on macOS, Ctrl elsewhere.
+            if modifiers.command && i.key_pressed(egui::Key::Z) {
+                if modifiers.shift {
+                    if let Some(name) = vp.history.redo(scene) {
+                        vp.last_history_msg = Some(format!("Redid: {name}"));
+                    }
+                } else if let Some(name) = vp.history.undo(scene) {
+                    vp.last_history_msg = Some(format!("Undid: {name}"));
+                    // Selection may now point at a removed item; defensively
+                    // reset rather than render against stale indices.
+                    vp.selection = Selection::None;
+                }
+            }
+            // Ctrl+Y = redo (Windows-style alternative).
+            if modifiers.command && i.key_pressed(egui::Key::Y) {
+                if let Some(name) = vp.history.redo(scene) {
+                    vp.last_history_msg = Some(format!("Redid: {name}"));
                 }
             }
             if i.key_pressed(egui::Key::F) {
@@ -2506,21 +2600,35 @@ pub fn viewport_3d(
                         }
                         InteractionMode::PlaceSource => {
                             if let Some(gp) = ground {
-                                scene.sound_sources.push(SoundSource {
+                                let src = SoundSource {
                                     position: Vec3::new(gp.x, 1.0, gp.z),
                                     ..Default::default()
-                                });
+                                };
+                                let _ = vp.history.push(
+                                    SceneCommand::InsertSource {
+                                        idx: scene.sound_sources.len(),
+                                        src,
+                                    },
+                                    scene,
+                                );
                                 vp.selection = Selection::Source(scene.sound_sources.len() - 1);
                             }
                         }
                         InteractionMode::PlaceListener => {
                             if let Some(gp) = ground {
                                 let n = scene.listeners.len() + 1;
-                                scene.listeners.push(Listener {
+                                let listener = Listener {
                                     position: Vec3::new(gp.x, 1.0, gp.z),
                                     name: format!("Listener {n}"),
                                     ..Listener::default()
-                                });
+                                };
+                                let _ = vp.history.push(
+                                    SceneCommand::InsertListener {
+                                        idx: scene.listeners.len(),
+                                        listener,
+                                    },
+                                    scene,
+                                );
                                 vp.selection = Selection::Listener(scene.listeners.len() - 1);
                             }
                         }

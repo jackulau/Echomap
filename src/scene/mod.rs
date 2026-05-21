@@ -1,7 +1,9 @@
+pub mod history;
 pub mod material;
 mod mesh;
 pub mod primitives;
 
+pub use history::{History, SceneCommand};
 pub use material::{AcousticMaterial, MaterialLibrary, MediumLibrary, MediumProperties};
 pub use mesh::{Mesh, Triangle, Vertex};
 
@@ -107,6 +109,7 @@ pub struct SoundSource {
     pub enabled: bool,
 }
 
+#[derive(Clone)]
 pub struct Listener {
     pub position: Vec3,
     pub name: String,

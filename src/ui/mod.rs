@@ -2,9 +2,12 @@ pub mod command_palette;
 pub mod config_validation;
 pub mod gizmo;
 pub mod keymap;
+pub mod outliner;
 pub mod scene_io;
 pub mod selection_set;
 pub mod snap;
+
+pub use outliner::OutlinerRows;
 
 pub use selection_set::{HiddenState, SelectionSet};
 
@@ -238,6 +241,21 @@ pub struct ViewportState {
     /// skipped by the viewport renderer; isolate mode shows only items in
     /// [`Self::selection_set`].
     pub hidden_state: HiddenState,
+    /// Per-row outliner visibility + lock flags. Distinct from
+    /// [`Self::hidden_state`] because outliner-driven hide is row-scoped UI
+    /// (eye icon next to each row) and lock blocks accidental click-select.
+    pub outliner_rows: OutlinerRows,
+    /// Toggle for the per-row outliner eye/lock icons. On by default; off
+    /// hides the icons for a leaner panel.
+    pub show_visibility_icons: bool,
+    /// Anchor for Shift-click range selection. Updated on plain/shift clicks,
+    /// preserved on Ctrl/Cmd-click.
+    pub selection_anchor: Selection,
+    /// True while the next viewport drag should draw a rubber-band rectangle
+    /// and select every pickable item inside on release (B-keyed box select).
+    pub box_select_armed: bool,
+    /// Active rubber-band rectangle while a box-select drag is in progress.
+    pub box_select_rect: Option<(egui::Pos2, egui::Pos2)>,
 }
 
 impl Default for ViewportState {
@@ -290,6 +308,11 @@ impl Default for ViewportState {
             snap: SnapConfig::default(),
             selection_set: SelectionSet::default(),
             hidden_state: HiddenState::default(),
+            outliner_rows: OutlinerRows::default(),
+            show_visibility_icons: true,
+            selection_anchor: Selection::None,
+            box_select_armed: false,
+            box_select_rect: None,
         }
     }
 }
@@ -1180,18 +1203,61 @@ pub fn outliner_panel(
                     );
                 });
                 let mut to_select: Option<Selection> = None;
+                let mut toggle_src_vis: Option<usize> = None;
+                let mut toggle_src_lock: Option<usize> = None;
                 for (i, _) in scene.sound_sources.iter().enumerate() {
                     let label = format!("Source {}", i + 1);
                     if !matches(&label) {
                         continue;
                     }
-                    let sel = vp.selection == Selection::Source(i);
-                    if ui.selectable_label(sel, &label).clicked() {
-                        to_select = Some(Selection::Source(i));
-                    }
+                    ui.horizontal(|ui| {
+                        if vp.show_visibility_icons {
+                            let eye = if vp.outliner_rows.is_source_visible(i) {
+                                outliner::ICON_EYE_OPEN
+                            } else {
+                                outliner::ICON_EYE_CLOSED
+                            };
+                            if ui
+                                .small_button(eye)
+                                .on_hover_text("Toggle row visibility")
+                                .clicked()
+                            {
+                                toggle_src_vis = Some(i);
+                            }
+                            let lock = if vp.outliner_rows.is_source_locked(i) {
+                                outliner::ICON_LOCK_CLOSED
+                            } else {
+                                outliner::ICON_LOCK_OPEN
+                            };
+                            if ui
+                                .small_button(lock)
+                                .on_hover_text("Lock row (blocks select)")
+                                .clicked()
+                            {
+                                toggle_src_lock = Some(i);
+                            }
+                        }
+                        let sel = vp.selection == Selection::Source(i);
+                        let locked = vp.outliner_rows.is_source_locked(i);
+                        let row_label = if locked {
+                            egui::RichText::new(&label).weak()
+                        } else {
+                            egui::RichText::new(&label)
+                        };
+                        if ui.selectable_label(sel, row_label).clicked() && !locked {
+                            to_select = Some(Selection::Source(i));
+                        }
+                    });
+                }
+                if let Some(i) = toggle_src_vis {
+                    vp.outliner_rows.toggle_source_visibility(i);
+                }
+                if let Some(i) = toggle_src_lock {
+                    vp.outliner_rows.toggle_source_lock(i);
                 }
                 if let Some(Selection::Source(i)) = to_select {
                     vp.selection = Selection::Source(i);
+                    vp.selection_set.set_single(Selection::Source(i));
                     if let Some(s) = scene.sound_sources.get(i) {
                         vp.camera.smooth_focus(s.position, 1.5);
                     }
@@ -1210,15 +1276,58 @@ pub fn outliner_panel(
                     );
                 });
                 let mut focus_listener: Option<usize> = None;
+                let mut toggle_lis_vis: Option<usize> = None;
+                let mut toggle_lis_lock: Option<usize> = None;
                 for (i, listener) in scene.listeners.iter().enumerate() {
                     if !matches(&listener.name) {
                         continue;
                     }
-                    let sel = vp.selection == Selection::Listener(i);
-                    if ui.selectable_label(sel, &listener.name).clicked() {
-                        vp.selection = Selection::Listener(i);
-                        focus_listener = Some(i);
-                    }
+                    ui.horizontal(|ui| {
+                        if vp.show_visibility_icons {
+                            let eye = if vp.outliner_rows.is_listener_visible(i) {
+                                outliner::ICON_EYE_OPEN
+                            } else {
+                                outliner::ICON_EYE_CLOSED
+                            };
+                            if ui
+                                .small_button(eye)
+                                .on_hover_text("Toggle row visibility")
+                                .clicked()
+                            {
+                                toggle_lis_vis = Some(i);
+                            }
+                            let lock = if vp.outliner_rows.is_listener_locked(i) {
+                                outliner::ICON_LOCK_CLOSED
+                            } else {
+                                outliner::ICON_LOCK_OPEN
+                            };
+                            if ui
+                                .small_button(lock)
+                                .on_hover_text("Lock row (blocks select)")
+                                .clicked()
+                            {
+                                toggle_lis_lock = Some(i);
+                            }
+                        }
+                        let sel = vp.selection == Selection::Listener(i);
+                        let locked = vp.outliner_rows.is_listener_locked(i);
+                        let row_label = if locked {
+                            egui::RichText::new(&listener.name).weak()
+                        } else {
+                            egui::RichText::new(&listener.name)
+                        };
+                        if ui.selectable_label(sel, row_label).clicked() && !locked {
+                            vp.selection = Selection::Listener(i);
+                            vp.selection_set.set_single(Selection::Listener(i));
+                            focus_listener = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = toggle_lis_vis {
+                    vp.outliner_rows.toggle_listener_visibility(i);
+                }
+                if let Some(i) = toggle_lis_lock {
+                    vp.outliner_rows.toggle_listener_lock(i);
                 }
                 if let Some(i) = focus_listener {
                     if let Some(l) = scene.listeners.get(i) {
@@ -1238,21 +1347,54 @@ pub fn outliner_panel(
                     );
                 });
                 let mut focus_obj: Option<usize> = None;
+                let mut toggle_obj_lock: Option<usize> = None;
                 for (i, obj) in scene.meshes.iter_mut().enumerate() {
                     if !matches(&obj.name) {
                         continue;
                     }
                     ui.horizontal(|ui| {
-                        let eye = if obj.visible { "●" } else { "○" };
-                        if ui.small_button(eye).clicked() {
-                            obj.visible = !obj.visible;
+                        if vp.show_visibility_icons {
+                            let eye = if obj.visible {
+                                outliner::ICON_EYE_OPEN
+                            } else {
+                                outliner::ICON_EYE_CLOSED
+                            };
+                            if ui
+                                .small_button(eye)
+                                .on_hover_text("Toggle row visibility")
+                                .clicked()
+                            {
+                                obj.visible = !obj.visible;
+                            }
+                            let lock = if vp.outliner_rows.is_object_locked(i) {
+                                outliner::ICON_LOCK_CLOSED
+                            } else {
+                                outliner::ICON_LOCK_OPEN
+                            };
+                            if ui
+                                .small_button(lock)
+                                .on_hover_text("Lock row (blocks select)")
+                                .clicked()
+                            {
+                                toggle_obj_lock = Some(i);
+                            }
                         }
                         let sel = vp.selection == Selection::Object(i);
-                        if ui.selectable_label(sel, &obj.name).clicked() {
+                        let locked = vp.outliner_rows.is_object_locked(i);
+                        let row_label = if locked {
+                            egui::RichText::new(&obj.name).weak()
+                        } else {
+                            egui::RichText::new(&obj.name)
+                        };
+                        if ui.selectable_label(sel, row_label).clicked() && !locked {
                             vp.selection = Selection::Object(i);
+                            vp.selection_set.set_single(Selection::Object(i));
                             focus_obj = Some(i);
                         }
                     });
+                }
+                if let Some(i) = toggle_obj_lock {
+                    vp.outliner_rows.toggle_object_lock(i);
                 }
                 if let Some(i) = focus_obj {
                     if let Some(obj) = scene.meshes.get(i) {
@@ -2728,6 +2870,46 @@ pub fn viewport_3d(
                 }
             }
 
+            // --- D7 selection hotkeys (gated off when fly/teleop modes own
+            // the same keys to avoid stealing input). ---
+            let selection_keys_active = !vp.fly_mode && !vp.teleop_mode && !vp.palette.open;
+            if selection_keys_active {
+                // A — Select All (plain). Alt+A — Deselect All.
+                if i.key_pressed(egui::Key::A) {
+                    if modifiers.alt {
+                        vp.selection_set.clear();
+                        vp.selection = Selection::None;
+                        vp.selection_anchor = Selection::None;
+                    } else if !modifiers.command && !modifiers.ctrl && !modifiers.shift {
+                        let counts = selection_set::PickableCounts {
+                            sources: scene.sound_sources.len(),
+                            listeners: scene.listeners.len(),
+                            objects: scene.meshes.len(),
+                            robots: robot_manager.robots.len(),
+                        };
+                        selection_set::select_all(&mut vp.selection_set, counts);
+                        vp.selection = vp.selection_set.primary();
+                    }
+                }
+                // H — Hide selection. Alt+H — Unhide all.
+                if i.key_pressed(egui::Key::H) {
+                    if modifiers.alt {
+                        vp.hidden_state.unhide_all();
+                    } else {
+                        vp.hidden_state.hide_selection(&vp.selection_set);
+                    }
+                }
+                // / — Toggle isolate.
+                if i.key_pressed(egui::Key::Slash) {
+                    vp.hidden_state.toggle_isolate();
+                }
+                // B — Arm box select. Next viewport drag draws a rubber-band
+                // and selects everything inside on release.
+                if i.key_pressed(egui::Key::B) {
+                    vp.box_select_armed = !vp.box_select_armed;
+                }
+            }
+
             // --- Tele-op key sampling (Ctrl+T to toggle) ---
             if vp.teleop_mode {
                 let num_motors = robot_manager
@@ -2866,14 +3048,15 @@ pub fn viewport_3d(
                     match vp.mode {
                         InteractionMode::Select => {
                             let hit = hit_test(hover, scene, robot_manager, cam, center, scale);
-                            if modifiers.command || modifiers.ctrl {
-                                // Ctrl/Cmd-click toggles in the multi-set.
-                                vp.selection_set.toggle(hit);
-                                vp.selection = vp.selection_set.primary();
-                            } else {
-                                vp.selection = hit;
-                                vp.selection_set.set_single(hit);
-                            }
+                            let new_anchor = selection_set::apply_pick(
+                                &mut vp.selection_set,
+                                vp.selection_anchor,
+                                hit,
+                                modifiers.command || modifiers.ctrl,
+                                modifiers.shift,
+                            );
+                            vp.selection_anchor = new_anchor;
+                            vp.selection = vp.selection_set.primary();
                         }
                         InteractionMode::PlaceSource => {
                             if let Some(gp) = ground {

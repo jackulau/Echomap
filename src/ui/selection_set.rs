@@ -440,6 +440,132 @@ mod tests {
     }
 
     #[test]
+    fn select_all_fills_every_variant() {
+        let mut s = SelectionSet::new();
+        let counts = PickableCounts {
+            sources: 2,
+            listeners: 1,
+            objects: 3,
+            robots: 1,
+        };
+        select_all(&mut s, counts);
+        assert_eq!(s.len(), 7);
+        assert!(s.contains(Selection::Source(0)));
+        assert!(s.contains(Selection::Source(1)));
+        assert!(s.contains(Selection::Listener(0)));
+        assert!(s.contains(Selection::Object(2)));
+        assert!(s.contains(Selection::Robot(0)));
+    }
+
+    #[test]
+    fn select_all_clears_first() {
+        let mut s = SelectionSet::new();
+        s.add(Selection::Source(99)); // pre-existing stale entry
+        select_all(
+            &mut s,
+            PickableCounts {
+                sources: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(s.len(), 1);
+        assert!(s.contains(Selection::Source(0)));
+        assert!(!s.contains(Selection::Source(99)));
+    }
+
+    #[test]
+    fn range_between_same_variant_inclusive() {
+        let r = range_between(Selection::Source(2), Selection::Source(5));
+        assert_eq!(r.len(), 4);
+        assert!(r.contains(&Selection::Source(2)));
+        assert!(r.contains(&Selection::Source(5)));
+    }
+
+    #[test]
+    fn range_between_reverse_order_still_works() {
+        let r = range_between(Selection::Object(5), Selection::Object(1));
+        assert_eq!(r.len(), 5);
+    }
+
+    #[test]
+    fn range_between_cross_variant_falls_back_to_target() {
+        let r = range_between(Selection::Source(1), Selection::Listener(3));
+        assert_eq!(r, vec![Selection::Listener(3)]);
+    }
+
+    #[test]
+    fn apply_pick_plain_replaces() {
+        let mut s = SelectionSet::new();
+        s.add(Selection::Source(0));
+        let anchor = apply_pick(
+            &mut s,
+            Selection::None,
+            Selection::Listener(2),
+            false,
+            false,
+        );
+        assert_eq!(s.len(), 1);
+        assert!(s.contains(Selection::Listener(2)));
+        assert!(matches!(anchor, Selection::Listener(2)));
+    }
+
+    #[test]
+    fn apply_pick_ctrl_toggles() {
+        let mut s = SelectionSet::new();
+        s.add(Selection::Source(0));
+        apply_pick(
+            &mut s,
+            Selection::Source(0),
+            Selection::Source(1),
+            true,
+            false,
+        );
+        assert_eq!(s.len(), 2);
+        // Ctrl-click on existing → removes
+        apply_pick(
+            &mut s,
+            Selection::Source(0),
+            Selection::Source(0),
+            true,
+            false,
+        );
+        assert_eq!(s.len(), 1);
+        assert!(s.contains(Selection::Source(1)));
+    }
+
+    #[test]
+    fn apply_pick_shift_ranges() {
+        let mut s = SelectionSet::new();
+        apply_pick(
+            &mut s,
+            Selection::Source(1),
+            Selection::Source(4),
+            false,
+            true,
+        );
+        assert_eq!(s.len(), 4);
+        assert!(s.contains(Selection::Source(1)));
+        assert!(s.contains(Selection::Source(4)));
+    }
+
+    #[test]
+    fn apply_pick_none_target_plain_clears() {
+        let mut s = SelectionSet::new();
+        s.add(Selection::Source(0));
+        s.add(Selection::Source(1));
+        apply_pick(&mut s, Selection::Source(0), Selection::None, false, false);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn apply_pick_none_target_ctrl_keeps_set() {
+        let mut s = SelectionSet::new();
+        s.add(Selection::Source(0));
+        apply_pick(&mut s, Selection::Source(0), Selection::None, true, false);
+        assert_eq!(s.len(), 1);
+    }
+
+    #[test]
     fn hidden_state_render_listener_and_object_follow_same_rules() {
         let mut sel = SelectionSet::new();
         sel.add(Selection::Listener(3));

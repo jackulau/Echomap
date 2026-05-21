@@ -1,8 +1,10 @@
 pub mod command_palette;
 pub mod config_validation;
+pub mod gizmo;
 pub mod scene_io;
 
 pub use command_palette::{Action as PaletteAction, CommandPalette};
+pub use gizmo::{AxisLock, GizmoState, TransformMode};
 
 use glam::Vec3;
 
@@ -168,6 +170,9 @@ pub struct ViewportState {
     /// because viewport_3d doesn't own the affected state (e.g.
     /// `show_settings`, sim run). Set by viewport, drained by main update().
     pub pending_palette_action: Option<PaletteAction>,
+    /// Modal transform gizmo state — G/R/S activates, X/Y/Z constrains,
+    /// Enter / LMB confirms, Esc / RMB cancels. `mode == None` ↔ inactive.
+    pub gizmo: GizmoState,
 }
 
 impl Default for ViewportState {
@@ -216,6 +221,7 @@ impl Default for ViewportState {
             last_history_msg: None,
             palette: CommandPalette::default(),
             pending_palette_action: None,
+            gizmo: GizmoState::default(),
         }
     }
 }
@@ -2386,11 +2392,124 @@ pub fn viewport_3d(
                 cam.set_view(view);
                 vp.current_view = view;
             }
-            // R = reset camera (preserves auto-focus on existing scene).
-            if i.key_pressed(egui::Key::R) {
-                *cam = Camera::default();
-                if !scene.meshes.is_empty() {
-                    focus_on_scene(cam, scene);
+            // --- Transform gizmo modal ---
+            // Selection-aware G/R/S activate the gizmo. With no selection
+            // (or non-position selection like Robot), R falls through to
+            // reset-camera.
+            let gizmo_target_pos: Option<Vec3> = match vp.selection {
+                Selection::Source(idx) if idx < scene.sound_sources.len() => {
+                    Some(scene.sound_sources[idx].position)
+                }
+                Selection::Listener(idx) if idx < scene.listeners.len() => {
+                    Some(scene.listeners[idx].position)
+                }
+                _ => None,
+            };
+
+            if vp.gizmo.is_active() {
+                // While the gizmo is running, every keypress feeds it —
+                // don't fall through to other handlers.
+                if i.key_pressed(egui::Key::Escape) {
+                    vp.gizmo.cancel();
+                    vp.last_history_msg = Some("Gizmo cancelled".into());
+                } else if i.key_pressed(egui::Key::Enter) {
+                    let mode = vp.gizmo.mode.expect("active gizmo has mode");
+                    let delta = vp.gizmo.delta();
+                    let applied = match (mode, vp.selection) {
+                        (TransformMode::Translate, Selection::Source(idx))
+                            if idx < scene.sound_sources.len() =>
+                        {
+                            let from = scene.sound_sources[idx].position;
+                            let to = from + delta;
+                            if (to - from).length() > 1e-9 {
+                                let _ = vp
+                                    .history
+                                    .push(SceneCommand::MoveSource { idx, from, to }, scene);
+                                Some(format!(
+                                    "Moved source by ({:+.2}, {:+.2}, {:+.2})",
+                                    delta.x, delta.y, delta.z
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        (TransformMode::Translate, Selection::Listener(idx))
+                            if idx < scene.listeners.len() =>
+                        {
+                            let from = scene.listeners[idx].position;
+                            let to = from + delta;
+                            if (to - from).length() > 1e-9 {
+                                let _ = vp
+                                    .history
+                                    .push(SceneCommand::MoveListener { idx, from, to }, scene);
+                                Some(format!(
+                                    "Moved listener by ({:+.2}, {:+.2}, {:+.2})",
+                                    delta.x, delta.y, delta.z
+                                ))
+                            } else {
+                                None
+                            }
+                        }
+                        (TransformMode::Rotate, _) | (TransformMode::Scale, _) => {
+                            // Rotate / Scale apply paths are deliverable
+                            // 9's job (properties polish + per-object
+                            // transform field). The state machine + UI is
+                            // ready; the apply step no-ops gracefully.
+                            Some(format!(
+                                "{} not yet applied to this selection",
+                                mode.label()
+                            ))
+                        }
+                        _ => None,
+                    };
+                    if let Some(msg) = applied {
+                        vp.last_history_msg = Some(msg);
+                    }
+                    vp.gizmo.confirm();
+                } else if i.key_pressed(egui::Key::X) {
+                    vp.gizmo.set_axis(AxisLock::X);
+                } else if i.key_pressed(egui::Key::Y) {
+                    vp.gizmo.set_axis(AxisLock::Y);
+                } else if i.key_pressed(egui::Key::Z) {
+                    vp.gizmo.set_axis(AxisLock::Z);
+                } else if i.key_pressed(egui::Key::Backspace) {
+                    vp.gizmo.backspace();
+                } else {
+                    // Numeric typing — egui::Event::Text carries pressed chars.
+                    for ev in &i.events {
+                        if let egui::Event::Text(s) = ev {
+                            for c in s.chars() {
+                                vp.gizmo.type_char(c);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Gizmo inactive — selection-bearing keys begin a gizmo;
+                // otherwise R still resets camera.
+                let can_begin = gizmo_target_pos.is_some()
+                    && !vp.teleop_mode
+                    && !vp.fly_mode
+                    && !modifiers.command
+                    && !modifiers.ctrl
+                    && !modifiers.shift
+                    && !modifiers.alt;
+                if can_begin {
+                    let p = gizmo_target_pos.unwrap();
+                    if i.key_pressed(egui::Key::G) {
+                        vp.gizmo.begin(TransformMode::Translate, p);
+                    } else if i.key_pressed(egui::Key::R) {
+                        vp.gizmo.begin(TransformMode::Rotate, p);
+                    } else if i.key_pressed(egui::Key::S) {
+                        vp.gizmo.begin(TransformMode::Scale, p);
+                    }
+                }
+                // R = reset camera fallback (only if gizmo path didn't fire).
+                if !vp.gizmo.is_active() && i.key_pressed(egui::Key::R) {
+                    *cam = Camera::default();
+                    if !scene.meshes.is_empty() {
+                        focus_on_scene(cam, scene);
+                    }
                 }
             }
             if i.key_pressed(egui::Key::Home) {
@@ -3010,6 +3129,27 @@ pub fn viewport_3d(
                     ),
                 );
             }
+        }
+
+        // Gizmo HUD — top-center banner while a transform is in flight.
+        if let Some(hud) = vp.gizmo.hud_text() {
+            let h = 26.0;
+            let banner_rect = egui::Rect::from_min_size(
+                rect.left_top() + egui::vec2(0.0, if vp.teleop_mode { 24.0 } else { 0.0 }),
+                egui::vec2(rect.width(), h),
+            );
+            painter.rect_filled(
+                banner_rect,
+                0.0,
+                egui::Color32::from_rgba_unmultiplied(60, 90, 140, 220),
+            );
+            painter.text(
+                banner_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{hud} · X/Y/Z lock · type value · Enter confirm · Esc cancel"),
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            );
         }
 
         // Hover tooltip

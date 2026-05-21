@@ -67,6 +67,13 @@ pub enum ActionId {
     // Scene
     SaveScene,
     LoadScene,
+    // Multi-selection (D7)
+    SelectAll,
+    DeselectAll,
+    HideSelection,
+    UnhideAll,
+    ToggleIsolate,
+    BoxSelect,
 }
 
 impl ActionId {
@@ -101,6 +108,12 @@ impl ActionId {
             ToggleTeleop => "Toggle Tele-op",
             SaveScene => "Save Scene",
             LoadScene => "Load Scene",
+            SelectAll => "Select All",
+            DeselectAll => "Deselect All",
+            HideSelection => "Hide Selection",
+            UnhideAll => "Unhide All",
+            ToggleIsolate => "Toggle Isolate",
+            BoxSelect => "Box Select",
         }
     }
 }
@@ -278,6 +291,14 @@ impl Keymap {
         );
         m.insert(ActionId::SaveScene, vec![KeyBinding::key("S").with_cmd()]);
         m.insert(ActionId::LoadScene, vec![KeyBinding::key("O").with_cmd()]);
+        // Multi-selection (D7) — Blender-style: A select all, Alt+A deselect,
+        // B box-select, H hide, Alt+H unhide, / isolate.
+        m.insert(ActionId::SelectAll, vec![KeyBinding::key("A")]);
+        m.insert(ActionId::DeselectAll, vec![KeyBinding::key("A").with_alt()]);
+        m.insert(ActionId::HideSelection, vec![KeyBinding::key("H")]);
+        m.insert(ActionId::UnhideAll, vec![KeyBinding::key("H").with_alt()]);
+        m.insert(ActionId::ToggleIsolate, vec![KeyBinding::key("Slash")]);
+        m.insert(ActionId::BoxSelect, vec![KeyBinding::key("B")]);
         Self { bindings: m }
     }
 
@@ -401,6 +422,7 @@ fn egui_key_from_str(s: &str) -> Option<egui::Key> {
         "ArrowRight" | "Right" => Key::ArrowRight,
         "OpenBracket" | "[" => Key::OpenBracket,
         "CloseBracket" | "]" => Key::CloseBracket,
+        "Slash" | "/" => Key::Slash,
         "F1" => Key::F1,
         "F2" => Key::F2,
         "F3" => Key::F3,

@@ -3,7 +3,10 @@ pub mod config_validation;
 pub mod gizmo;
 pub mod keymap;
 pub mod scene_io;
+pub mod selection_set;
 pub mod snap;
+
+pub use selection_set::{HiddenState, SelectionSet};
 
 pub use command_palette::{Action as PaletteAction, CommandPalette};
 pub use gizmo::{AxisLock, GizmoState, TransformMode};
@@ -89,7 +92,7 @@ pub enum InteractionMode {
     PlaceListener,
 }
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Selection {
     #[default]
     None,
@@ -227,6 +230,14 @@ pub struct ViewportState {
     /// Snap configuration. Default grid mode at 0.25 m increments. Hold
     /// Shift during gizmo confirm to apply.
     pub snap: SnapConfig,
+    /// Multi-selection set. Primary item (head) mirrors [`Self::selection`]
+    /// for legacy single-select code paths. Ctrl/Cmd-click toggles, plain
+    /// click resets to single.
+    pub selection_set: SelectionSet,
+    /// Per-collection hidden indices + isolate flag. Hidden items are
+    /// skipped by the viewport renderer; isolate mode shows only items in
+    /// [`Self::selection_set`].
+    pub hidden_state: HiddenState,
 }
 
 impl Default for ViewportState {
@@ -277,6 +288,8 @@ impl Default for ViewportState {
             pending_palette_action: None,
             gizmo: GizmoState::default(),
             snap: SnapConfig::default(),
+            selection_set: SelectionSet::default(),
+            hidden_state: HiddenState::default(),
         }
     }
 }
@@ -2403,9 +2416,49 @@ pub fn viewport_3d(
             }
             if i.key_pressed(egui::Key::Escape) {
                 vp.selection = Selection::None;
+                vp.selection_set.clear();
             }
             if i.key_pressed(egui::Key::Tab) {
                 vp.fly_mode = !vp.fly_mode;
+            }
+            // --- Selection-set + hide/isolate shortcuts (deliverable 7) ---
+            // A = select all, Alt+A = deselect all, H = hide selection,
+            // Alt+H = unhide all, / = toggle isolate. Gated so they don't
+            // collide with fly-mode WASD or teleop-mode joint motion.
+            let selection_keys_ok = !vp.gizmo.is_active()
+                && !vp.fly_mode
+                && !vp.teleop_mode
+                && !modifiers.command
+                && !modifiers.ctrl;
+            if selection_keys_ok {
+                if i.key_pressed(egui::Key::A) {
+                    if modifiers.alt {
+                        vp.selection_set.clear();
+                        vp.selection = Selection::None;
+                    } else {
+                        vp.selection_set.clear();
+                        for idx in 0..scene.sound_sources.len() {
+                            vp.selection_set.add(Selection::Source(idx));
+                        }
+                        for idx in 0..scene.listeners.len() {
+                            vp.selection_set.add(Selection::Listener(idx));
+                        }
+                        for idx in 0..scene.meshes.len() {
+                            vp.selection_set.add(Selection::Object(idx));
+                        }
+                        vp.selection = vp.selection_set.primary();
+                    }
+                }
+                if i.key_pressed(egui::Key::H) {
+                    if modifiers.alt {
+                        vp.hidden_state.unhide_all();
+                    } else {
+                        vp.hidden_state.hide_selection(&vp.selection_set);
+                    }
+                }
+                if i.key_pressed(egui::Key::Slash) {
+                    vp.hidden_state.toggle_isolate();
+                }
             }
             // Ctrl+T toggles tele-op mode. Turning it on suppresses fly-mode so
             // WASD/QE feed the robot rather than the camera.
@@ -2812,8 +2865,15 @@ pub fn viewport_3d(
 
                     match vp.mode {
                         InteractionMode::Select => {
-                            vp.selection =
-                                hit_test(hover, scene, robot_manager, cam, center, scale);
+                            let hit = hit_test(hover, scene, robot_manager, cam, center, scale);
+                            if modifiers.command || modifiers.ctrl {
+                                // Ctrl/Cmd-click toggles in the multi-set.
+                                vp.selection_set.toggle(hit);
+                                vp.selection = vp.selection_set.primary();
+                            } else {
+                                vp.selection = hit;
+                                vp.selection_set.set_single(hit);
+                            }
                         }
                         InteractionMode::PlaceSource => {
                             if let Some(gp) = ground {

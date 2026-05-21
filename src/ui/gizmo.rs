@@ -109,14 +109,16 @@ impl GizmoState {
         self.drag_delta += world_delta;
     }
 
-    /// Append a typed character to the numeric input buffer. Filters to a
-    /// well-formed signed decimal — silently ignores stray keys.
+    /// Append a typed character to the numeric input buffer. Accepts
+    /// digits + `. - + * / ^ ( )` and letters (for `pi`, `e`, `sin`, etc.) —
+    /// the buffer is fed to [`crate::ui::expr::evaluate_expression`] on read,
+    /// so any expression that grammar accepts is valid input here.
     pub fn type_char(&mut self, c: char) {
-        match c {
-            '-' if self.numeric_input.is_empty() => self.numeric_input.push('-'),
-            '.' if !self.numeric_input.contains('.') => self.numeric_input.push('.'),
-            d if d.is_ascii_digit() => self.numeric_input.push(d),
-            _ => {}
+        if c.is_ascii_digit()
+            || matches!(c, '.' | '-' | '+' | '*' | '/' | '^' | '(' | ')' | ' ')
+            || c.is_ascii_alphabetic()
+        {
+            self.numeric_input.push(c);
         }
     }
 
@@ -125,12 +127,16 @@ impl GizmoState {
         self.numeric_input.pop();
     }
 
-    /// Parse the numeric input. Returns `None` if empty or malformed.
+    /// Parse the numeric input as an arithmetic expression (so users can
+    /// type `2*3.14` or `1+sin(0)` directly into the gizmo). Returns `None`
+    /// if empty or malformed.
     pub fn parsed_numeric(&self) -> Option<f32> {
         if self.numeric_input.is_empty() {
             return None;
         }
-        self.numeric_input.parse().ok()
+        crate::ui::expr::evaluate_expression(&self.numeric_input)
+            .ok()
+            .map(|v| v as f32)
     }
 
     /// Effective delta this frame, accounting for axis lock and numeric
@@ -270,14 +276,44 @@ mod tests {
     }
 
     #[test]
-    fn gizmo_numeric_input_filters_garbage() {
+    fn gizmo_numeric_input_filters_non_expr_garbage() {
+        // Type_char accepts digits + letters + arithmetic operators (so
+        // users can type `sin(0)` or `2*3`), but rejects punctuation that
+        // can't appear in expressions.
         let mut g = GizmoState::default();
         g.begin(TransformMode::Translate, Vec3::ZERO);
-        for c in "ab1c.2!@d3".chars() {
+        for c in "1!@#$.2,;3".chars() {
             g.type_char(c);
         }
         assert_eq!(g.numeric_input, "1.23");
         assert_eq!(g.parsed_numeric(), Some(1.23));
+    }
+
+    #[test]
+    fn gizmo_numeric_accepts_arithmetic_expressions() {
+        // `2 * 3.14` should evaluate to 6.28 — the gizmo no longer filters
+        // operators, since the expr evaluator handles them.
+        let mut g = GizmoState::default();
+        g.begin(TransformMode::Translate, Vec3::ZERO);
+        for c in "2 * 3.14".chars() {
+            g.type_char(c);
+        }
+        assert_eq!(g.numeric_input, "2 * 3.14");
+        let v = g.parsed_numeric().unwrap();
+        assert!((v - 6.28).abs() < 1e-4);
+    }
+
+    #[test]
+    fn gizmo_numeric_accepts_function_calls() {
+        // Common math functions land in the gizmo unchanged, so the
+        // existing expr evaluator can resolve them.
+        let mut g = GizmoState::default();
+        g.begin(TransformMode::Translate, Vec3::ZERO);
+        for c in "sqrt(9) + 1".chars() {
+            g.type_char(c);
+        }
+        let v = g.parsed_numeric().unwrap();
+        assert!((v - 4.0).abs() < 1e-5);
     }
 
     #[test]
@@ -288,8 +324,6 @@ mod tests {
         g.type_char('1');
         g.type_char('.');
         g.type_char('5');
-        g.type_char('.'); // second dot ignored
-        g.type_char('-'); // mid-string minus ignored
         assert_eq!(g.numeric_input, "-1.5");
         assert_eq!(g.parsed_numeric(), Some(-1.5));
     }

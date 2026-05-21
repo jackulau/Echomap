@@ -4,11 +4,13 @@ pub mod expr;
 pub mod gizmo;
 pub mod keymap;
 pub mod outliner;
+pub mod quad_view;
 pub mod scene_io;
 pub mod selection_set;
 pub mod snap;
 
 pub use outliner::OutlinerRows;
+pub use quad_view::{QuadView, Quadrant};
 
 pub use selection_set::{HiddenState, SelectionSet};
 
@@ -257,6 +259,9 @@ pub struct ViewportState {
     pub box_select_armed: bool,
     /// Active rubber-band rectangle while a box-select drag is in progress.
     pub box_select_rect: Option<(egui::Pos2, egui::Pos2)>,
+    /// Quad-view state — Ctrl+Alt+Q toggles a Top/Front/Side/Persp split.
+    /// Off by default; additive feature.
+    pub quad_view: QuadView,
 }
 
 impl Default for ViewportState {
@@ -314,6 +319,7 @@ impl Default for ViewportState {
             selection_anchor: Selection::None,
             box_select_armed: false,
             box_select_rect: None,
+            quad_view: QuadView::default(),
         }
     }
 }
@@ -2602,6 +2608,11 @@ pub fn viewport_3d(
                 if i.key_pressed(egui::Key::Slash) {
                     vp.hidden_state.toggle_isolate();
                 }
+            }
+            // Ctrl+Alt+Q toggles quad-view (Top / Front / Side / Persp).
+            if (modifiers.ctrl || modifiers.command) && modifiers.alt && i.key_pressed(egui::Key::Q)
+            {
+                vp.quad_view.toggle();
             }
             // Ctrl+T toggles tele-op mode. Turning it on suppresses fly-mode so
             // WASD/QE feed the robot rather than the camera.

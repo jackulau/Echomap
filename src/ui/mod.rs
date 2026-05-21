@@ -1,5 +1,6 @@
 pub mod command_palette;
 pub mod config_validation;
+pub mod expr;
 pub mod gizmo;
 pub mod keymap;
 pub mod outliner;

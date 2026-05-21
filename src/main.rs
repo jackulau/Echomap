@@ -263,6 +263,28 @@ mod app {
                 &self.status,
             );
 
+            // Drain app-level palette actions (those viewport_3d can't
+            // handle because they touch settings/about window flags or
+            // need a mutable Sim handle).
+            if let Some(action) = self.viewport.pending_palette_action.take() {
+                use echomap::ui::PaletteAction;
+                match action {
+                    PaletteAction::ToggleSettings => self.show_settings = !self.show_settings,
+                    PaletteAction::ToggleAbout => self.show_about = !self.show_about,
+                    PaletteAction::NewScene => {
+                        self.scene = echomap::scene::Scene::default();
+                        self.viewport.selection = echomap::ui::Selection::None;
+                        self.viewport.history.clear();
+                    }
+                    PaletteAction::RunSimulation => {
+                        if !self.simulation.is_running() {
+                            self.simulation.start(&self.scene);
+                        }
+                    }
+                    _ => {} // viewport_3d handled it
+                }
+            }
+
             // Drain tele-op pending action (Ctrl+T mode) onto robot/0.
             if let Some(action) = self.viewport.teleop_pending.take() {
                 if let Some(robot) = self.robot_manager.get_robot_mut(0) {

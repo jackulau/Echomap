@@ -1,5 +1,8 @@
+pub mod command_palette;
 pub mod config_validation;
 pub mod scene_io;
+
+pub use command_palette::{Action as PaletteAction, CommandPalette};
 
 use glam::Vec3;
 
@@ -25,7 +28,7 @@ use crate::scene::{
     History, Listener, MaterialLibrary, MediumLibrary, Scene, SceneCommand, SoundSource,
 };
 
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InteractionMode {
     #[default]
     Select,
@@ -159,6 +162,12 @@ pub struct ViewportState {
     /// Transient one-shot message from the last undo/redo action — drained
     /// by the status bar each frame so the user sees "Undid: Move source".
     pub last_history_msg: Option<String>,
+    /// Fuzzy-search command palette state. Cmd/Ctrl+K toggles `.open`.
+    pub palette: CommandPalette,
+    /// Palette action picked this frame that the main loop must handle
+    /// because viewport_3d doesn't own the affected state (e.g.
+    /// `show_settings`, sim run). Set by viewport, drained by main update().
+    pub pending_palette_action: Option<PaletteAction>,
 }
 
 impl Default for ViewportState {
@@ -205,6 +214,8 @@ impl Default for ViewportState {
             teleop_pending: None,
             history: History::default(),
             last_history_msg: None,
+            palette: CommandPalette::default(),
+            pending_palette_action: None,
         }
     }
 }
@@ -2262,6 +2273,19 @@ pub fn viewport_3d(
     activity_log: &AgentActivityLog,
     bridge: &SimBridgeClient,
 ) {
+    // --- Command palette (Cmd/Ctrl+K) ---
+    // Handled before CentralPanel so the modal floats above everything and
+    // the palette's text input gets keyboard focus without competing with
+    // viewport shortcuts. modifiers.command resolves to Cmd on macOS and
+    // Ctrl elsewhere.
+    let (cmd_k, modifiers_palette) = ctx.input(|i| (i.key_pressed(egui::Key::K), i.modifiers));
+    if cmd_k && modifiers_palette.command {
+        vp.palette.toggle();
+    }
+    if let Some(action) = command_palette::show(ctx, &mut vp.palette) {
+        dispatch_palette_action(action, scene, vp);
+    }
+
     egui::CentralPanel::default().show(ctx, |ui| {
         let (response, painter) =
             ui.allocate_painter(ui.available_size(), egui::Sense::click_and_drag());
@@ -3596,6 +3620,152 @@ fn focus_on_scene(cam: &mut Camera, scene: &Scene) {
     let center = (min + max) * 0.5;
     let radius = (max - min).length() * 0.5;
     cam.focus_on(center, radius);
+}
+
+/// Apply a [`PaletteAction`] picked by the user via the command palette.
+///
+/// Actions whose effects are local to viewport state (toggles, view changes,
+/// scene mutations routed through `vp.history`) are handled here directly.
+/// Actions that touch app-level state we don't have access to in viewport
+/// (settings/about windows, sim run, scene reset) are recorded as
+/// `vp.pending_palette_action` for the main update loop to drain.
+fn dispatch_palette_action(action: PaletteAction, scene: &mut Scene, vp: &mut ViewportState) {
+    use PaletteAction::*;
+    match action {
+        Undo => {
+            if let Some(name) = vp.history.undo(scene) {
+                vp.last_history_msg = Some(format!("Undid: {name}"));
+                vp.selection = Selection::None;
+            }
+        }
+        Redo => {
+            if let Some(name) = vp.history.redo(scene) {
+                vp.last_history_msg = Some(format!("Redid: {name}"));
+            }
+        }
+        ResetCamera => {
+            vp.camera = Camera::default();
+            if !scene.meshes.is_empty() {
+                focus_on_scene(&mut vp.camera, scene);
+            }
+        }
+        FocusSelection => match vp.selection {
+            Selection::Source(idx) if idx < scene.sound_sources.len() => {
+                vp.camera
+                    .smooth_focus(scene.sound_sources[idx].position, 1.5);
+            }
+            Selection::Listener(idx) if idx < scene.listeners.len() => {
+                vp.camera.smooth_focus(scene.listeners[idx].position, 1.5);
+            }
+            _ => focus_on_scene(&mut vp.camera, scene),
+        },
+        SetView(view) => {
+            vp.camera.set_view(view);
+            vp.current_view = view;
+        }
+        ToggleFlyMode => vp.fly_mode = !vp.fly_mode,
+        ToggleGrid => vp.show_grid = !vp.show_grid,
+        ToggleShaded => vp.shaded = !vp.shaded,
+        ToggleRays => vp.show_rays = !vp.show_rays,
+        ToggleRobots => vp.show_robots = !vp.show_robots,
+        ToggleSourcesVisibility => vp.show_sources = !vp.show_sources,
+        ToggleListenersVisibility => vp.show_listeners = !vp.show_listeners,
+        ToggleMeshesVisibility => vp.show_meshes = !vp.show_meshes,
+        SetMode(m) => vp.mode = m,
+
+        AddSource => {
+            let _ = vp.history.push(
+                SceneCommand::InsertSource {
+                    idx: scene.sound_sources.len(),
+                    src: SoundSource::default(),
+                },
+                scene,
+            );
+            vp.selection = Selection::Source(scene.sound_sources.len() - 1);
+        }
+        AddListener => {
+            let n = scene.listeners.len() + 1;
+            let listener = Listener {
+                name: format!("Listener {n}"),
+                ..Default::default()
+            };
+            let _ = vp.history.push(
+                SceneCommand::InsertListener {
+                    idx: scene.listeners.len(),
+                    listener,
+                },
+                scene,
+            );
+            vp.selection = Selection::Listener(scene.listeners.len() - 1);
+        }
+        AddPartitionWall => {
+            let obj =
+                crate::scene::primitives::partition_wall(Vec3::new(2.0, 0.0, 1.0), 2.0, 2.5, 0.15);
+            let _ = vp.history.push(
+                SceneCommand::InsertObject {
+                    idx: scene.meshes.len(),
+                    obj,
+                },
+                scene,
+            );
+        }
+        AddPlatform => {
+            let obj = crate::scene::primitives::platform(Vec3::new(1.0, 0.0, 1.0), 2.0, 2.0, 0.5);
+            let _ = vp.history.push(
+                SceneCommand::InsertObject {
+                    idx: scene.meshes.len(),
+                    obj,
+                },
+                scene,
+            );
+        }
+        DeleteSelected => match vp.selection {
+            Selection::Source(idx) if idx < scene.sound_sources.len() => {
+                let snap = scene.sound_sources[idx].clone();
+                let _ = vp.history.push(
+                    SceneCommand::RemoveSource {
+                        idx,
+                        snapshot: snap,
+                    },
+                    scene,
+                );
+                vp.selection = Selection::None;
+            }
+            Selection::Listener(idx) if idx < scene.listeners.len() => {
+                let snap = scene.listeners[idx].clone();
+                let _ = vp.history.push(
+                    SceneCommand::RemoveListener {
+                        idx,
+                        snapshot: snap,
+                    },
+                    scene,
+                );
+                vp.selection = Selection::None;
+            }
+            Selection::Object(idx) if idx < scene.meshes.len() => {
+                let snap = scene.meshes[idx].clone();
+                let _ = vp.history.push(
+                    SceneCommand::RemoveObject {
+                        idx,
+                        snapshot: snap,
+                    },
+                    scene,
+                );
+                vp.selection = Selection::None;
+            }
+            _ => {}
+        },
+        ToggleTeleop => {
+            vp.teleop_mode = !vp.teleop_mode;
+            if vp.teleop_mode {
+                vp.fly_mode = false;
+            }
+        }
+        // App-level actions — main update() drains pending_palette_action.
+        NewScene | RunSimulation | ToggleSettings | ToggleAbout => {
+            vp.pending_palette_action = Some(action);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

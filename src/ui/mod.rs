@@ -1,6 +1,7 @@
 pub mod command_palette;
 pub mod config_validation;
 pub mod expr;
+pub mod gestures;
 pub mod gizmo;
 pub mod keymap;
 pub mod outliner;
@@ -3002,6 +3003,15 @@ pub fn viewport_3d(
                     Some(p) => cam.zoom_toward(p, scroll * 0.1),
                     None => cam.zoom(scroll * 0.1),
                 }
+            }
+            // Trackpad pinch — egui exposes zoom_delta() centred on 1.0.
+            // We dampen via shape_zoom_delta so single-finger drift doesn't
+            // micro-zoom, then apply through gestures::apply_pinch_zoom to
+            // the camera distance directly (independent of scroll-wheel).
+            let zoom_delta = ui.input(|i| i.zoom_delta());
+            if (zoom_delta - 1.0).abs() > 1e-3 {
+                let shaped = gestures::shape_zoom_delta(zoom_delta, 0.8);
+                cam.distance = gestures::apply_pinch_zoom(cam.distance, shaped);
             }
         }
 

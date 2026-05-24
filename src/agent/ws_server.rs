@@ -77,10 +77,17 @@ impl WsAgentServer {
     /// Particularly useful when `bind(0, ...)` was used to get an OS-assigned
     /// port.
     pub fn local_port(&self) -> u16 {
-        self.listener
-            .local_addr()
-            .expect("listener should have a local address")
-            .port()
+        // Fail-soft: if the kernel suddenly refuses to surface our local
+        // address (extremely rare; usually means the socket was closed
+        // out from under us) we return 0 rather than panic and kill the
+        // whole agent server. Callers display "?" instead of the port.
+        match self.listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(e) => {
+                log::warn!("ws_server local_port: listener.local_addr failed: {e}");
+                0
+            }
+        }
     }
 
     /// Return the current number of active connections.

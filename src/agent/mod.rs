@@ -1,4 +1,6 @@
 #[allow(dead_code)]
+pub mod backpressure;
+#[allow(dead_code)]
 pub mod bridge;
 #[allow(dead_code)]
 pub mod demo;
@@ -10,6 +12,8 @@ pub mod session;
 pub mod tcp_server;
 #[allow(dead_code)]
 pub mod ws_server;
+
+pub use backpressure::Backpressure;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

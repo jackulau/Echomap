@@ -1452,7 +1452,7 @@ pub fn side_panel(
     egui::SidePanel::left("side_panel")
         .default_width(280.0)
         .show(ctx, |ui| {
-            ui.heading("EchoMap");
+            ui.heading("Properties");
             ui.separator();
 
             // --- Background Medium ---
@@ -1768,44 +1768,15 @@ pub fn side_panel(
                     }
                 });
 
-            ui.separator();
-
-            ui.heading("Simulation");
-            ui.add(
-                egui::Slider::new(&mut sim.config.ray_count, 100..=100_000)
-                    .text("Rays")
-                    .logarithmic(true),
-            );
-            ui.add(egui::Slider::new(&mut sim.config.max_bounces, 1..=200).text("Max Bounces"));
-
-            ui.add_space(8.0);
-
-            let can_run = !sim.is_running()
-                && !scene.meshes.is_empty()
-                && !scene.sound_sources.is_empty();
-            if ui
-                .add_enabled(can_run, egui::Button::new("Run Simulation"))
-                .clicked()
-            {
-                sim.start(scene);
-            }
-
             if sim.is_running() {
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(format!("{:.0}%", sim.progress() * 100.0));
+                    ui.label(format!("Simulating… {:.0}%", sim.progress() * 100.0));
                     if ui.button("Cancel").clicked() {
                         sim.cancel();
                     }
                 });
-            }
-
-            if let Some(result) = sim.result() {
-                ui.label(format!(
-                    "Rays: {} | Grid: {}",
-                    result.ray_paths.len(),
-                    result.energy_grid.len()
-                ));
             }
 
             ui.separator();
@@ -3636,7 +3607,8 @@ pub fn status_bar(
 ) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         // Three-column layout: left=status/breadcrumb, centre=progress, right=Cancel.
-        ui.horizontal(|ui| {
+        // Wrap so narrow windows don't overlap the right-aligned counts onto the left breadcrumb.
+        ui.horizontal_wrapped(|ui| {
             // Left: severity message OR breadcrumb fallback.
             if !status.message.is_empty() {
                 ui.colored_label(status.color(), &status.message)
@@ -3728,10 +3700,7 @@ pub fn about_window(ctx: &egui::Context, open: &mut bool) {
                 ui.label("Desktop acoustic visualization tool");
                 ui.label("STEP-driven sound propagation simulator");
                 ui.separator();
-                ui.hyperlink_to(
-                    "Walkthrough docs",
-                    "https://github.com/jaclau/echomap/blob/main/tasks/007-echomap-ui-polish/walkthrough.md",
-                );
+                ui.label("Press F1 for the keyboard cheat sheet.");
             });
         });
 }
@@ -5988,9 +5957,11 @@ pub fn agent_inspector_window(
     let mut window_open = true;
     egui::Window::new("Agent Inspector")
         .open(&mut window_open)
-        .default_width(640.0)
-        .default_height(480.0)
+        .default_pos(egui::pos2(80.0, 90.0))
+        .default_width(520.0)
+        .default_height(360.0)
         .resizable(true)
+        .collapsible(true)
         .show(ctx, |ui| {
             // --- header row: capability badges + connected robot count ---
             ui.horizontal_wrapped(|ui| {

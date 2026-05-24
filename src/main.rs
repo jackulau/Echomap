@@ -141,7 +141,7 @@ mod app {
                     show_settings: false,
                     show_about: false,
                     show_performance: false,
-                    show_agent_inspector: true, // open by default in boxing mode
+                    show_agent_inspector: false, // user toggles via View > Agent Inspector
                     agent_inspector_state: echomap::ui::AgentInspectorState::default(),
                     status: AppStatus::default(),
                     bridge_client,

@@ -45,10 +45,16 @@ impl TcpAgentServer {
     /// Particularly useful when `bind(0, ...)` was used to get an OS-assigned
     /// port.
     pub fn local_port(&self) -> u16 {
-        self.listener
-            .local_addr()
-            .expect("listener should have a local address")
-            .port()
+        // Fail-soft: see ws_server.rs::local_port — return 0 if the
+        // kernel can't surface our address rather than panic and kill
+        // the agent server.
+        match self.listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(e) => {
+                log::warn!("tcp_server local_port: listener.local_addr failed: {e}");
+                0
+            }
+        }
     }
 
     /// Return the current number of active connections.

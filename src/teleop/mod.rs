@@ -54,6 +54,12 @@ impl From<std::io::Error> for TeleopError {
     }
 }
 
+impl From<recorder::RecorderError> for TeleopError {
+    fn from(e: recorder::RecorderError) -> Self {
+        TeleopError::Io(e.into())
+    }
+}
+
 /// Drive a tele-op session against a running agent server.
 ///
 /// Opens a WS to `addr` (e.g. `"ws://127.0.0.1:9002"`), binds to `robot_id`,

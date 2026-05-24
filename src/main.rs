@@ -60,6 +60,7 @@ mod app {
         viewport: ViewportState,
         show_settings: bool,
         show_about: bool,
+        show_performance: bool,
         show_agent_inspector: bool,
         agent_inspector_state: echomap::ui::AgentInspectorState,
         status: AppStatus,
@@ -139,6 +140,7 @@ mod app {
                     viewport,
                     show_settings: false,
                     show_about: false,
+                    show_performance: false,
                     show_agent_inspector: true, // open by default in boxing mode
                     agent_inspector_state: echomap::ui::AgentInspectorState::default(),
                     status: AppStatus::default(),
@@ -201,6 +203,7 @@ mod app {
                 viewport: ViewportState::default(),
                 show_settings: false,
                 show_about: false,
+                show_performance: false,
                 show_agent_inspector: false,
                 agent_inspector_state: echomap::ui::AgentInspectorState::default(),
                 status: AppStatus::default(),
@@ -355,6 +358,15 @@ mod app {
 
             if self.show_about {
                 echomap::ui::about_window(ctx, &mut self.show_about);
+            }
+
+            if self.show_performance {
+                echomap::ui::performance_window(
+                    ctx,
+                    &mut self.show_performance,
+                    &self.device_caps,
+                    &self.perf_governor,
+                );
             }
 
             // Agent Inspector — live observation/action message lane.

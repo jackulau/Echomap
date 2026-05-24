@@ -96,10 +96,11 @@ use crate::agent::demo::{DemoAgentHandle, DemoBehavior};
 use crate::agent::{AgentServerConfig, AgentServerHandle};
 use crate::fluids::FluidSimulation;
 use crate::gas::GasSimulation;
+use crate::io::DeviceCaps;
 use crate::renderer::{
     energy_to_color, ground_shadow_polygon, project_3d, ray_ground_intersect, render_fluid_slice,
     render_gas_slice, scene_light_dir, screen_to_ray, shade_color, Camera, CameraView,
-    FluidVisualizationMode, GasVisualizationMode,
+    FluidVisualizationMode, GasVisualizationMode, PerfGovernor,
 };
 use crate::robot::definition::{CollisionShape, RobotDefinition, SensorDefinition};
 use crate::robot::sensors::sensor_world_pose;
@@ -3584,6 +3585,45 @@ pub fn viewport_3d(
             );
         }
     });
+}
+
+/// Adapter exposing the current PerfGovernor class label to the status
+/// bar. Kept as a free fn so unit tests don't need an egui context.
+pub fn perf_label_for(gov: &PerfGovernor) -> &'static str {
+    gov.class().label()
+}
+
+/// Standalone Performance window — Settings → Performance equivalent
+/// that doesn't require threading caps + governor through every
+/// existing settings call site.
+pub fn performance_window(
+    ctx: &egui::Context,
+    open: &mut bool,
+    caps: &DeviceCaps,
+    gov: &PerfGovernor,
+) {
+    egui::Window::new("Performance")
+        .open(open)
+        .resizable(false)
+        .show(ctx, |ui| perf_settings_section(ui, caps, gov));
+}
+
+/// Render a Performance section into an existing settings window. Pure
+/// read of [`DeviceCaps`] and [`PerfGovernor`]; never mutates anything
+/// (overrides happen via env vars at startup).
+pub fn perf_settings_section(ui: &mut egui::Ui, caps: &DeviceCaps, gov: &PerfGovernor) {
+    ui.heading("Performance");
+    ui.label(format!("Device: {}", caps.summary()));
+    ui.label(format!(
+        "Governor: {}  ·  avg frame {:.1} ms over {} samples",
+        gov.class().label(),
+        gov.avg_frame_time().as_secs_f32() * 1000.0,
+        gov.sample_count(),
+    ));
+    ui.small(
+        "Override defaults with ECHOMAP_SIM_THREADS, ECHOMAP_RAY_PATHS, \
+         ECHOMAP_HEATMAP_RES env vars; ECHOMAP_STRESS=1 enables crash-injection smoke.",
+    );
 }
 
 pub fn status_bar(

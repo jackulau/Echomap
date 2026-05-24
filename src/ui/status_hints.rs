@@ -29,6 +29,9 @@ pub struct StatusHints {
     pub action_hint: Option<String>,
     /// Live modifier badges — populated each frame from the input state.
     pub modifiers: ActiveModifiers,
+    /// Current perf governor label ("perf: healthy" etc.). Empty string
+    /// if the host hasn't wired the governor in.
+    pub perf_label: &'static str,
 }
 
 impl StatusHints {
@@ -39,6 +42,17 @@ impl StatusHints {
         last_action: Option<&str>,
         selection_count: usize,
     ) -> Self {
+        Self::compute_with_perf(mode, modifiers, last_action, selection_count, "")
+    }
+
+    /// Compute hints including a `perf_label` from `PerfGovernor::class().label()`.
+    pub fn compute_with_perf(
+        mode: InteractionMode,
+        modifiers: ActiveModifiers,
+        last_action: Option<&str>,
+        selection_count: usize,
+        perf_label: &'static str,
+    ) -> Self {
         let mode_label = mode_label(mode);
         let next_step_hint = next_step_for(mode, selection_count);
         let action_hint = last_action.map(|name| format!("{name} (Cmd/Ctrl+Z to undo)"));
@@ -47,6 +61,7 @@ impl StatusHints {
             next_step_hint,
             action_hint,
             modifiers,
+            perf_label,
         }
     }
 
@@ -175,5 +190,43 @@ mod tests {
         assert!(summary.contains("Shift=snap"));
         assert!(summary.contains("Ctrl=multi"));
         assert!(summary.contains("Alt=alt"));
+    }
+
+    #[test]
+    fn status_compute_perf_label_propagates() {
+        let h = StatusHints::compute_with_perf(
+            InteractionMode::Select,
+            ActiveModifiers::default(),
+            None,
+            0,
+            "perf: throttled",
+        );
+        assert_eq!(h.perf_label, "perf: throttled");
+    }
+
+    #[test]
+    fn status_default_compute_has_empty_perf_label() {
+        let h = StatusHints::compute(InteractionMode::Select, ActiveModifiers::default(), None, 0);
+        assert!(h.perf_label.is_empty());
+    }
+
+    #[test]
+    fn status_perf_label_for_each_class_distinct() {
+        use crate::renderer::PerfClass;
+        let labels = [
+            PerfClass::Healthy.label(),
+            PerfClass::Degraded.label(),
+            PerfClass::Critical.label(),
+        ];
+        for l in labels {
+            let h = StatusHints::compute_with_perf(
+                InteractionMode::Select,
+                ActiveModifiers::default(),
+                None,
+                0,
+                l,
+            );
+            assert_eq!(h.perf_label, l);
+        }
     }
 }

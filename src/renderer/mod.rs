@@ -7,6 +7,7 @@ use crate::scene::Scene;
 
 pub mod legend;
 pub mod listener_viz;
+pub mod perf_governor;
 pub mod ray_debug;
 pub mod surface_heatmap;
 pub use legend::{
@@ -17,6 +18,7 @@ pub use listener_viz::{
     capture_listener_energy, normalized_spl, pulse_radius, render_listener_pulse, spl_color,
     DEFAULT_LISTENER_CAPTURE_RADIUS,
 };
+pub use perf_governor::{PerfClass, PerfGovernor};
 pub use ray_debug::{
     remaining_energy_at, render_ray_paths_debug, sample_path_indices, DEFAULT_DEBUG_RAY_COUNT,
 };

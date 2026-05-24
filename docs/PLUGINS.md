@@ -1,5 +1,21 @@
 # Plugins — Extend EchoMap Without Forking
 
+## Setup
+
+The `echomap_client` package isn't published — install it from the
+repo before any of the commands below work:
+
+```
+pip install -e python/
+# optional: also install the reference example plugin
+pip install -e python/examples/echomap_plugin_example
+```
+
+The bundled smoke scripts set `PYTHONPATH=python` instead of installing,
+so they work in a fresh clone without a `pip install` step.
+
+## Plugin groups
+
 EchoMap discovers extensions via Python entry points. Five plugin groups
 are supported today:
 

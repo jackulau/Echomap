@@ -3,6 +3,8 @@ name = "echomap"
 version = "0.1.0"
 edition = "2021"
 description = "Desktop acoustic visualization tool — load STEP models, simulate sound propagation, visualize results"
+license = "MIT"
+authors = ["Jack"]
 
 [dependencies]
 # GUI + windowing — egui + eframe drive the entire desktop app.

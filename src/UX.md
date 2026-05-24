@@ -25,8 +25,10 @@ shipped for Cinema 4D, Blender, and SolidWorks idioms.
 | `Enter` | Run the highlighted action |
 | `Esc` | Close palette |
 
-The palette registers 30+ actions across categories: `view:`, `display:`,
-`mode:`, `add:`, `edit:`, `sim:`, `robot:`, `misc:`.
+The palette registers 30 actions (see `Action::ALL` in
+`src/ui/command_palette.rs`) across nine categories: `history:`,
+`view:`, `display:`, `mode:`, `add:`, `edit:`, `sim:`, `robot:`,
+`misc:`.
 
 ## Transform Gizmos (Blender-style modal)
 

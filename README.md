@@ -83,14 +83,15 @@ See the *Performance & Crash-Safety* section of [src/UX.md](src/UX.md).
 
 ## Demos
 
-`demos/` ships runnable scripts:
+`demos/` ships runnable scripts; `examples/` ships cargo example targets.
 
-- `run_boxing_demo.py` — heuristic vs heuristic boxing round
-- `connect_boxing_agents.py` — Ollama / LLM agent boxing match
-- `connect_real_arm.py` — drives `MockArm` (or `SerialArm` stub) via the
-  hardware bridge
-- `teleop_e2e_demo.rs` — record-then-replay a Rust-side trace
-- `boxing_demo.mp4` — captured run of the boxing match
+- `demos/run_boxing_demo.py` — heuristic vs heuristic boxing round
+- `demos/connect_boxing_agents.py` — Ollama / LLM agent boxing match
+- `demos/connect_real_arm.py` — drives `MockArm` (or `SerialArm` stub) via
+  the hardware bridge
+- `examples/teleop_e2e_demo.rs` — record-then-replay a Rust-side trace
+  (`cargo run --release --example teleop_e2e_demo`)
+- `demos/boxing_demo.mp4` — captured run of the boxing match
 
 ## Tests + preflight gate
 
@@ -109,28 +110,34 @@ walkthrough lives in [docs/MANUAL_SMOKE.md](docs/MANUAL_SMOKE.md).
 ## Repository layout
 
 ```
-src/                Rust crate (lib + bins: echomap, echomap_server)
+src/                Rust crate (lib + bins)
   acoustics/        ray-trace sim, frequency bands, RT60
   agent/            WebSocket protocol, bridge, session, backpressure
+  benchmarks/       internal benchmark helpers (analytical, suite)
+  bin/              echomap_server binary source
   fluids/ gas/      auxiliary fluid + gas sims (viz only)
   io/               STEP load, CSV export, device-cap detection
   renderer/         egui painter, perf governor, paint-budget caps
   robot/            kinematics, boxing scenario, sensors
+  scenarios/        scenario builder types (integration testing)
   scene/            mesh + material container, JSON serializer
   surface/          material absorption + wetting
   teleop/           record + replay
   ui/               egui panels, gizmos, command palette, onboarding
-python/             echomap_client package + pytest suite
-demos/              runnable demo scripts + boxing_demo.mp4
+python/             echomap_client package + pytest suite + plugin example
+demos/              runnable Python demo scripts + boxing_demo.mp4
+examples/           cargo example targets (teleop_e2e_demo)
 docs/               AGENTS, PLUGINS, SMOKE, MANUAL_SMOKE, TELEOP_README
 benches/            Criterion benchmarks (physics, acoustics)
+tests/              Cargo integration tests (integration, renderer_*, teleop_e2e, …)
 test_files/         STEP fixtures for tests + smoke
 scripts/            smoke_all.sh, demo_teleop_e2e.sh, perf gates
 ```
 
 ## Status
 
-EchoMap is research / hobby software. There is no plugin marketplace,
-no per-plugin sandboxing, and no signed releases — install plugins only
-from sources you trust. The `SerialArm` backend frames packets but does
-not open the port; real hardware support arrives through vendor plugins.
+EchoMap is research / hobby software, MIT-licensed (see `LICENSE`).
+There is no plugin marketplace, no per-plugin sandboxing, and no signed
+releases — install plugins only from sources you trust. The `SerialArm`
+backend frames packets but does not open the port; real hardware support
+arrives through vendor plugins.

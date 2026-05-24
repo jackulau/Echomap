@@ -59,7 +59,8 @@ desktop. If it does not, capture the terminal log and abort the smoke.
 - [ ] **8. Save scene.**
   Click **File → Save Scene…**, write to a temp path. Expected: status
   bar reads `Scene saved (Npath)`; the file on disk is non-empty valid
-  JSON that mentions `schema_version`.
+  JSON whose top level includes a `"version"` field (see
+  `SNAPSHOT_VERSION` in `src/ui/scene_io.rs`).
 
 - [ ] **9. Reload scene.**
   Restart the app (`Ctrl/Cmd+Q` then re-launch). Click **File → Open
@@ -69,9 +70,11 @@ desktop. If it does not, capture the terminal log and abort the smoke.
 - [ ] **10. Export results CSV + screenshot capture.**
   After running the sim again, click **File → Export Results CSV…**
   and write to a temp path. Expected: CSV opens in a spreadsheet,
-  header matches `x,y,z,frequency_hz,energy_db,...`, row count equals
-  the grid cell count. Then take a screenshot of the viewport
-  (system-native shortcut) and attach it to the release thread.
+  header matches
+  `x,y,z,energy_125hz,energy_250hz,energy_500hz,energy_1khz,energy_2khz,energy_4khz,broadband`
+  (see `CSV_HEADER` in `src/io/export.rs`), row count equals the grid
+  cell count. Then take a screenshot of the viewport (system-native
+  shortcut) and attach it to the release thread.
 
 ## Agent Inspector spot-check (post-goal/008)
 

@@ -147,6 +147,89 @@ The viewport status bar always shows:
 - Numeric inspector fields show units (m, °, kg) next to values
 - "Welcome" empty-state hint in the viewport when no scene is loaded
 
+## Performance & Crash-Safety (goal/013)
+
+EchoMap auto-detects device capability at startup and degrades render +
+sim work gracefully under load instead of crashing.
+
+### Throttle behaviour
+
+| Class | Trigger (rolling 30-frame avg) | Effect |
+|---|---|---|
+| `perf: healthy` | ≤ 25 ms / frame (≥ 40 fps) | Full quality |
+| `perf: degraded` | 25–50 ms / frame (20–40 fps) | ~0.75× sim substeps, ray paths, heatmap resolution |
+| `perf: throttled` | > 50 ms / frame (< 20 fps) | ~0.5× everything; nice-to-have effects skipped |
+
+Downshifts are immediate; upshifts wait for `STICKY_FRAMES` (≈60 frames)
+of recovery to avoid oscillation. The active class is shown in the
+Settings → Performance window and is queryable via
+`echomap::renderer::PerfGovernor::class()`.
+
+### Environment overrides
+
+| Var | Default | Purpose |
+|---|---|---|
+| `ECHOMAP_SIM_THREADS` | auto from cores | Cap physics worker count |
+| `ECHOMAP_RAY_PATHS` | auto from cores | Default debug ray-path budget |
+| `ECHOMAP_HEATMAP_RES` | auto from cores | Surface heatmap resolution |
+| `ECHOMAP_STRESS` | unset | `=1` pre-loads 50 listeners + drives crash-injection smoke |
+| `ECHOMAP_TEST_FRAMES` | unset | `=N` exits 0 after N frames (CI gate) |
+
+### Crash-injection smoke
+
+`ECHOMAP_TEST_FRAMES=120 ECHOMAP_STRESS=1 cargo run --release --bin echomap`
+runs 120 frames with the stress scene. Over-budget frames log + downshift
+the governor; the harness only exits 2 if 30 consecutive frames exceed
+`TEST_FRAME_BUDGET` (500 ms) without governor recovery.
+
+### Renderer paint budget
+
+`src/renderer/bounds.rs` defines hard caps the painter never crosses:
+
+- `MAX_PAINT_TRIS` = 200 000 — `render_surface_overlay` `take(cap)`s
+- `MAX_RAY_LINES` = 100 000 — `render_ray_paths_debug` tracks `lines_emitted`
+- `MAX_LISTENER_PULSES` = 4 096
+
+These are absolute ceilings independent of the PerfGovernor — they kick
+in when a pathologically large scene would otherwise hang the UI thread
+on tessellation.
+
+### Recorder failure modes
+
+`src/teleop/recorder.rs` is fail-soft:
+
+- `Recorder::create` auto-creates the parent directory
+- Disk-full / `EACCES` / serialize errors log **once** and set the
+  recorder to `RecorderState::Disabled`
+- Further `try_record` calls return `Disabled` without touching the
+  filesystem; `frames_dropped` counter is visible via `frames_dropped()`
+- Drop never panics, even if the file vanished
+
+### Agent harness backpressure
+
+`src/agent/backpressure.rs` provides a soft cap + drop-oldest counter
+(`Backpressure::DEFAULT_CAPACITY` = 4096). Lock-free atomic
+`dropped_messages` counter is surfaceable in the agent inspector window
+so misbehaving clients are visible.
+
+`ws_server::local_port` and `tcp_server::local_port` no longer panic if
+the kernel can't report the listener's address — they log and return 0
+so the rest of the agent harness keeps running.
+
+### Hot-path unwrap budget
+
+`scripts/check-hot-path-unwraps.sh` enforces a budget of 5 production
+`.unwrap()` / `panic!` / `.expect(` occurrences across:
+
+- `src/main.rs`
+- `src/teleop/recorder.rs`
+- `src/agent/{bridge,ws_server,tcp_server,session}.rs`
+- `src/renderer/*.rs`
+
+Test-mode unwraps inside `#[cfg(test)]` blocks are excluded — they're
+how `assert!` works. Sites that must panic carry a `// SAFETY:` comment
+to opt out of the count.
+
 ## Industry Audit Cross-Reference
 
 | Pattern | Cinema 4D | Blender | SolidWorks | EchoMap (today) |

@@ -52,7 +52,12 @@ pub fn render_ray_paths_debug(
         return;
     }
     let indices = sample_path_indices(paths.len(), sample_count);
+    let line_budget = crate::renderer::bounds::MAX_RAY_LINES;
+    let mut lines_emitted: usize = 0;
     for idx in indices {
+        if lines_emitted >= line_budget {
+            break;
+        }
         let path = &paths[idx];
         if path.len() < 2 {
             continue;
@@ -65,6 +70,9 @@ pub fn render_ray_paths_debug(
             .collect();
 
         for (i, win) in projected.windows(2).enumerate() {
+            if lines_emitted >= line_budget {
+                break;
+            }
             // Color the segment by the energy at its midpoint (avg of endpoints).
             let e_start = remaining_energy_at(i, n);
             let e_end = remaining_energy_at(i + 1, n);
@@ -78,6 +86,7 @@ pub fn render_ray_paths_debug(
                 continue;
             }
             painter.line_segment([win[0], win[1]], Stroke::new(1.2, color));
+            lines_emitted += 1;
         }
     }
 }

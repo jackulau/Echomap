@@ -5,11 +5,16 @@ use crate::gas::grid::GasGrid;
 use crate::robot::RobotManager;
 use crate::scene::Scene;
 
+pub mod bounds;
 pub mod legend;
 pub mod listener_viz;
 pub mod perf_governor;
 pub mod ray_debug;
 pub mod surface_heatmap;
+pub use bounds::{
+    cap_listener_pulses, cap_paint_tris, cap_ray_lines, was_capped, MAX_LISTENER_PULSES,
+    MAX_PAINT_TRIS, MAX_RAY_LINES,
+};
 pub use legend::{
     render_color_legend, render_material_legend, ColorLegend, MaterialLegendRow,
     DEFAULT_LEGEND_DB_RANGE,

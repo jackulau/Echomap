@@ -96,7 +96,8 @@ pub fn render_surface_overlay(
         .fold(0.0_f32, f32::max)
         .max(1e-12);
 
-    for (tri, energy) in triangles.iter().zip(energies.iter()) {
+    let cap = crate::renderer::bounds::cap_paint_tris(triangles.len());
+    for (tri, energy) in triangles.iter().zip(energies.iter()).take(cap) {
         if *energy <= 1e-9 {
             continue;
         }

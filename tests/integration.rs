@@ -414,9 +414,11 @@ fn boxing_round_30s_smoke() {
     );
 
     // ---- persist transcript ----------------------------------------
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tasks");
-    path.push("008-echomap-agent-feedback");
+    // Write under CARGO_TARGET_TMPDIR (target/tmp/<bin>/) so the artifact
+    // is regenerable + ignored by git. Older revisions wrote into
+    // `tasks/008-echomap-agent-feedback/`, which dirtied the working tree
+    // on every `cargo test` run.
+    let mut path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     fs::create_dir_all(&path).expect("create transcript dir");
     path.push("round_transcript.jsonl");
     let mut f = fs::File::create(&path).expect("create transcript file");

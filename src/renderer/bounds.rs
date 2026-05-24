@@ -50,12 +50,11 @@ pub fn was_capped(requested: usize, max: usize) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn caps_have_sane_defaults() {
-        assert!(MAX_PAINT_TRIS >= 10_000);
-        assert!(MAX_RAY_LINES >= 1_000);
-        assert!(MAX_LISTENER_PULSES >= 256);
-    }
+    // Compile-time sanity bounds — fail the build if a cap drops below the
+    // floors the renderer assumes elsewhere.
+    const _: () = assert!(MAX_PAINT_TRIS >= 10_000);
+    const _: () = assert!(MAX_RAY_LINES >= 1_000);
+    const _: () = assert!(MAX_LISTENER_PULSES >= 256);
 
     #[test]
     fn cap_paint_tris_clamps_above() {

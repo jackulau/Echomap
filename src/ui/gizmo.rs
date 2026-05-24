@@ -290,6 +290,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 6.28 is the deliberate parse output we're asserting on
     fn gizmo_numeric_accepts_arithmetic_expressions() {
         // `2 * 3.14` should evaluate to 6.28 — the gizmo no longer filters
         // operators, since the expr evaluator handles them.

@@ -219,10 +219,8 @@ mod tests {
         assert_eq!(UnitLabel::Hertz.suffix(), " Hz");
     }
 
-    #[test]
-    fn default_ambient_in_visible_range() {
-        // Should be > 0 so the viewport isn't pitch-black on first launch.
-        assert!(DEFAULT_AMBIENT > 0.0);
-        assert!(DEFAULT_AMBIENT <= 1.0);
-    }
+    // Compile-time check: ambient must be visible (> 0) and not over-saturated
+    // (<= 1.0). Static so a regression fails the build, not just `cargo test`.
+    const _: () = assert!(DEFAULT_AMBIENT > 0.0);
+    const _: () = assert!(DEFAULT_AMBIENT <= 1.0);
 }

@@ -54,7 +54,7 @@ pub const STEPS: &[OnboardingStep] = &[
 /// State machine for the tour. `step` indexes [`STEPS`] when `visible`. When
 /// `dismissed` is set, [`Self::should_show_on_launch`] returns false so the
 /// modal doesn't reappear next session.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct OnboardingState {
     pub visible: bool,
     pub step: usize,
@@ -63,17 +63,6 @@ pub struct OnboardingState {
     /// the guided tour — the cheat sheet is a flat reference grid, no
     /// next/prev buttons.
     pub cheat_sheet_open: bool,
-}
-
-impl Default for OnboardingState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            step: 0,
-            dismissed: false,
-            cheat_sheet_open: false,
-        }
-    }
 }
 
 impl OnboardingState {
@@ -228,8 +217,10 @@ mod tests {
 
     #[test]
     fn onboarding_cheat_sheet_toggle_independent_of_dismiss() {
-        let mut s = OnboardingState::default();
-        s.dismissed = true;
+        let mut s = OnboardingState {
+            dismissed: true,
+            ..Default::default()
+        };
         s.open_cheat_sheet();
         assert!(s.cheat_sheet_open);
         s.close_cheat_sheet();

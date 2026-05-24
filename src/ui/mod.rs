@@ -6175,8 +6175,10 @@ mod agent_inspector_tests {
     #[test]
     fn agent_inspector_filter_errors_only_drops_observations() {
         let log = log_with_events();
-        let mut s = AgentInspectorState::default();
-        s.show_errors_only = true;
+        let s = AgentInspectorState {
+            show_errors_only: true,
+            ..Default::default()
+        };
         let kept: Vec<_> = log.iter().filter(|e| s.matches(e)).collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].kind, AgentEventKind::Error);
@@ -6185,8 +6187,10 @@ mod agent_inspector_tests {
     #[test]
     fn agent_inspector_filter_direction_excludes_outgoing() {
         let log = log_with_events();
-        let mut s = AgentInspectorState::default();
-        s.show_outgoing = false;
+        let s = AgentInspectorState {
+            show_outgoing: false,
+            ..Default::default()
+        };
         let kept: Vec<_> = log.iter().filter(|e| s.matches(e)).collect();
         // 2 incoming events (bind, step) — both observation + error were outgoing.
         assert_eq!(kept.len(), 2);
@@ -6206,8 +6210,10 @@ mod agent_inspector_tests {
             MessageDirection::Incoming,
             Some(r#"{"type":"step"}"#.to_string()),
         );
-        let mut s = AgentInspectorState::default();
-        s.robot_filter = Some(1);
+        let s = AgentInspectorState {
+            robot_filter: Some(1),
+            ..Default::default()
+        };
         let kept: Vec<_> = log.iter().filter(|e| s.matches(e)).collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].robot_id, Some(1));

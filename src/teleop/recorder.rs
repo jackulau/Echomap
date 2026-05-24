@@ -175,8 +175,7 @@ impl Recorder {
         act: &RobotAction,
     ) -> Result<u64, RecorderError> {
         if self.writer.is_none() {
-            return Err(RecorderError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(RecorderError::Io(std::io::Error::other(
                 self.disabled_reason
                     .clone()
                     .unwrap_or_else(|| "recorder disabled".into()),
@@ -454,7 +453,7 @@ mod tests {
 
     #[test]
     fn recorder_error_display_has_context() {
-        let e = RecorderError::Io(std::io::Error::new(std::io::ErrorKind::Other, "boom"));
+        let e = RecorderError::Io(std::io::Error::other("boom"));
         let s = format!("{e}");
         assert!(s.contains("trace write failed"));
     }

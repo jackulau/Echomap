@@ -67,7 +67,7 @@ impl DeviceCaps {
         let probed_heatmap_res = recommended_heatmap_res(logical_cores);
 
         let sim_threads = parse_env_usize(ENV_SIM_THREADS)
-            .map(|v| v.min(64).max(1))
+            .map(|v| v.clamp(1, 64))
             .unwrap_or(probed_sim_threads);
         let default_ray_paths = parse_env_u32(ENV_RAY_PATHS)
             .map(|v| v.clamp(8, 100_000))

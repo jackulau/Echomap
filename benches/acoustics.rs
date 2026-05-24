@@ -67,7 +67,7 @@ fn box_room_scene() -> Scene {
 /// bars.
 fn studio_scene() -> Option<Scene> {
     let path = Path::new("test_files/studio.step");
-    let mut meshes = load_step_file(path).ok()?;
+    let mut meshes = load_step_file(path).ok()?.objects;
 
     // Compute the studio's bounds so we can scatter obstacles inside.
     let mut min = Vec3::splat(f32::MAX);

@@ -423,9 +423,11 @@ mod tests {
 
     #[test]
     fn command_palette_toggle_opens_and_clears() {
-        let mut p = CommandPalette::default();
-        p.query = "stale".into();
-        p.selected = 3;
+        let mut p = CommandPalette {
+            query: "stale".into(),
+            selected: 3,
+            ..Default::default()
+        };
         p.toggle();
         assert!(p.open);
         assert!(p.query.is_empty());
@@ -493,8 +495,10 @@ mod tests {
 
     #[test]
     fn filter_returns_indices_in_score_order() {
-        let mut p = CommandPalette::default();
-        p.query = "undo".into();
+        let p = CommandPalette {
+            query: "undo".into(),
+            ..Default::default()
+        };
         let result = p.filter();
         assert!(!result.is_empty(), "should find at least 'Undo'");
         // First hit must be the literal Undo action.

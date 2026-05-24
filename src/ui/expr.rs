@@ -288,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // literal "3.14" is the parser input we're testing
     fn expr_eval_plain_number() {
         ok("42", 42.0);
         ok("3.14", 3.14);

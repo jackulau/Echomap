@@ -246,8 +246,10 @@ mod tests {
     #[test]
     fn apply_snap_routes_by_mode() {
         let p = Vec3::new(0.12, 1.7, -0.34);
-        let mut c = SnapConfig::default();
-        c.mode = SnapMode::Grid;
+        let mut c = SnapConfig {
+            mode: SnapMode::Grid,
+            ..Default::default()
+        };
         let s = apply_snap(p, &c);
         assert!((s.x - 0.0).abs() < 1e-6 || (s.x - 0.25).abs() < 1e-6);
 

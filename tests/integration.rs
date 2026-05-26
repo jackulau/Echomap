@@ -307,6 +307,13 @@ fn boxing_round_30s_smoke() {
         ..Default::default()
     };
     let (scenario, mut manager) = BoxingScenario::new(cfg);
+    // Default scenario spawns boxers 3m apart for the visual stance.
+    // Heuristic actions only animate arms (no locomotion), so close the gap
+    // to within arm reach for this hit-event smoke test.
+    manager.robots[0].base_pose =
+        glam::Mat4::from_translation(Vec3::new(-0.5, 0.0, 0.0)).to_cols_array();
+    manager.robots[1].base_pose =
+        glam::Mat4::from_translation(Vec3::new(0.5, 0.0, 0.0)).to_cols_array();
     // Make sure both robots carry CombatState (the scenario already
     // wires this for the humanoid pair, but assert it so we catch
     // regressions instead of mysteriously failing the hit-event check).

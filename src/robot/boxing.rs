@@ -338,11 +338,11 @@ impl BoxingScenario {
         let mut manager = RobotManager::new();
 
         let def_a = RobotDefinition::boxing_humanoid();
-        let pose_a = Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, 0.0));
+        let pose_a = Mat4::from_translation(glam::Vec3::new(-1.5, 0.0, 0.0));
         let robot_a_id = manager.add_robot(def_a, pose_a);
 
         let def_b = RobotDefinition::boxing_humanoid();
-        let pose_b = Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0));
+        let pose_b = Mat4::from_translation(glam::Vec3::new(1.5, 0.0, 0.0));
         let robot_b_id = manager.add_robot(def_b, pose_b);
 
         // Enable combat state on both robots
@@ -655,8 +655,8 @@ mod tests {
         let pose_b = manager.robots[1].base_pose_mat4();
         let pos_a = pose_a.col(3).truncate();
         let pos_b = pose_b.col(3).truncate();
-        assert!((pos_a.x - (-0.5)).abs() < 0.01);
-        assert!((pos_b.x - 0.5).abs() < 0.01);
+        assert!((pos_a.x - (-1.5)).abs() < 0.01);
+        assert!((pos_b.x - 1.5).abs() < 0.01);
     }
 
     #[test]
@@ -807,6 +807,13 @@ mod tests {
         use crate::robot::state::{apply_action, RobotAction};
 
         let (_scenario, mut manager) = BoxingScenario::new(make_config());
+        // Default scenario spawns boxers 3m apart for a clear visual stance.
+        // Close the gap so arm contact is mechanically possible for this
+        // capability test.
+        manager.robots[0].base_pose =
+            Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, 0.0)).to_cols_array();
+        manager.robots[1].base_pose =
+            Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.0)).to_cols_array();
 
         let action_a = RobotAction {
             motor_velocities: vec![0.0, 3.0, -3.0],

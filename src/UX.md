@@ -150,14 +150,18 @@ sim work gracefully under load instead of crashing.
 
 | Class | Trigger (rolling 30-frame avg) | Effect |
 |---|---|---|
-| `perf: healthy` | ≤ 25 ms / frame (≥ 40 fps) | Full quality |
-| `perf: degraded` | 25–50 ms / frame (20–40 fps) | ~0.75× sim substeps, ray paths, heatmap resolution |
-| `perf: throttled` | > 50 ms / frame (< 20 fps) | ~0.5× everything; nice-to-have effects skipped |
+| `perf: healthy` | ≤ 25 ms / frame (≥ 40 fps) | Full quality (1.0× work-scale) |
+| `perf: degraded` | 25–50 ms / frame (20–40 fps) | 0.75× work-scale → ~0.75× ray-overlay budget |
+| `perf: throttled` | > 50 ms / frame (< 20 fps) | 0.5× work-scale → ~0.5× ray-overlay budget |
 
-Downshifts are immediate; upshifts wait for `STICKY_FRAMES` (≈60 frames)
-of recovery to avoid oscillation. The active class is shown in the
-Settings → Performance window and is queryable via
-`echomap::renderer::PerfGovernor::class()`.
+The class is recorded every frame and drives the live ray-path overlay
+budget (`ray_overlay_budget`), so a slow device draws fewer overlay
+polylines instead of dragging the frame. The same `work_scale()` feeds the
+`sim_substeps()` / `heatmap_resolution_scale()` multipliers, which callers
+can apply where they choose. Downshifts are immediate; upshifts wait for
+`STICKY_FRAMES` (≈60 frames) of recovery to avoid oscillation. The active
+class is shown in the status bar and the Settings → Performance window, and
+is queryable via `echomap::renderer::PerfGovernor::class()`.
 
 ### Environment overrides
 

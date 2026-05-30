@@ -225,7 +225,13 @@ mod app {
 
     impl eframe::App for EchoMapApp {
         fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-            let frame_start = self.test_frame_limit.map(|_| Instant::now());
+            // Time every frame's compute so the PerfGovernor reflects real
+            // interactive load, not just ECHOMAP_TEST_FRAMES smoke runs.
+            let frame_start = Instant::now();
+
+            // Feed the previous frame's class into this frame's render budgets
+            // (the governor records at end-of-frame, so this reflects 0..N-1).
+            self.viewport.perf_work_scale = self.perf_governor.class().work_scale();
 
             // Bump activity log elapsed time.
             self.activity_log.elapsed += ctx.input(|i| i.predicted_dt);
@@ -304,6 +310,7 @@ mod app {
                 &self.robot_manager,
                 &self.simulation,
                 &self.status,
+                echomap::ui::perf_label_for(&self.perf_governor),
             );
 
             // Drain app-level palette actions (those viewport_3d can't
@@ -404,14 +411,18 @@ mod app {
                 ctx.request_repaint();
             }
 
+            // Record this frame's compute time on EVERY frame so the governor
+            // (and the Performance window / status-bar label it drives) tracks
+            // real interactive load — not only ECHOMAP_TEST_FRAMES runs.
+            let elapsed = frame_start.elapsed();
+            self.perf_governor.record_frame(elapsed);
+
             // ECHOMAP_TEST_FRAMES: governor-driven soft budget. Single
             // overruns log + downshift PerfGovernor; only
             // MAX_CONSECUTIVE_OVERAGE in a row triggers exit 2. This
             // mirrors real-user behaviour: a slow device degrades
             // gracefully instead of crashing the process.
-            if let (Some(limit), Some(start)) = (self.test_frame_limit, frame_start) {
-                let elapsed = start.elapsed();
-                self.perf_governor.record_frame(elapsed);
+            if let Some(limit) = self.test_frame_limit {
                 if elapsed > TEST_FRAME_BUDGET {
                     let prev = self
                         .test_consecutive_overage

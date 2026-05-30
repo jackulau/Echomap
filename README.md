@@ -68,8 +68,10 @@ See: [docs/AGENTS.md](docs/AGENTS.md), [docs/PLUGINS.md](docs/PLUGINS.md),
 [docs/TELEOP_README.md](docs/TELEOP_README.md).
 
 **Performance + crash-safety**
-- Auto-detected device caps drive a `PerfGovernor` that downshifts sim
-  substeps / heatmap resolution / ray-path budget under load
+- Auto-detected device caps drive a `PerfGovernor` (sampled every frame)
+  that downshifts the ray-path overlay budget under load and surfaces the
+  class in the status bar; sim-substep / heatmap multipliers are exposed for
+  callers to apply
 - Hard paint budget (`MAX_PAINT_TRIS`, `MAX_RAY_LINES`,
   `MAX_LISTENER_PULSES`) caps tessellation regardless of scene size
 - Fail-soft recorder (drops to `Disabled` on disk-full / EACCES — never

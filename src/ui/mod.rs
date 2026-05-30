@@ -17,19 +17,6 @@ pub use outliner::OutlinerRows;
 pub use selection_set::{HiddenState, SelectionSet};
 pub use status_hints::{ActiveModifiers, StatusHints};
 
-/// Convenience wrapper: build a [`StatusHints`] from a viewport snapshot.
-/// Surfaces `next_step_hint` + `action_hint` so the bottom bar always
-/// shows a mode label, a next-step prompt, and (when set) the last
-/// action with its undo affordance.
-pub fn compute_status_hints(
-    mode: InteractionMode,
-    modifiers: ActiveModifiers,
-    last_action: Option<&str>,
-    selection_count: usize,
-) -> StatusHints {
-    StatusHints::compute(mode, modifiers, last_action, selection_count)
-}
-
 pub use command_palette::{Action as PaletteAction, CommandPalette};
 pub use gizmo::{AxisLock, GizmoState, TransformMode};
 pub use keymap::{ActionId, KeyBinding, Keymap};
@@ -276,6 +263,11 @@ pub struct ViewportState {
     pub box_select_armed: bool,
     /// Active rubber-band rectangle while a box-select drag is in progress.
     pub box_select_rect: Option<(egui::Pos2, egui::Pos2)>,
+    /// Per-frame work multiplier from the [`PerfGovernor`] (1.0 healthy,
+    /// 0.75 degraded, 0.5 critical). The app sets this each frame before
+    /// rendering; the viewport scales discretionary per-frame budgets (e.g.
+    /// the ray-path overlay) by it so a slow device draws less, not slower.
+    pub perf_work_scale: f32,
 }
 
 impl Default for ViewportState {
@@ -333,6 +325,7 @@ impl Default for ViewportState {
             selection_anchor: Selection::None,
             box_select_armed: false,
             box_select_rect: None,
+            perf_work_scale: 1.0,
         }
     }
 }
@@ -3262,7 +3255,9 @@ pub fn viewport_3d(
         if vp.show_rays {
             let ray_color = egui::Color32::from_rgba_premultiplied(255, 200, 50, 30);
             let live_paths = sim.partial_paths();
-            let max_draw = 500.min(live_paths.len());
+            // Governor-scaled overlay budget: a slow device (perf_work_scale
+            // < 1) draws fewer ray polylines instead of dragging the frame.
+            let max_draw = ray_overlay_budget(vp.perf_work_scale).min(live_paths.len());
             for path in &live_paths[..max_draw] {
                 for segment in path.windows(2) {
                     let p1 = project_3d(segment[0], cam, center, scale);
@@ -3608,6 +3603,14 @@ pub fn perf_label_for(gov: &PerfGovernor) -> &'static str {
     gov.class().label()
 }
 
+/// Discretionary per-frame ray-overlay budget for a given governor work-scale
+/// (`PerfClass::work_scale()`). A healthy device draws the full 500-polyline
+/// budget; a throttled one draws proportionally fewer. Floored at 8 so the
+/// overlay never vanishes entirely.
+fn ray_overlay_budget(work_scale: f32) -> usize {
+    ((500.0 * work_scale).round() as usize).max(8)
+}
+
 /// Standalone Performance window — Settings → Performance equivalent
 /// that doesn't require threading caps + governor through every
 /// existing settings call site.
@@ -3648,6 +3651,7 @@ pub fn status_bar(
     robot_manager: &RobotManager,
     sim: &SimulationState,
     status: &AppStatus,
+    perf_label: &'static str,
 ) {
     egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
         // Three-column layout: left=status/breadcrumb, centre=progress, right=Cancel.
@@ -3663,13 +3667,44 @@ pub fn status_bar(
                     .on_hover_text("Selected object path");
             }
 
+            // Mode + next-step + held-modifier + perf hints, all derived from
+            // the live viewport snapshot. egui already tracks modifiers, so we
+            // read them straight from the input state here.
+            let modifiers = ctx.input(|i| {
+                let m = i.modifiers;
+                ActiveModifiers {
+                    shift: m.shift,
+                    ctrl_or_cmd: m.command || m.ctrl,
+                    alt: m.alt,
+                }
+            });
+            let hints = StatusHints::compute_with_perf(
+                vp.mode,
+                modifiers,
+                vp.history.last_action_name(),
+                vp.selection_set.len(),
+                perf_label,
+            );
+
             ui.separator();
-            let mode_str = match vp.mode {
-                InteractionMode::Select => "Select",
-                InteractionMode::PlaceSource => "Place Source",
-                InteractionMode::PlaceListener => "Place Listener",
-            };
-            ui.label(format!("Mode: {mode_str}"));
+            ui.label(format!("Mode: {}", hints.mode_label))
+                .on_hover_text(&hints.next_step_hint);
+            if !hints.next_step_hint.is_empty() {
+                ui.separator();
+                ui.weak(&hints.next_step_hint);
+            }
+            if let Some(action) = &hints.action_hint {
+                ui.separator();
+                ui.weak(action);
+            }
+            let mods = hints.modifier_summary();
+            if !mods.is_empty() {
+                ui.separator();
+                ui.weak(mods);
+            }
+            ui.separator();
+            ui.label(hints.perf_label)
+                .on_hover_text("Adaptive performance class — downshifts render budgets under load");
 
             if let Some(pos) = vp.hover_world {
                 ui.separator();
@@ -5767,6 +5802,18 @@ mod tests {
             );
         }
         assert_eq!(SIDE_PANEL_GROUPS.len(), 6);
+    }
+
+    #[test]
+    fn ray_overlay_budget_scales_with_governor() {
+        assert_eq!(ray_overlay_budget(1.0), 500, "healthy = full budget");
+        assert_eq!(ray_overlay_budget(0.75), 375, "degraded = 0.75x");
+        assert_eq!(ray_overlay_budget(0.5), 250, "critical = 0.5x");
+        assert_eq!(
+            ray_overlay_budget(0.0),
+            8,
+            "floored so overlay never vanishes"
+        );
     }
 
     #[test]

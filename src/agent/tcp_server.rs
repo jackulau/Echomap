@@ -2,7 +2,7 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -124,11 +124,17 @@ impl TcpAgentServer {
 
         loop {
             buf.clear();
+            // Bound the per-line read so a newline-less stream cannot grow `buf`
+            // without limit (memory-exhaustion DoS). `.take(N+1)` caps how many
+            // bytes `read_until` will pull before yielding; the oversize arm then
+            // fires once `buf` exceeds MAX_LINE_BYTES, having buffered at most
+            // MAX_LINE_BYTES + 1 bytes. Mirrors the WS transport's 65_536 cap.
+            let mut limited = (&mut br).take(Self::MAX_LINE_BYTES as u64 + 1);
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break;
                 }
-                result = AsyncBufReadExt::read_until(&mut br, b'\n', &mut buf) => {
+                result = AsyncBufReadExt::read_until(&mut limited, b'\n', &mut buf) => {
                     match result {
                         Ok(0) => {
                             break;
@@ -138,10 +144,11 @@ impl TcpAgentServer {
                 message: "message too large".to_string(),
                 echo: None,
             };
-                            if Self::write_message(&mut bw, &err).await.is_err() {
-                                break;
-                            }
-                            continue;
+                            let _ = Self::write_message(&mut bw, &err).await;
+                            // Drop the connection: with a bounded reader the
+                            // remainder of an oversized line is still unread, so
+                            // continuing would mis-parse its tail as a new message.
+                            break;
                         }
                         Ok(_) => {
                             let trimmed = String::from_utf8_lossy(&buf);
@@ -718,6 +725,72 @@ mod tests {
                 );
             }
             other => panic!("Expected Error for unknown type, got {:?}", other),
+        }
+
+        cancel.cancel();
+        bg.abort();
+    }
+
+    /// Regression: a newline-less stream larger than MAX_LINE_BYTES must NOT
+    /// be buffered without bound (memory-exhaustion DoS). The server caps the
+    /// read at MAX_LINE_BYTES + 1, replies "message too large", and drops the
+    /// connection. We send well past the cap with no newline and assert the
+    /// bounded-error response arrives.
+    #[tokio::test]
+    async fn test_tcp_oversized_line_bounded() {
+        let (bridge, bg) = setup_bridge(1);
+        let (port, cancel, _cc, _sh) = start_server(bridge, 16).await;
+
+        let (mut writer, mut reader) = connect_client(port).await;
+
+        // 200 KiB of non-newline bytes — 3x the 64 KiB cap, no '\n'.
+        let flood = vec![b'a'; 200_000];
+        writer
+            .write_all(&flood)
+            .await
+            .expect("write flood should succeed");
+        writer.flush().await.expect("flush should succeed");
+
+        // Server must respond with the oversize error rather than buffering
+        // the whole 200 KiB stream waiting for a newline.
+        let mut line = String::new();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await
+        .expect("server should respond before timeout (proves read was bounded)")
+        .expect("read_line should succeed");
+        assert!(read > 0, "expected an error line, got EOF");
+
+        let parsed: ServerMessage =
+            serde_json::from_str(line.trim()).expect("response should be a ServerMessage");
+        match parsed {
+            ServerMessage::Error { message, .. } => {
+                assert!(
+                    message.contains("too large"),
+                    "expected 'message too large', got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected oversize Error, got {:?}", other),
+        }
+
+        // Connection should now be closed by the server. The next read either
+        // returns clean EOF (0 bytes) or errors with ConnectionReset — on macOS
+        // closing the read half while the client still has unsent flood bytes
+        // surfaces as RST. Both outcomes prove the connection was dropped.
+        let mut tail = String::new();
+        let closed = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut tail),
+        )
+        .await
+        .expect("close read should not hang");
+        match closed {
+            Ok(0) => {}                  // clean EOF
+            Ok(n) => panic!("server should drop the connection, got {n} more bytes: {tail:?}"),
+            Err(_) => {}                 // RST — connection dropped
         }
 
         cancel.cancel();

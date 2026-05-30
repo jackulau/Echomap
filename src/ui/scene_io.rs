@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::acoustics::SimulationResult;
 use crate::scene::material::MediumLibrary;
-use crate::scene::{
-    AcousticMaterial, Listener, MaterialLibrary, Mesh, Scene, SceneObject, SoundSource,
-};
+use crate::scene::{AcousticMaterial, Listener, Mesh, Scene, SceneObject, SoundSource};
 
 const SNAPSHOT_VERSION: u32 = 1;
 
@@ -272,13 +270,6 @@ pub const FILE_MENU_ITEMS: &[&str] = &[
     "Export Results",
     "Quit",
 ];
-
-/// Make a default material referencing the library, so loaded scenes resolve
-/// material names correctly when libraries are extended later.
-#[allow(dead_code)]
-pub fn material_for_name(lib: &MaterialLibrary, name: &str) -> AcousticMaterial {
-    lib.materials.get(name).cloned().unwrap_or_default()
-}
 
 #[cfg(test)]
 mod tests {

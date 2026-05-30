@@ -13,7 +13,6 @@ shipped for Cinema 4D, Blender, and SolidWorks idioms.
 | `3` | Place Listener |
 | `Tab` | Toggle fly camera (WASD + right-drag look) |
 | `Ctrl+T` | Toggle tele-op (drives `robot/0` from WASD/QE) |
-| `Ctrl+Alt+Q` | Toggle quad-view (Top / Front / Side / Perspective) |
 | `Esc` | Cancel modal / clear selection |
 
 ## Command Palette
@@ -118,13 +117,6 @@ Right-clicking the viewport opens a selection-aware menu:
 - No selection: Add Source / Listener / Partition Wall / Platform · Reset Camera
 - Source / Listener / Object: Focus · Delete
 - Robot / RobotLink: Focus
-
-## Pie Menu
-
-Hold `Q` to open the radial pie menu at the cursor. Eight wedges (clockwise
-from North): Frame Selected → Reset Camera → Toggle Grid → Toggle Shaded →
-Top View → Place Source → Place Listener → Run Simulation. Release `Q` on a
-wedge to commit; release on the centre dead-zone to cancel.
 
 ## Onboarding
 
@@ -245,9 +237,7 @@ to opt out of the count.
 | Multi-select + box-select | ✓ | ✓ | ✓ | ✓ (Ctrl-click + B + A/Alt+A) |
 | Outliner drag/reparent | ✓ | ✓ | ✓ | ✓ (lock + eye icons) |
 | Properties polish | Drag + expressions | Drag + drivers | Equations field | ✓ (drag + arithmetic eval) |
-| Quad-view | ✓ | ✓ (Ctrl+Alt+Q) | ✓ | ✓ (Ctrl+Alt+Q) |
 | Trackpad gestures | ✓ | ✓ | Limited | ✓ (pinch zoom + scroll pan) |
 | Onboarding overlay | ✓ | ✓ | ✓ | ✓ (first-run tour + F1) |
 | Sensible defaults | Auto-frame | Auto-frame | Fit view | ✓ (auto-fit camera) |
 | Status bar hints | ✓ | ✓ | ✓ | ✓ (mode + next-step + modifiers) |
-| Pie menu | — | ✓ | — | ✓ (hold-Q radial) |

@@ -47,8 +47,6 @@ ROUND_DURATION=30 NUM_ROUNDS=1 ./target/release/echomap_server
 - Outliner with hide / lock / isolate, multi-select, box-select
 - Transform gizmos (G / R / S) with axis lock (X / Y / Z), snap (`Shift`)
 - Command palette (`Cmd/Ctrl+K`) — fuzzy search across 30+ actions
-- Pie menu (`Q` hold) — 8-wedge radial picker
-- Quad-view (`Ctrl+Alt+Q`) — Top / Front / Side / Perspective
 - Undo / redo ring buffer with action-hint surfaced in status bar
 - Numeric inspector fields accept arithmetic (`2*pi`, `sqrt(9)`, `sin(0)`)
 - Customisable JSON keymap (XDG-style under `$XDG_CONFIG_HOME/echomap/`)

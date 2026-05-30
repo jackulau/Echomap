@@ -788,9 +788,9 @@ mod tests {
         .await
         .expect("close read should not hang");
         match closed {
-            Ok(0) => {}                  // clean EOF
+            Ok(0) => {} // clean EOF
             Ok(n) => panic!("server should drop the connection, got {n} more bytes: {tail:?}"),
-            Err(_) => {}                 // RST — connection dropped
+            Err(_) => {} // RST — connection dropped
         }
 
         cancel.cancel();

@@ -25,7 +25,6 @@ impl Triangle {
         (self.vertices[0].position + self.vertices[1].position + self.vertices[2].position) / 3.0
     }
 
-    #[allow(dead_code)]
     pub fn area(&self) -> f32 {
         let e1 = self.vertices[1].position - self.vertices[0].position;
         let e2 = self.vertices[2].position - self.vertices[0].position;

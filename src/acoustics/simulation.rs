@@ -41,15 +41,108 @@ impl Default for SimulationConfig {
     }
 }
 
-/// Stub RT60 estimator — placeholder for goal/009's per-band reverberation-time
-/// computation. Master's sim pipeline does not yet populate per-band decay data,
-/// so this returns `[None; BAND_COUNT]`. The integration test that calls it
-/// asserts only the shape (6 entries), not specific numeric values.
+/// Per-band reverberation time (RT60) via the ray-tracing form of Eyring's
+/// equation: the empirical **mean free path** is measured from the traced ray
+/// geometry, and the per-band decay rate comes from the area-weighted average
+/// surface absorption of the scene meshes.
+///
+/// For a band with average absorption `a` and mean free path `mfp` (metres) in
+/// a medium with sound speed `c`, sound loses `-10·log10(1 − a)` dB of energy
+/// per reflection and undergoes `c / mfp` reflections per second, so
+///
+/// ```text
+/// RT60 = 60 dB / ( (c / mfp) · (−10·log10(1 − a)) )
+/// ```
+///
+/// which is algebraically identical to the classic Eyring `0.161·V / (−S·ln(1−a))`
+/// once `mfp = 4V/S` is substituted — but the empirical `mfp` from real ray
+/// geometry is more faithful to non-convex / open scenes than `4V/S`.
+///
+/// Returns `None` for a band when no valid estimate exists: no traced geometry
+/// (no mean free path), no absorbing surface area, or effectively zero
+/// absorption (an undamped band whose energy never decays 60 dB).
 pub fn compute_rt60_bands(
-    _scene: &crate::scene::Scene,
-    _ray_paths: &[Vec<Vec3>],
+    scene: &crate::scene::Scene,
+    ray_paths: &[Vec<Vec3>],
 ) -> [Option<f32>; crate::acoustics::ray::BAND_COUNT] {
-    [None; crate::acoustics::ray::BAND_COUNT]
+    rt60_from_geometry(
+        &scene.meshes,
+        scene.background_medium.speed_of_sound,
+        ray_paths,
+    )
+}
+
+/// Core RT60 estimator, decoupled from the public `Scene` so the simulation
+/// worker (which only holds a `SceneView` + medium) can populate RT60 directly.
+fn rt60_from_geometry(
+    meshes: &[SceneObject],
+    speed_of_sound: f32,
+    ray_paths: &[Vec<Vec3>],
+) -> [Option<f32>; crate::acoustics::ray::BAND_COUNT] {
+    const BAND_COUNT: usize = crate::acoustics::ray::BAND_COUNT;
+    let mut out = [None; BAND_COUNT];
+
+    let c = speed_of_sound;
+    if !c.is_finite() || c <= 0.0 {
+        return out;
+    }
+
+    // Empirical mean free path: average length of a between-bounce segment
+    // across every traced ray. A ray path is a polyline of bounce points, so
+    // each `windows(2)` pair is one free flight between reflections.
+    let mut total_len = 0.0f32;
+    let mut seg_count = 0usize;
+    for path in ray_paths {
+        for seg in path.windows(2) {
+            let d = (seg[1] - seg[0]).length();
+            if d.is_finite() && d > 0.0 {
+                total_len += d;
+                seg_count += 1;
+            }
+        }
+    }
+    if seg_count == 0 {
+        return out; // no traced geometry → no mean free path
+    }
+    let mfp = total_len / seg_count as f32;
+    if !mfp.is_finite() || mfp <= 0.0 {
+        return out;
+    }
+    let reflections_per_sec = c / mfp;
+
+    // Area-weighted average absorption per band over all mesh surfaces.
+    let mut area_sum = 0.0f32;
+    let mut absorbed = [0.0f32; BAND_COUNT]; // Σ area_i · a_band_i
+    for obj in meshes {
+        let a = obj.material.absorption.as_array();
+        for tri in &obj.mesh.triangles {
+            let area = tri.area();
+            if area.is_finite() && area > 0.0 {
+                area_sum += area;
+                for (acc, &band_a) in absorbed.iter_mut().zip(a.iter()) {
+                    *acc += area * band_a;
+                }
+            }
+        }
+    }
+    if area_sum <= 0.0 {
+        return out; // no surfaces → reverberation undefined
+    }
+
+    for (band, &abs) in out.iter_mut().zip(absorbed.iter()) {
+        // Clamp below 1.0 so log10 is finite; a fully-absorbing band has no
+        // reverberant tail (RT60 → 0) but we still report it as a small value.
+        let a_avg = (abs / area_sum).clamp(0.0, 0.999_9);
+        if a_avg <= 1e-4 {
+            continue; // undamped band → energy never decays 60 dB → None
+        }
+        let db_lost_per_reflection = -10.0 * (1.0 - a_avg).log10();
+        let db_per_sec = reflections_per_sec * db_lost_per_reflection;
+        if db_per_sec.is_finite() && db_per_sec > 0.0 {
+            *band = Some(60.0 / db_per_sec);
+        }
+    }
+    out
 }
 
 impl SimulationConfig {
@@ -472,12 +565,14 @@ fn simulate_worker(
         }
     }
 
+    let rt60_bands = rt60_from_geometry(&scene_view.meshes, bg.speed_of_sound, &all_paths);
+
     SimulationResult {
         energy_grid,
         ray_paths: all_paths,
         max_energy,
         listener_captures: Vec::new(),
-        rt60_bands: [None; crate::acoustics::ray::BAND_COUNT],
+        rt60_bands,
     }
 }
 
@@ -884,6 +979,82 @@ mod tests {
     /// Helper: create a small box SceneObject that acts as a water volume.
     fn water_box(pos: Vec3, size: f32) -> SceneObject {
         primitives::platform(pos, size, size, size).with_interior_medium(water())
+    }
+
+    #[test]
+    fn rt60_eyring_finite_positive_and_monotonic_in_absorption() {
+        use crate::scene::material::FrequencyBands;
+        let mut room = primitives::box_room(6.0, 6.0, 4.0);
+        // Absorption strictly increases across the six octave bands.
+        room.material.absorption = FrequencyBands {
+            hz_125: 0.05,
+            hz_250: 0.10,
+            hz_500: 0.20,
+            hz_1000: 0.30,
+            hz_2000: 0.50,
+            hz_4000: 0.80,
+        };
+        let scene = Scene {
+            meshes: vec![room],
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+
+        // Synthetic ray geometry: three 2.0 m free flights → mean free path 2.0 m.
+        let paths = vec![vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(2.0, 2.0, 0.0),
+            Vec3::new(2.0, 2.0, 2.0),
+        ]];
+
+        let rt = compute_rt60_bands(&scene, &paths);
+
+        // Every band yields a valid, finite, positive estimate.
+        for (i, band) in rt.iter().enumerate() {
+            let v = band.unwrap_or_else(|| panic!("band {i} should have an RT60 estimate"));
+            assert!(
+                v.is_finite() && v > 0.0,
+                "band {i} RT60 {v} must be finite positive"
+            );
+        }
+
+        // More absorption ⇒ faster decay ⇒ shorter RT60 (strictly decreasing).
+        for i in 1..rt.len() {
+            let prev = rt[i - 1].unwrap();
+            let cur = rt[i].unwrap();
+            assert!(
+                cur < prev,
+                "RT60 must shrink as absorption grows: band {i} ({cur}) !< band {} ({prev})",
+                i - 1
+            );
+        }
+
+        // Exact Eyring check for the 500 Hz band (a = 0.20, mfp = 2.0 m).
+        let c = MediumProperties::air().speed_of_sound;
+        let expected = 60.0 / ((c / 2.0) * (-10.0 * (1.0f32 - 0.20).log10()));
+        let got = rt[2].unwrap();
+        assert!(
+            (got - expected).abs() < 1e-3,
+            "500 Hz RT60 {got} should match Eyring {expected}"
+        );
+    }
+
+    #[test]
+    fn rt60_none_without_geometry_or_surfaces() {
+        // No rays → no mean free path → every band None.
+        let scene = air_box_scene();
+        assert!(compute_rt60_bands(&scene, &[]).iter().all(Option::is_none));
+
+        // No meshes → no absorbing surface → None even with ray geometry.
+        let empty = Scene {
+            background_medium: MediumProperties::air(),
+            ..Default::default()
+        };
+        let paths = vec![vec![Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)]];
+        assert!(compute_rt60_bands(&empty, &paths)
+            .iter()
+            .all(Option::is_none));
     }
 
     // -----------------------------------------------------------------------

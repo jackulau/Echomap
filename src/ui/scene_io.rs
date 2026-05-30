@@ -229,6 +229,15 @@ pub fn export_results_report(
             energy_to_spl(e)
         ));
     }
+
+    s.push_str("\n## Reverberation (RT60)\n\n");
+    const BAND_HZ: [u32; crate::acoustics::ray::BAND_COUNT] = [125, 250, 500, 1000, 2000, 4000];
+    for (hz, rt) in BAND_HZ.iter().zip(result.rt60_bands.iter()) {
+        match rt {
+            Some(v) => s.push_str(&format!("- {hz} Hz: {v:.2} s\n")),
+            None => s.push_str(&format!("- {hz} Hz: —\n")),
+        }
+    }
     s
 }
 
@@ -364,6 +373,10 @@ mod tests {
         assert!(r.contains("EchoMap Simulation Report"));
         assert!(r.contains("Objects:"));
         assert!(r.contains("L1"));
+        // RT60 section is present; default result has no estimate → placeholder.
+        assert!(r.contains("Reverberation (RT60)"));
+        assert!(r.contains("125 Hz:"));
+        assert!(r.contains("4000 Hz:"));
     }
 
     #[test]

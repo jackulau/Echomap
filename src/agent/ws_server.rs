@@ -172,6 +172,14 @@ impl WsAgentServer {
         // First tick fires immediately; skip it so we don't ping the moment we connect.
         heartbeat.tick().await;
 
+        // Absolute inbound deadline. It is pinned here and bumped ONLY when a
+        // real message arrives — NOT on heartbeat ticks. Using a per-iteration
+        // `timeout(read_timeout, read.next())` was wrong: every heartbeat tick
+        // completed the select and re-armed a fresh timeout, so with the default
+        // config (heartbeat 10s < read_timeout 30s) the countdown reset forever
+        // and a silent-but-connected client was never dropped.
+        let mut read_deadline = tokio::time::Instant::now() + config.read_timeout;
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -179,29 +187,35 @@ impl WsAgentServer {
                 }
                 _ = heartbeat.tick() => {
                     // Keepalive: a peer with a half-open socket will fail on send.
+                    // Deliberately does NOT touch `read_deadline`.
                     if write.send(Message::Ping(Vec::new().into())).await.is_err() {
                         break;
                     }
                     continue;
                 }
-                read_result = tokio::time::timeout(config.read_timeout, read.next()) => {
-                    let msg_opt = match read_result {
-                        Ok(opt) => opt,
-                        Err(_) => {
-                            // Read timed out — agent went silent. Tell them, then drop.
-                            let err = ServerMessage::error(format!(
-                                "read timeout after {:.0}s",
-                                config.read_timeout.as_secs_f32()
-                            ));
-                            if let Ok(json) = crate::agent::protocol::encode_for_wire(&err) {
-                                let _ = write.send(Message::Text(json.into())).await;
-                            }
-                            let _ = write.close().await;
-                            break;
-                        }
-                    };
+                _ = tokio::time::sleep_until(read_deadline) => {
+                    // Read timed out — agent went silent. Tell them, then drop.
+                    let err = ServerMessage::error(format!(
+                        "read timeout after {:.0}s",
+                        config.read_timeout.as_secs_f32()
+                    ));
+                    if let Ok(json) = crate::agent::protocol::encode_for_wire(&err) {
+                        let _ = write.send(Message::Text(json.into())).await;
+                    }
+                    let _ = write.close().await;
+                    break;
+                }
+                msg_opt = read.next() => {
+                    // NOTE: do NOT reset `read_deadline` here. The peer's WS
+                    // layer auto-Pongs our heartbeat pings, so Pong frames keep
+                    // arriving even for an agent that never sends application
+                    // data — resetting on them would re-introduce the leak. The
+                    // countdown is reset only inside the genuine app-data arms
+                    // (Text / Binary) below.
                     match msg_opt {
                         Some(Ok(Message::Text(text))) => {
+                            read_deadline =
+                                tokio::time::Instant::now() + config.read_timeout;
                             match serde_json::from_str::<ClientMessage>(&text) {
                                 Ok(client_msg) => {
                                     let response = session.handle_message(client_msg).await;
@@ -229,6 +243,8 @@ impl WsAgentServer {
                             }
                         }
                         Some(Ok(Message::Binary(_))) => {
+                            read_deadline =
+                                tokio::time::Instant::now() + config.read_timeout;
                             let err = ServerMessage::error("binary messages not supported");
                             let json = match crate::agent::protocol::encode_for_wire(&err) {
                                 Ok(j) => j,
@@ -933,6 +949,67 @@ mod tests {
         assert!(
             saw_ping,
             "server should send ping frame within heartbeat interval"
+        );
+
+        cancel.cancel();
+        let _ = server_handle.await;
+        bg.abort();
+    }
+
+    /// Regression for the heartbeat-preempts-timeout bug: with the realistic
+    /// default ratio (heartbeat_interval < read_timeout) a silent client must
+    /// STILL be dropped at the read timeout. The old per-iteration
+    /// `timeout(read_timeout, read.next())` re-armed on every heartbeat tick,
+    /// so the countdown never elapsed and this case leaked connections forever.
+    #[tokio::test]
+    async fn test_ws_read_timeout_fires_despite_heartbeats() {
+        let (bridge, bg) = setup_bridge(1);
+        // heartbeat (100ms) fires ~2-3 times inside the 300ms read window.
+        let cfg = WsServerConfig {
+            read_timeout: Duration::from_millis(300),
+            heartbeat_interval: Duration::from_millis(100),
+        };
+        let server = WsAgentServer::bind_with_config(0, bridge, 16, cfg)
+            .await
+            .expect("bind to port 0 should succeed");
+        let port = server.local_port();
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let server_handle = tokio::spawn(async move {
+            server.run(cancel_clone).await;
+        });
+
+        let (mut _write, mut read) = ws_connect(port).await;
+
+        // Client stays connected but silent. We must observe the timeout error
+        // well before a generous 3s ceiling (with the bug this never arrives).
+        let mut saw_timeout_error = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline && !saw_timeout_error {
+            match tokio::time::timeout(Duration::from_millis(500), read.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    let msg: ServerMessage =
+                        serde_json::from_str(&text).expect("server should send valid JSON");
+                    if let ServerMessage::Error {
+                        message,
+                        echo: None,
+                    } = msg
+                    {
+                        if message.contains("timeout") {
+                            saw_timeout_error = true;
+                        }
+                    }
+                }
+                // Pings from the heartbeat are expected and ignored.
+                Ok(Some(Ok(_))) => {}
+                Ok(Some(Err(_))) | Ok(None) => break,
+                Err(_) => {}
+            }
+        }
+
+        assert!(
+            saw_timeout_error,
+            "silent client must be timed out even though heartbeats keep firing"
         );
 
         cancel.cancel();

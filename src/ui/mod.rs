@@ -3014,9 +3014,17 @@ pub fn viewport_3d(
         if let Some(hover_pos) = response.hover_pos() {
             let (origin, dir) = screen_to_ray(hover_pos, cam, center, scale);
             vp.hover_world = ray_ground_intersect(origin, dir);
-            if let Some(label) =
-                hover_label_test(hover_pos, scene, robot_manager, cam, center, scale)
-            {
+            if let Some(label) = hover_label_test(
+                hover_pos,
+                scene,
+                robot_manager,
+                cam,
+                center,
+                scale,
+                &vp.hidden_state,
+                &vp.selection_set,
+                &vp.outliner_rows,
+            ) {
                 vp.hover_label = Some((hover_pos, label));
             }
         }
@@ -3025,7 +3033,17 @@ pub fn viewport_3d(
         if !is_orbit && !is_pan && !is_fly_look {
             if response.drag_started_by(egui::PointerButton::Primary) && !modifiers.alt {
                 if let Some(hover) = response.hover_pos() {
-                    let sel = hit_test(hover, scene, robot_manager, cam, center, scale);
+                    let sel = hit_test(
+                        hover,
+                        scene,
+                        robot_manager,
+                        cam,
+                        center,
+                        scale,
+                        &vp.hidden_state,
+                        &vp.selection_set,
+                        &vp.outliner_rows,
+                    );
                     if sel != Selection::None {
                         vp.selection = sel;
                         vp.dragging = true;
@@ -3059,7 +3077,17 @@ pub fn viewport_3d(
 
                     match vp.mode {
                         InteractionMode::Select => {
-                            let hit = hit_test(hover, scene, robot_manager, cam, center, scale);
+                            let hit = hit_test(
+                                hover,
+                                scene,
+                                robot_manager,
+                                cam,
+                                center,
+                                scale,
+                                &vp.hidden_state,
+                                &vp.selection_set,
+                                &vp.outliner_rows,
+                            );
                             let new_anchor = selection_set::apply_pick(
                                 &mut vp.selection_set,
                                 vp.selection_anchor,
@@ -3120,7 +3148,17 @@ pub fn viewport_3d(
         // distinct on the secondary button.
         if response.secondary_clicked() && !vp.gizmo.is_active() {
             if let Some(hover) = response.hover_pos() {
-                vp.selection = hit_test(hover, scene, robot_manager, cam, center, scale);
+                vp.selection = hit_test(
+                    hover,
+                    scene,
+                    robot_manager,
+                    cam,
+                    center,
+                    scale,
+                    &vp.hidden_state,
+                    &vp.selection_set,
+                    &vp.outliner_rows,
+                );
             }
         }
         let menu_selection = vp.selection;
@@ -3198,6 +3236,12 @@ pub fn viewport_3d(
         if vp.show_meshes {
             for (i, obj) in scene.meshes.iter().enumerate() {
                 if !obj.visible {
+                    continue;
+                }
+                // Hide / Isolate (H, Alt+H, /) — skip objects hidden or excluded
+                // by isolate mode. (Outliner per-row visibility already drives
+                // `obj.visible` above.)
+                if !vp.hidden_state.render_object(i, &vp.selection_set) {
                     continue;
                 }
                 let is_selected = vp.selection == Selection::Object(i);
@@ -3402,6 +3446,12 @@ pub fn viewport_3d(
                 if !source.enabled {
                     continue;
                 }
+                // Outliner eye toggle (row-scoped) AND Hide/Isolate (H, Alt+H, /).
+                if !vp.outliner_rows.is_source_visible(i)
+                    || !vp.hidden_state.render_source(i, &vp.selection_set)
+                {
+                    continue;
+                }
                 let p = project_3d(source.position, cam, center, scale);
                 let is_selected = vp.selection == Selection::Source(i);
                 if is_selected {
@@ -3431,6 +3481,12 @@ pub fn viewport_3d(
         // Listeners
         if vp.show_listeners {
             for (i, listener) in scene.listeners.iter().enumerate() {
+                // Outliner eye toggle (row-scoped) AND Hide/Isolate (H, Alt+H, /).
+                if !vp.outliner_rows.is_listener_visible(i)
+                    || !vp.hidden_state.render_listener(i, &vp.selection_set)
+                {
+                    continue;
+                }
                 let p = project_3d(listener.position, cam, center, scale);
                 let is_selected = vp.selection == Selection::Listener(i);
                 if is_selected {
@@ -4043,6 +4099,7 @@ pub fn settings_window(
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn hit_test(
     screen_pos: egui::Pos2,
     scene: &Scene,
@@ -4050,10 +4107,17 @@ fn hit_test(
     cam: &Camera,
     center: egui::Pos2,
     scale: f32,
+    hidden: &HiddenState,
+    selection_set: &SelectionSet,
+    rows: &OutlinerRows,
 ) -> Selection {
     let hit_radius = 14.0;
 
     for (i, source) in scene.sound_sources.iter().enumerate() {
+        // Don't pick items hidden from the viewport (eye toggle / Hide / Isolate).
+        if !rows.is_source_visible(i) || !hidden.render_source(i, selection_set) {
+            continue;
+        }
         let p = project_3d(source.position, cam, center, scale);
         if p.distance(screen_pos) < hit_radius {
             return Selection::Source(i);
@@ -4061,6 +4125,9 @@ fn hit_test(
     }
 
     for (i, listener) in scene.listeners.iter().enumerate() {
+        if !rows.is_listener_visible(i) || !hidden.render_listener(i, selection_set) {
+            continue;
+        }
         let p = project_3d(listener.position, cam, center, scale);
         if p.distance(screen_pos) < hit_radius {
             return Selection::Listener(i);
@@ -4092,6 +4159,7 @@ fn hit_test(
 }
 
 /// Lightweight hover hit test: returns (Selection, label) of closest pickable.
+#[allow(clippy::too_many_arguments)]
 fn hover_label_test(
     screen_pos: egui::Pos2,
     scene: &Scene,
@@ -4099,15 +4167,24 @@ fn hover_label_test(
     cam: &Camera,
     center: egui::Pos2,
     scale: f32,
+    hidden: &HiddenState,
+    selection_set: &SelectionSet,
+    rows: &OutlinerRows,
 ) -> Option<String> {
     let hit_radius = 16.0;
     for (i, source) in scene.sound_sources.iter().enumerate() {
+        if !rows.is_source_visible(i) || !hidden.render_source(i, selection_set) {
+            continue;
+        }
         let p = project_3d(source.position, cam, center, scale);
         if p.distance(screen_pos) < hit_radius {
             return Some(format!("Source {}", i + 1));
         }
     }
-    for listener in &scene.listeners {
+    for (i, listener) in scene.listeners.iter().enumerate() {
+        if !rows.is_listener_visible(i) || !hidden.render_listener(i, selection_set) {
+            continue;
+        }
         let p = project_3d(listener.position, cam, center, scale);
         if p.distance(screen_pos) < hit_radius {
             return Some(listener.name.clone());
@@ -5702,6 +5779,82 @@ mod tests {
             );
         }
         assert_eq!(SIDE_PANEL_GROUPS.len(), 6);
+    }
+
+    #[test]
+    fn hidden_source_is_not_pickable() {
+        use crate::robot::RobotManager;
+
+        let mut scene = Scene::default();
+        scene.sound_sources.push(SoundSource {
+            position: Vec3::new(1.0, 1.0, 1.0),
+            ..Default::default()
+        });
+        let robots = RobotManager::new();
+        let cam = Camera::default();
+        let center = egui::pos2(400.0, 300.0);
+        let scale = 100.0;
+        // Screen position of the source — hit_test projects with the same fn,
+        // so testing exactly here yields distance 0 (well inside hit_radius).
+        let p = project_3d(scene.sound_sources[0].position, &cam, center, scale);
+
+        // Visible: the source is pickable.
+        let visible_rows = OutlinerRows::default();
+        let visible_hidden = HiddenState::default();
+        let sel_set = SelectionSet::new();
+        assert_eq!(
+            hit_test(
+                p,
+                &scene,
+                &robots,
+                &cam,
+                center,
+                scale,
+                &visible_hidden,
+                &sel_set,
+                &visible_rows,
+            ),
+            Selection::Source(0),
+            "a visible source must be pickable"
+        );
+
+        // Outliner eye toggle hides it → not pickable.
+        let mut rows = OutlinerRows::default();
+        rows.toggle_source_visibility(0);
+        assert_eq!(
+            hit_test(
+                p,
+                &scene,
+                &robots,
+                &cam,
+                center,
+                scale,
+                &visible_hidden,
+                &sel_set,
+                &rows,
+            ),
+            Selection::None,
+            "an outliner-hidden source must not be pickable"
+        );
+
+        // Hide/Isolate (H) hides it → not pickable.
+        let mut hidden = HiddenState::default();
+        hidden.hidden_sources.insert(0);
+        assert_eq!(
+            hit_test(
+                p,
+                &scene,
+                &robots,
+                &cam,
+                center,
+                scale,
+                &hidden,
+                &sel_set,
+                &visible_rows,
+            ),
+            Selection::None,
+            "a Hide/Isolate-hidden source must not be pickable"
+        );
     }
 
     #[test]

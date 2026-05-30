@@ -66,6 +66,10 @@ pub struct BoxingMatch {
     pub round_time: f32,
     pub rounds: Vec<RoundScore>,
     pub agents_connected: [bool; 2],
+    /// Previous-tick knockdown flags, so a knockdown is scored once on its
+    /// rising edge instead of every tick it stays latched.
+    prev_knockdown_a: bool,
+    prev_knockdown_b: bool,
 }
 
 impl BoxingMatch {
@@ -79,6 +83,8 @@ impl BoxingMatch {
             round_time: 0.0,
             rounds: Vec::new(),
             agents_connected: [false; 2],
+            prev_knockdown_a: false,
+            prev_knockdown_b: false,
         }
     }
 
@@ -110,6 +116,8 @@ impl BoxingMatch {
                     self.phase = MatchPhase::Fighting;
                     self.round_time = 0.0;
                     self.rounds.push(RoundScore::default());
+                    self.prev_knockdown_a = false;
+                    self.prev_knockdown_b = false;
                 } else {
                     self.phase = MatchPhase::Countdown {
                         remaining: new_remaining,
@@ -118,6 +126,25 @@ impl BoxingMatch {
             }
             MatchPhase::Fighting => {
                 self.round_time += dt;
+
+                // Count knockdowns on the rising edge (standing → down) only,
+                // so a latched knockdown isn't tallied every tick. Computed
+                // outside the `rounds.last_mut()` borrow below.
+                let mut kd_a = 0u32;
+                let mut kd_b = 0u32;
+                for &(id, combat) in combat_states {
+                    if id == self.robot_a {
+                        if combat.knockdown && !self.prev_knockdown_a {
+                            kd_a += 1;
+                        }
+                        self.prev_knockdown_a = combat.knockdown;
+                    } else if id == self.robot_b {
+                        if combat.knockdown && !self.prev_knockdown_b {
+                            kd_b += 1;
+                        }
+                        self.prev_knockdown_b = combat.knockdown;
+                    }
+                }
 
                 if let Some(current_score) = self.rounds.last_mut() {
                     for event in hit_events {
@@ -132,13 +159,8 @@ impl BoxingMatch {
                         }
                     }
 
-                    for &(id, combat) in combat_states {
-                        if id == self.robot_a && combat.knockdown {
-                            current_score.knockdowns_a += 1;
-                        } else if id == self.robot_b && combat.knockdown {
-                            current_score.knockdowns_b += 1;
-                        }
-                    }
+                    current_score.knockdowns_a += kd_a;
+                    current_score.knockdowns_b += kd_b;
                 }
 
                 // Check for knockout (health = 0)
@@ -169,6 +191,8 @@ impl BoxingMatch {
                         self.current_round += 1;
                         self.round_time = 0.0;
                         self.rounds.push(RoundScore::default());
+                        self.prev_knockdown_a = false;
+                        self.prev_knockdown_b = false;
                         self.phase = MatchPhase::Fighting;
                     }
                 } else {
@@ -523,6 +547,65 @@ mod tests {
         let score = &m.rounds[0];
         assert_eq!(score.score_a, 10);
         assert_eq!(score.score_b, 8);
+    }
+
+    #[test]
+    fn test_knockdown_counted_once_on_rising_edge() {
+        let mut m = BoxingMatch::new(0, 1, make_config());
+        m.connect_agent(0);
+        m.connect_agent(1);
+        m.update(&[], &[], 0.1);
+        m.update(&[], &[], 3.1); // -> Fighting
+
+        let a = make_combat(100.0, false);
+        let b_down = make_combat(60.0, true); // conscious knockdown, latched
+                                              // Three ticks with B latched down must count exactly ONE knockdown.
+        m.update(&[], &[(0, &a), (1, &b_down)], 0.5);
+        m.update(&[], &[(0, &a), (1, &b_down)], 0.5);
+        m.update(&[], &[(0, &a), (1, &b_down)], 0.5);
+        assert_eq!(
+            m.rounds[0].knockdowns_b, 1,
+            "a latched knockdown must be tallied once, not every tick"
+        );
+
+        // B stands up, then is dropped again -> a fresh rising edge counts.
+        let b_up = make_combat(60.0, false);
+        m.update(&[], &[(0, &a), (1, &b_up)], 0.5);
+        m.update(&[], &[(0, &a), (1, &b_down)], 0.5);
+        assert_eq!(
+            m.rounds[0].knockdowns_b, 2,
+            "a second, separate knockdown must count again"
+        );
+    }
+
+    #[test]
+    fn test_subko_knockdown_scores_10_8_without_ending_match() {
+        // A conscious knockdown (health > 0) must score the round 10-8 AND let
+        // the match continue — it must NOT take the knockout/match-end path.
+        let mut m = BoxingMatch::new(0, 1, make_config());
+        m.connect_agent(0);
+        m.connect_agent(1);
+        m.update(&[], &[], 0.1);
+        m.update(&[], &[], 3.1); // -> Fighting
+
+        let a = make_combat(100.0, false);
+        let b_down = make_combat(55.0, true); // conscious knockdown
+        m.update(&[make_hit(0, 1)], &[(0, &a), (1, &b_down)], 1.0);
+        assert!(
+            matches!(m.phase, MatchPhase::Fighting),
+            "a sub-KO knockdown must not end the match"
+        );
+        assert_eq!(m.rounds[0].knockdowns_b, 1);
+
+        // B recovers; the round then ends on the clock and scores 10-8.
+        let b_up = make_combat(55.0, false);
+        m.update(&[], &[(0, &a), (1, &b_up)], 10.0);
+        let score = &m.rounds[0];
+        assert_eq!(score.score_a, 10);
+        assert_eq!(
+            score.score_b, 8,
+            "a conscious knockdown still yields a 10-8 round"
+        );
     }
 
     #[test]

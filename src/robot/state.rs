@@ -29,6 +29,14 @@ pub enum ActuatorCommand {
 
 // ---- Structs ----
 
+/// A single blow at or above this damage drops a still-conscious fighter
+/// (a sub-KO knockdown), distinct from a knockout at zero health.
+pub const KNOCKDOWN_DAMAGE_THRESHOLD: f32 = 35.0;
+
+/// Seconds a downed (but conscious) fighter takes to get back up. After this
+/// the knockdown clears; a knockout (health 0) never clears.
+pub const KNOCKDOWN_RECOVERY_SECS: f32 = 3.0;
+
 /// Combat state tracking health, stamina, and damage statistics for a robot.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CombatState {
@@ -39,7 +47,14 @@ pub struct CombatState {
     pub recent_hits: Vec<HitEvent>,
     pub total_damage_dealt: f32,
     pub total_damage_received: f32,
+    /// True while the fighter is down — either a transient sub-KO knockdown
+    /// (cleared by [`CombatState::recover`] after `knockdown_timer` expires)
+    /// or a permanent knockout when `health` hits 0.
     pub knockdown: bool,
+    /// Seconds remaining before a sub-KO knockdown clears. 0 means standing,
+    /// or — when `health <= 0` — knocked out for good.
+    #[serde(default)]
+    pub knockdown_timer: f32,
 }
 
 impl CombatState {
@@ -54,14 +69,37 @@ impl CombatState {
             total_damage_dealt: 0.0,
             total_damage_received: 0.0,
             knockdown: false,
+            knockdown_timer: 0.0,
         }
     }
 
-    /// Apply damage, reducing health and setting knockdown if health reaches 0.
+    /// Apply damage, reducing health. Sets a permanent knockout when health
+    /// reaches 0, or a transient sub-KO knockdown (with a recovery timer) when
+    /// a single blow at/above [`KNOCKDOWN_DAMAGE_THRESHOLD`] lands on a still-
+    /// conscious, standing fighter.
     pub fn apply_damage(&mut self, amount: f32) {
         self.health = (self.health - amount).max(0.0);
         if self.health <= 0.0 {
+            // Knockout — stays down for good.
             self.knockdown = true;
+            self.knockdown_timer = 0.0;
+        } else if amount >= KNOCKDOWN_DAMAGE_THRESHOLD && !self.knockdown {
+            // Hard blow drops a standing fighter; they'll get back up.
+            self.knockdown = true;
+            self.knockdown_timer = KNOCKDOWN_RECOVERY_SECS;
+        }
+    }
+
+    /// Advance any active sub-KO knockdown recovery. Called once per combat
+    /// tick. When the timer expires and the fighter still has health, they get
+    /// back up (knockdown clears). A knockout (`health <= 0`, timer 0) never
+    /// recovers here.
+    pub fn recover(&mut self, dt: f32) {
+        if self.knockdown_timer > 0.0 {
+            self.knockdown_timer = (self.knockdown_timer - dt).max(0.0);
+            if self.knockdown_timer == 0.0 && self.health > 0.0 {
+                self.knockdown = false;
+            }
         }
     }
 
@@ -1281,6 +1319,43 @@ mod tests {
             cs.knockdown,
             "knockdown should be true when health reaches 0"
         );
+    }
+
+    #[test]
+    fn test_hard_blow_causes_subko_knockdown_then_recovers() {
+        let mut cs = CombatState::new(100.0, 100.0);
+        // A hard blow while standing drops the fighter without a knockout.
+        cs.apply_damage(KNOCKDOWN_DAMAGE_THRESHOLD + 5.0);
+        assert!(cs.health > 0.0, "should still be conscious");
+        assert!(cs.knockdown, "a hard blow should cause a knockdown");
+        assert!(cs.knockdown_timer > 0.0, "recovery timer should be running");
+
+        // Mid-count — still down.
+        cs.recover(KNOCKDOWN_RECOVERY_SECS - 0.5);
+        assert!(cs.knockdown, "still down before the count completes");
+
+        // Timer expires — fighter gets back up.
+        cs.recover(1.0);
+        assert!(!cs.knockdown, "should get back up after recovery");
+        assert_eq!(cs.knockdown_timer, 0.0);
+    }
+
+    #[test]
+    fn test_sub_threshold_hit_does_not_knock_down() {
+        let mut cs = CombatState::new(100.0, 100.0);
+        cs.apply_damage(KNOCKDOWN_DAMAGE_THRESHOLD - 1.0);
+        assert!(!cs.knockdown, "a sub-threshold blow must not knock down");
+        assert_eq!(cs.knockdown_timer, 0.0);
+    }
+
+    #[test]
+    fn test_knockout_never_recovers() {
+        let mut cs = CombatState::new(40.0, 100.0);
+        cs.apply_damage(50.0); // health -> 0 (knockout)
+        assert!(cs.knockdown);
+        assert_eq!(cs.knockdown_timer, 0.0, "a KO has no recovery countdown");
+        cs.recover(100.0);
+        assert!(cs.knockdown, "a knockout must stay down");
     }
 
     #[test]

@@ -191,10 +191,12 @@ fn step_combat(robots: &mut [ManagedRobot], dt: f32) -> Vec<HitEvent> {
         .collect();
 
     if combat_data.len() < 2 {
-        // Regenerate stamina even without combat
+        // Regenerate stamina (and recover from any knockdown) even without
+        // a sparring partner.
         for robot in robots.iter_mut() {
             if let Some(ref mut combat) = robot.state.combat {
                 combat.regenerate_stamina(dt);
+                combat.recover(dt);
             }
         }
         return Vec::new();
@@ -234,10 +236,11 @@ fn step_combat(robots: &mut [ManagedRobot], dt: f32) -> Vec<HitEvent> {
         }
     }
 
-    // 8. Regenerate stamina for all combat robots
+    // 8. Regenerate stamina and advance knockdown recovery for all combat robots
     for robot in robots.iter_mut() {
         if let Some(ref mut combat) = robot.state.combat {
             combat.regenerate_stamina(dt);
+            combat.recover(dt);
         }
     }
 

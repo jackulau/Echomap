@@ -2,5 +2,7 @@
 __pycache__/
 *.pyc
 .claude-workspace/
+# Transient Claude Code harness lock (accidentally committed once; keep out)
+.claude/*.lock
 # Regenerable test artifact written by tests/integration.rs::boxing_round_30s_smoke
 tasks/008-echomap-agent-feedback/round_transcript.jsonl

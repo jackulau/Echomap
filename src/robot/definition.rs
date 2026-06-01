@@ -63,6 +63,13 @@ pub enum SensorDefinition {
 pub struct LinkDefinition {
     pub name: String,
     pub mass: f32,
+    /// Generalized scalar inertia of this link about its parent joint's single DOF — the `I` in
+    /// `I·θ̈ = τ` used by [`crate::robot::dynamics::step_dynamics_with_gravity`]. This is a *lumped,
+    /// constant* effective inertia (it already accounts for the link's mass swinging at its lever
+    /// arm), **not** the raw centre-of-mass moment `I_com`. Do not add a parallel-axis `m·d⊥²` term
+    /// on top — that double-counts the mass. Making this inertia pose-dependent would require the
+    /// full articulated mass matrix (out of scope); see the `generalized_inertia_governs_acceleration`
+    /// test which pins this contract.
     pub inertia: f32,
     pub collision_shape: CollisionShape,
     pub parent_joint: Option<usize>,

@@ -354,6 +354,37 @@ mod tests {
     }
 
     #[test]
+    fn generalized_inertia_governs_acceleration() {
+        // Locks the model: `links[child].inertia` is the GENERALIZED inertia (I in I·θ̈ = τ), even
+        // when the link COM is offset from the joint. A constant torque T with zero damping/gravity
+        // must give θ̈ = T/I, i.e. v after one step = (T/I)·dt — independent of the lever arm.
+        // A future "parallel-axis" change (I_eff = I + m·d⊥²) would slow this and fail the test.
+        let (torque, inertia, dt) = (1.0_f32, 0.1_f32, 0.001_f32);
+        // child_offset 0.5 m ⇒ m·L² = 2·0.25 = 0.5 ≫ I; a parallel-axis term would dominate.
+        let def = pendulum_robot(Vec3::Z, 0.5, 2.0, inertia, 0.0);
+        let mut state = RobotState::new(&def);
+        state.actuator_commands = vec![ActuatorCommand::Torque(torque)];
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        // Gravity-free so only the actuator torque acts.
+        step_dynamics(&def, &mut state, dt);
+
+        let expected = (torque / inertia) * dt; // 0.01
+        assert!(
+            (state.joint_velocities[0] - expected).abs() < 1e-6,
+            "θ̈ must equal τ/I (generalized inertia), got v={} expected {}",
+            state.joint_velocities[0],
+            expected
+        );
+        // Sanity: a parallel-axis inertia (0.1 + 2·0.5²·... = 0.6) would give ~0.00167, far off.
+        let parallel_axis_v = (torque / (inertia + 2.0 * 0.5 * 0.5)) * dt;
+        assert!(
+            (state.joint_velocities[0] - parallel_axis_v).abs() > 1e-3,
+            "result must NOT match a double-counting parallel-axis inertia"
+        );
+    }
+
+    #[test]
     fn gravity_free_wrapper_matches_zero_field() {
         // The gravity-free `step_dynamics` wrapper must equal stepping with an explicit zero field.
         let def = pendulum_robot(Vec3::Z, 0.5, 2.0, 0.1, 0.1);

@@ -8,7 +8,7 @@ pub mod kinematics;
 pub mod sensors;
 pub mod state;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use serde::{Deserialize, Serialize};
 
 use rayon::prelude::*;
@@ -61,6 +61,9 @@ pub struct RobotManager {
     cached_bvh: Option<SceneBvh>,
     bvh_mesh_count: usize,
     pub last_hit_events: Vec<HitEvent>,
+    /// Uniform gravity field applied to every robot's joint dynamics each `step`. Defaults to Earth
+    /// (`DEFAULT_GRAVITY`, 0,-9.81,0). Set to `Vec3::ZERO` for a zero-g / pure-control scenario.
+    pub gravity: Vec3,
 }
 
 impl Default for RobotManager {
@@ -79,6 +82,7 @@ impl RobotManager {
             cached_bvh: None,
             bvh_mesh_count: 0,
             last_hit_events: Vec::new(),
+            gravity: DEFAULT_GRAVITY,
         }
     }
 
@@ -120,8 +124,9 @@ impl RobotManager {
         }
 
         let bvh = self.cached_bvh.as_ref().unwrap();
+        let gravity = self.gravity;
         let step_one = |robot: &mut ManagedRobot| {
-            step_dynamics_with_gravity(&robot.definition, &mut robot.state, dt, DEFAULT_GRAVITY);
+            step_dynamics_with_gravity(&robot.definition, &mut robot.state, dt, gravity);
             let bp = Mat4::from_cols_array(&robot.base_pose);
             forward_kinematics(&robot.definition, &mut robot.state, bp);
             simulate_sensors_bvh(&robot.definition, &mut robot.state, scene_meshes, bvh);
@@ -348,6 +353,86 @@ mod tests {
             "default manager should have no robots"
         );
         assert!(manager.running, "default manager should be running");
+    }
+
+    /// A 1-joint arm whose link COM sits 0.5 m from the pivot (revolute about +Z) — gravity exerts
+    /// a real moment on it, unlike the COM-at-pivot factory robots.
+    fn offset_arm() -> RobotDefinition {
+        use crate::robot::definition::{
+            CollisionShape, JointDefinition, JointType, LinkDefinition,
+        };
+        RobotDefinition {
+            name: "offset_arm".to_string(),
+            links: vec![
+                LinkDefinition {
+                    name: "base".to_string(),
+                    mass: 0.0,
+                    inertia: 1.0,
+                    collision_shape: CollisionShape::Sphere { radius: 0.05 },
+                    parent_joint: None,
+                    body_zone: None,
+                },
+                LinkDefinition {
+                    name: "link".to_string(),
+                    mass: 2.0,
+                    inertia: 0.1,
+                    collision_shape: CollisionShape::Sphere { radius: 0.05 },
+                    parent_joint: Some(0),
+                    body_zone: None,
+                },
+            ],
+            joints: vec![JointDefinition {
+                name: "j0".to_string(),
+                joint_type: JointType::Revolute,
+                axis: Vec3::Z,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 100.0,
+                damping: 0.0,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::new(0.5, 0.0, 0.0),
+            }],
+            sensors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_default_gravity_is_earth() {
+        assert_eq!(RobotManager::new().gravity, DEFAULT_GRAVITY);
+        assert_eq!(DEFAULT_GRAVITY, Vec3::new(0.0, -9.81, 0.0));
+    }
+
+    #[test]
+    fn test_gravity_field_is_applied_and_configurable() {
+        // Same robot in two managers: default (Earth) gravity vs an explicitly disabled field.
+        let mut on = RobotManager::new();
+        on.add_robot(offset_arm(), Mat4::IDENTITY);
+        on.robots[0].state.actuator_commands = vec![ActuatorCommand::Torque(0.0)];
+
+        let mut off = RobotManager::new();
+        off.gravity = Vec3::ZERO;
+        off.add_robot(offset_arm(), Mat4::IDENTITY);
+        off.robots[0].state.actuator_commands = vec![ActuatorCommand::Torque(0.0)];
+
+        for _ in 0..20 {
+            on.step(0.01, &[]);
+            off.step(0.01, &[]);
+        }
+
+        // No actuator torque + no gravity ⇒ the link never moves.
+        assert!(
+            off.robots[0].state.joint_positions[0].abs() < 1e-6,
+            "gravity disabled ⇒ no motion, got {}",
+            off.robots[0].state.joint_positions[0]
+        );
+        // Default gravity swings the offset link downward — proves the field is wired & honoured.
+        assert!(
+            on.robots[0].state.joint_positions[0].abs() > 1e-3,
+            "default gravity should move the offset link, got {}",
+            on.robots[0].state.joint_positions[0]
+        );
     }
 
     #[test]
@@ -1977,16 +2062,12 @@ mod tests {
         }
 
         let dt = 1.0 / 60.0;
+        let seq_gravity = seq_manager.gravity;
         for _ in 0..10 {
-            // Sequential
+            // Sequential — mirror RobotManager::step, using the same gravity field.
             let bvh = crate::robot::collision::SceneBvh::build(&scene);
             for robot in &mut seq_manager.robots {
-                step_dynamics_with_gravity(
-                    &robot.definition,
-                    &mut robot.state,
-                    dt,
-                    DEFAULT_GRAVITY,
-                );
+                step_dynamics_with_gravity(&robot.definition, &mut robot.state, dt, seq_gravity);
                 let bp = Mat4::from_cols_array(&robot.base_pose);
                 forward_kinematics(&robot.definition, &mut robot.state, bp);
                 simulate_sensors_bvh(&robot.definition, &mut robot.state, &scene, &bvh);

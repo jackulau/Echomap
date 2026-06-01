@@ -56,6 +56,12 @@ Full keymap reference: [src/UX.md](src/UX.md).
 
 **Robotics + agents**
 - Boxing humanoid + generic n-DOF arm in the Rust simulator
+- Physics: **fixed-base articulated rigid-body dynamics** — revolute/prismatic joints driven by
+  PD/velocity/torque actuators under gravity (default `0,-9.81,0`, per-`RobotManager` configurable),
+  integrated with semi-implicit Euler + unconditionally-stable implicit damping; forward kinematics;
+  joint position/torque limits; AABB-BVH collision *detection* that feeds the combat punch model.
+  Bodies are not rigidly separated on contact (overlap is how punches land) and the base is a
+  kinematic anchor — by design; see `src/robot/` and `tests/robot_physics.rs`.
 - WebSocket protocol with `BindTarget` handshake and capability advertising
 - Python client (`echomap_client`) wraps the protocol for sim and hardware
 - Heuristic + LLM agent demos in `demos/`

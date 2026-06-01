@@ -149,8 +149,13 @@ pub fn step_dynamics_with_gravity(
         // Use child link's inertia for integration (guard against zero).
         let inertia = definition.links[joint_def.child_link].inertia.max(1e-6);
 
-        // Update velocity: v += (torque/inertia - damping*v) * dt
-        let new_velocity = velocity + (torque / inertia - joint_def.damping * velocity) * dt;
+        // Update velocity with IMPLICIT (backward-Euler) damping:
+        //   v_new = (v + (torque/inertia)·dt) / (1 + damping·dt)
+        // Treating the viscous term implicitly is unconditionally stable for any damping·dt ≥ 0.
+        // The previous explicit form `v + (τ/I − c·v)·dt` diverges once c·dt > 2; this cannot.
+        // When damping == 0 (or dt == 0) the denominator is 1, so undamped behaviour is unchanged.
+        let accel = torque / inertia;
+        let new_velocity = (velocity + accel * dt) / (1.0 + joint_def.damping * dt);
         state.joint_velocities[i] = new_velocity;
 
         // Update position: p += v * dt
@@ -707,6 +712,30 @@ mod tests {
         assert!(
             state.joint_velocities[0].abs() < 1.0,
             "high damping should reduce velocity, got {}",
+            state.joint_velocities[0]
+        );
+    }
+
+    #[test]
+    fn stiff_damping_stays_bounded() {
+        // damping·dt = 100 — far past the explicit-Euler stability limit (c·dt > 2 diverges).
+        // The implicit damping form must keep velocity finite and decaying, not blow up.
+        let def = one_joint_robot(100.0, 1000.0, -std::f32::consts::PI, std::f32::consts::PI);
+        let mut state = RobotState::new(&def);
+        state.joint_velocities[0] = 10.0;
+
+        for _ in 0..50 {
+            step_dynamics(&def, &mut state, 0.1);
+            assert!(
+                state.joint_velocities[0].is_finite(),
+                "stiff damping must not diverge, got {}",
+                state.joint_velocities[0]
+            );
+        }
+        // Velocity must have decayed well below its start, never grown.
+        assert!(
+            state.joint_velocities[0].abs() < 10.0,
+            "stiff damping should decay velocity, got {}",
             state.joint_velocities[0]
         );
     }

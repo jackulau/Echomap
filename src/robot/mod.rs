@@ -16,7 +16,7 @@ use rayon::prelude::*;
 use crate::scene::SceneObject;
 use collision::{detect_punches, detect_robot_collisions, HitEvent, SceneBvh, PUNCH_STAMINA_COST};
 use definition::RobotDefinition;
-use dynamics::step_dynamics;
+use dynamics::{step_dynamics_with_gravity, DEFAULT_GRAVITY};
 use kinematics::forward_kinematics;
 use sensors::simulate_sensors_bvh;
 use state::{ActuatorCommand, RobotState};
@@ -121,7 +121,7 @@ impl RobotManager {
 
         let bvh = self.cached_bvh.as_ref().unwrap();
         let step_one = |robot: &mut ManagedRobot| {
-            step_dynamics(&robot.definition, &mut robot.state, dt);
+            step_dynamics_with_gravity(&robot.definition, &mut robot.state, dt, DEFAULT_GRAVITY);
             let bp = Mat4::from_cols_array(&robot.base_pose);
             forward_kinematics(&robot.definition, &mut robot.state, bp);
             simulate_sensors_bvh(&robot.definition, &mut robot.state, scene_meshes, bvh);
@@ -1981,7 +1981,12 @@ mod tests {
             // Sequential
             let bvh = crate::robot::collision::SceneBvh::build(&scene);
             for robot in &mut seq_manager.robots {
-                step_dynamics(&robot.definition, &mut robot.state, dt);
+                step_dynamics_with_gravity(
+                    &robot.definition,
+                    &mut robot.state,
+                    dt,
+                    DEFAULT_GRAVITY,
+                );
                 let bp = Mat4::from_cols_array(&robot.base_pose);
                 forward_kinematics(&robot.definition, &mut robot.state, bp);
                 simulate_sensors_bvh(&robot.definition, &mut robot.state, &scene, &bvh);

@@ -1,4 +1,6 @@
-use super::definition::RobotDefinition;
+use glam::{Mat4, Vec3};
+
+use super::definition::{JointType, RobotDefinition};
 use super::state::{ActuatorCommand, RobotState};
 
 /// Default proportional gain for PD controller.
@@ -6,26 +8,130 @@ const KP: f32 = 100.0;
 /// Default derivative gain for PD controller.
 const KD: f32 = 10.0;
 
-/// Step the joint dynamics forward by `dt` seconds.
+/// Standard gravitational acceleration used by the live simulation (m/s², -Y is down).
+pub const DEFAULT_GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
+
+/// Indices of every link distal to (moved by) joint `joint_idx`, including its child link.
 ///
-/// For each joint in the definition, compute the applied torque from the
-/// corresponding actuator command in `state.actuator_commands`, then integrate
-/// velocity and position using the joint's damping and the child link's inertia.
+/// Walks the kinematic subtree rooted at the joint's child link. The robot is a tree, but the
+/// `contains` guard also makes this safe against a malformed cyclic definition.
+fn distal_links(definition: &RobotDefinition, joint_idx: usize) -> Vec<usize> {
+    let root = definition.joints[joint_idx].child_link;
+    let mut result = vec![root];
+    let mut stack = vec![root];
+    while let Some(link) = stack.pop() {
+        for jd in &definition.joints {
+            if jd.parent_link == link && !result.contains(&jd.child_link) {
+                result.push(jd.child_link);
+                stack.push(jd.child_link);
+            }
+        }
+    }
+    result
+}
+
+/// Compute the gravity-loading torque on each joint.
+///
+/// For a fixed-base articulated robot, gravity exerts a torque on each joint equal to the moment of
+/// the weight of every distal link about the joint axis. Link world poses come from the most recent
+/// forward-kinematics pass (`state.link_poses`); link origins approximate the link centres of mass
+/// (collision shapes are centred on the link origin).
+///
+/// ```text
+///   revolute:  τ_j = axis_world · Σ_{L distal to j} ( (com_L − pivot_j) × m_L·g )
+///   prismatic: f_j = axis_world · Σ_{L distal to j} ( m_L·g )
+/// ```
+///
+/// Returns one torque per joint (`0` for fixed joints, a zero/degenerate axis, or when link poses
+/// are not yet available — e.g. before the first FK pass). Returns all-zero when `gravity` is zero.
+pub fn compute_gravity_torques(
+    definition: &RobotDefinition,
+    link_poses: &[Mat4],
+    gravity: Vec3,
+) -> Vec<f32> {
+    let mut torques = vec![0.0_f32; definition.joints.len()];
+    // Need a valid world pose for every link; bail to zero if FK has not populated them yet.
+    if link_poses.len() != definition.links.len() || gravity == Vec3::ZERO {
+        return torques;
+    }
+
+    for (j, joint) in definition.joints.iter().enumerate() {
+        if joint.joint_type == JointType::Fixed {
+            continue;
+        }
+        let parent_pose = link_poses[joint.parent_link];
+        let axis_world = parent_pose
+            .transform_vector3(joint.axis)
+            .normalize_or_zero();
+        if axis_world == Vec3::ZERO {
+            continue;
+        }
+        let pivot = parent_pose.transform_point3(joint.anchor_offset);
+
+        let mut tau = 0.0_f32;
+        for &l in &distal_links(definition, j) {
+            let mass = definition.links[l].mass;
+            if mass <= 0.0 {
+                continue;
+            }
+            let weight = gravity * mass;
+            match joint.joint_type {
+                JointType::Revolute => {
+                    let com = link_poses[l].transform_point3(Vec3::ZERO);
+                    tau += axis_world.dot((com - pivot).cross(weight));
+                }
+                JointType::Prismatic => {
+                    tau += axis_world.dot(weight);
+                }
+                JointType::Fixed => {}
+            }
+        }
+        torques[j] = tau;
+    }
+    torques
+}
+
+/// Step the joint dynamics forward by `dt` seconds with **no gravity**.
+///
+/// Thin wrapper over [`step_dynamics_with_gravity`] with a zero gravity field — used by unit tests
+/// and any caller that wants pure actuator + damping behaviour. The live simulation steps under
+/// gravity via [`step_dynamics_with_gravity`].
+pub fn step_dynamics(definition: &RobotDefinition, state: &mut RobotState, dt: f32) {
+    step_dynamics_with_gravity(definition, state, dt, Vec3::ZERO);
+}
+
+/// Step the joint dynamics forward by `dt` seconds under a `gravity` field.
+///
+/// For each joint, compute the actuator torque from `state.actuator_commands`, add the external
+/// gravity-loading torque, then integrate velocity and position using the joint's damping and the
+/// child link's inertia.
 ///
 /// Actuator command modes:
 ///   - `Position(target)`: PD torque = kp*(target - position) - kd*velocity
 ///   - `Velocity(target_vel)`: P torque = kp*(target_vel - velocity)
 ///   - `Torque(t)`: direct torque = t
 ///
-/// If no actuator command exists for a joint index, zero torque is applied.
-/// Torque is clamped to `[-max_torque, max_torque]`.
+/// If no actuator command exists for a joint index, zero actuator torque is applied. The actuator
+/// torque is clamped to `[-max_torque, max_torque]`; the gravity-loading torque (see
+/// [`compute_gravity_torques`]) is added **outside** that clamp, because gravity is an external
+/// load — an actuator too weak to hold against it sags, as a real robot does. Gravity uses the link
+/// world poses from the most recent forward-kinematics pass (`state.link_poses`), i.e. with a
+/// one-step lag, which is standard for a semi-implicit scheme.
+///
 /// Position is clamped to `[limit_min, limit_max]`; velocity is zeroed at limits.
-pub fn step_dynamics(definition: &RobotDefinition, state: &mut RobotState, dt: f32) {
+pub fn step_dynamics_with_gravity(
+    definition: &RobotDefinition,
+    state: &mut RobotState,
+    dt: f32,
+    gravity: Vec3,
+) {
+    let gravity_torques = compute_gravity_torques(definition, &state.link_poses_as_mat4(), gravity);
+
     for (i, joint_def) in definition.joints.iter().enumerate() {
         let position = state.joint_positions[i];
         let velocity = state.joint_velocities[i];
 
-        // Determine raw torque from actuator command (or zero if missing).
+        // Determine raw actuator torque from the command (or zero if missing).
         let raw_torque = if i < state.actuator_commands.len() {
             match &state.actuator_commands[i] {
                 ActuatorCommand::Position(target) => KP * (target - position) - KD * velocity,
@@ -36,8 +142,9 @@ pub fn step_dynamics(definition: &RobotDefinition, state: &mut RobotState, dt: f
             0.0
         };
 
-        // Clamp torque to joint limits.
-        let torque = raw_torque.clamp(-joint_def.max_torque, joint_def.max_torque);
+        // Actuator output is clamped to its limit; gravity is an external load added on top.
+        let actuator_torque = raw_torque.clamp(-joint_def.max_torque, joint_def.max_torque);
+        let torque = actuator_torque + gravity_torques[i];
 
         // Use child link's inertia for integration (guard against zero).
         let inertia = definition.links[joint_def.child_link].inertia.max(1e-6);
@@ -67,7 +174,8 @@ mod tests {
     use crate::robot::definition::{
         CollisionShape, JointDefinition, JointType, LinkDefinition, RobotDefinition,
     };
-    use glam::Vec3;
+    use crate::robot::kinematics::forward_kinematics;
+    use glam::{Mat4, Vec3};
 
     /// Helper: create a simple 1-joint robot (base link + 1 child link).
     fn one_joint_robot(
@@ -116,6 +224,146 @@ mod tests {
             }],
             sensors: Vec::new(),
         }
+    }
+
+    /// Helper: a single-link pendulum whose child-link COM sits `length` metres from the pivot
+    /// along +X (via `child_offset`), rotating about `axis`. Used for gravity tests — unlike
+    /// [`one_joint_robot`] (COM at the pivot ⇒ zero gravity moment) this has a real lever arm.
+    fn pendulum_robot(
+        axis: Vec3,
+        length: f32,
+        mass: f32,
+        inertia: f32,
+        damping: f32,
+    ) -> RobotDefinition {
+        RobotDefinition {
+            name: "pendulum".to_string(),
+            links: vec![
+                LinkDefinition {
+                    name: "base".to_string(),
+                    mass: 0.0,
+                    inertia: 1.0,
+                    collision_shape: CollisionShape::Sphere { radius: 0.05 },
+                    parent_joint: None,
+                    body_zone: None,
+                },
+                LinkDefinition {
+                    name: "bob".to_string(),
+                    mass,
+                    inertia,
+                    collision_shape: CollisionShape::Sphere { radius: 0.05 },
+                    parent_joint: Some(0),
+                    body_zone: None,
+                },
+            ],
+            joints: vec![JointDefinition {
+                name: "pivot".to_string(),
+                joint_type: JointType::Revolute,
+                axis,
+                parent_link: 0,
+                child_link: 1,
+                limit_min: -std::f32::consts::PI,
+                limit_max: std::f32::consts::PI,
+                max_torque: 1000.0,
+                damping,
+                anchor_offset: Vec3::ZERO,
+                child_offset: Vec3::new(length, 0.0, 0.0),
+            }],
+            sensors: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn gravity_torque_is_zero_without_a_field() {
+        let def = pendulum_robot(Vec3::Z, 0.5, 2.0, 0.1, 0.0);
+        let mut state = RobotState::new(&def);
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+        let torques = compute_gravity_torques(&def, &state.link_poses_as_mat4(), Vec3::ZERO);
+        assert_eq!(torques, vec![0.0], "no gravity field ⇒ no gravity torque");
+    }
+
+    #[test]
+    fn gravity_torque_matches_analytic_for_horizontal_pendulum() {
+        // A horizontal link (COM at (L,0,0)) under gravity g about +Z has moment τ = -L·m·g.
+        let (length, mass) = (0.5_f32, 2.0_f32);
+        let def = pendulum_robot(Vec3::Z, length, mass, 0.1, 0.0);
+        let mut state = RobotState::new(&def);
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        let g = DEFAULT_GRAVITY;
+        let torques = compute_gravity_torques(&def, &state.link_poses_as_mat4(), g);
+        let expected = -length * mass * (-g.y); // -L·m·9.81
+        assert!(
+            (torques[0] - expected).abs() < 1e-4,
+            "gravity torque {} should equal analytic {}",
+            torques[0],
+            expected
+        );
+    }
+
+    #[test]
+    fn gravity_pendulum_swings_downward_from_horizontal() {
+        // Released from horizontal with no actuator torque, the bob must accelerate downward
+        // (negative rotation about +Z lowers the COM toward -Y).
+        let def = pendulum_robot(Vec3::Z, 0.5, 2.0, 0.1, 0.0);
+        let mut state = RobotState::new(&def);
+        // Isolate gravity: zero actuator torque.
+        state.actuator_commands = vec![ActuatorCommand::Torque(0.0)];
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        step_dynamics_with_gravity(&def, &mut state, 0.01, DEFAULT_GRAVITY);
+
+        assert!(
+            state.joint_velocities[0] < 0.0,
+            "pendulum should gain negative angular velocity, got {}",
+            state.joint_velocities[0]
+        );
+        assert!(
+            state.joint_positions[0] < 0.0,
+            "pendulum angle should swing negative (downward), got {}",
+            state.joint_positions[0]
+        );
+    }
+
+    #[test]
+    fn gravity_prismatic_slides_along_vertical_axis() {
+        // A prismatic joint along +Y under gravity feels force f = axis · m·g = -m·g (slides down).
+        let mass = 3.0_f32;
+        let mut def = pendulum_robot(Vec3::Y, 0.0, mass, 0.1, 0.0);
+        def.joints[0].joint_type = JointType::Prismatic;
+        let mut state = RobotState::new(&def);
+        forward_kinematics(&def, &mut state, Mat4::IDENTITY);
+
+        let torques = compute_gravity_torques(&def, &state.link_poses_as_mat4(), DEFAULT_GRAVITY);
+        let expected = mass * DEFAULT_GRAVITY.y; // negative (downward)
+        assert!(
+            (torques[0] - expected).abs() < 1e-4,
+            "prismatic gravity force {} should equal m·g_y {}",
+            torques[0],
+            expected
+        );
+        assert!(
+            torques[0] < 0.0,
+            "vertical prismatic joint should be pulled down"
+        );
+    }
+
+    #[test]
+    fn gravity_free_wrapper_matches_zero_field() {
+        // The gravity-free `step_dynamics` wrapper must equal stepping with an explicit zero field.
+        let def = pendulum_robot(Vec3::Z, 0.5, 2.0, 0.1, 0.1);
+        let mut a = RobotState::new(&def);
+        let mut b = RobotState::new(&def);
+        a.actuator_commands = vec![ActuatorCommand::Torque(0.5)];
+        b.actuator_commands = vec![ActuatorCommand::Torque(0.5)];
+        forward_kinematics(&def, &mut a, Mat4::IDENTITY);
+        forward_kinematics(&def, &mut b, Mat4::IDENTITY);
+
+        step_dynamics(&def, &mut a, 0.01);
+        step_dynamics_with_gravity(&def, &mut b, 0.01, Vec3::ZERO);
+
+        assert_eq!(a.joint_positions, b.joint_positions);
+        assert_eq!(a.joint_velocities, b.joint_velocities);
     }
 
     #[test]

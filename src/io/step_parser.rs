@@ -490,6 +490,13 @@ fn build_shell_object(
             continue;
         }
         let face_verts = resolve_face_vertices(entities, face_id, warnings);
+        if face_verts.len() < 3 {
+            warnings.push(format!(
+                "face #{face_id} resolved to {} vertex/vertices (need ≥3) — geometry dropped",
+                face_verts.len()
+            ));
+            continue;
+        }
         all_triangles.extend(triangulate_face(&face_verts));
     }
 

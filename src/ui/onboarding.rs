@@ -81,8 +81,8 @@ impl OnboardingState {
         }
     }
 
-    /// Persist the dismissed flag. Best-effort — IO failure is silent
-    /// (printed via `eprintln!`) since onboarding is non-critical state.
+    /// Persist the dismissed flag. Best-effort — IO failure is non-fatal
+    /// (logged via `log::warn!`) since onboarding is non-critical state.
     pub fn persist_dismissed(&self) {
         if !self.dismissed {
             return;
@@ -90,12 +90,12 @@ impl OnboardingState {
         let path = Self::flag_path();
         if let Some(parent) = path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
-                eprintln!("onboarding: cannot create config dir: {e}");
+                log::warn!("onboarding: cannot create config dir: {e}");
                 return;
             }
         }
         if let Err(e) = fs::write(&path, b"1") {
-            eprintln!("onboarding: cannot persist dismiss flag: {e}");
+            log::warn!("onboarding: cannot persist dismiss flag: {e}");
         }
     }
 

@@ -1,6 +1,7 @@
 use crate::scene::material::MediumProperties;
 use crate::scene::{AcousticMaterial, Triangle};
 use glam::Vec3;
+use std::collections::VecDeque;
 
 /// Hard cap on `AcousticRay::path` length. Long-running simulations would
 /// otherwise accumulate unbounded memory per ray as bounces grow.
@@ -65,7 +66,7 @@ pub struct AcousticRay {
     pub direction: Vec3,
     pub energy: [f32; 6],
     pub bounces: u32,
-    pub path: Vec<Vec3>,
+    pub path: VecDeque<Vec3>,
     pub current_medium: MediumProperties,
     pub frequency_hz: f32,
     /// Maximum number of points retained in `path`. Older points are dropped
@@ -88,7 +89,7 @@ impl AcousticRay {
             direction: direction.normalize(),
             energy: energy_uniform(energy),
             bounces: 0,
-            path: vec![origin],
+            path: VecDeque::from([origin]),
             current_medium: medium,
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -108,7 +109,7 @@ impl AcousticRay {
             direction: direction.normalize(),
             energy,
             bounces: 0,
-            path: vec![origin],
+            path: VecDeque::from([origin]),
             current_medium: medium,
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -143,11 +144,14 @@ impl AcousticRay {
 
     /// Append a point to `path`, evicting the oldest entry once
     /// `max_path_length` is reached. Keeps memory bounded over long traces.
+    /// `VecDeque` makes the eviction O(1); with `max_bounces` configurable up
+    /// to 1000 a `Vec::remove(0)` here would shift the whole buffer on every
+    /// bounce past the cap.
     pub fn push_path_point(&mut self, p: Vec3) {
         if self.path.len() >= self.max_path_length {
-            self.path.remove(0);
+            self.path.pop_front();
         }
-        self.path.push(p);
+        self.path.push_back(p);
     }
 
     pub fn intersect_triangle(&self, tri: &Triangle) -> Option<f32> {
@@ -319,7 +323,7 @@ mod tests {
             direction: Vec3::new(0.0, -1.0, 0.0),
             energy: energy_uniform(1.0),
             bounces: 0,
-            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -369,7 +373,7 @@ mod tests {
             direction: dir,
             energy: energy_uniform(1.0),
             bounces: 0,
-            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -401,7 +405,7 @@ mod tests {
             direction: dir,
             energy: energy_uniform(1.0),
             bounces: 0,
-            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -439,7 +443,7 @@ mod tests {
             direction: dir,
             energy: energy_uniform(1.0),
             bounces: 0,
-            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
             current_medium: water(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -537,7 +541,7 @@ mod tests {
             direction: dir,
             energy: energy_uniform(1.0),
             bounces: 0,
-            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -579,7 +583,7 @@ mod tests {
             direction: Vec3::new(0.0, -1.0, 0.0),
             energy: energy_uniform(1.0),
             bounces: 0,
-            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -634,7 +638,7 @@ mod tests {
                 direction: dir,
                 energy: energy_uniform(1.0),
                 bounces: 0,
-                path: vec![Vec3::new(0.0, 1.0, 0.0)],
+                path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
                 current_medium: air(),
                 frequency_hz: 1000.0,
                 max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -716,7 +720,7 @@ mod tests {
             direction: dir,
             energy: energy_uniform(1.0),
             bounces: 0,
-            path: vec![Vec3::new(0.0, 1.0, 0.0)],
+            path: VecDeque::from([Vec3::new(0.0, 1.0, 0.0)]),
             current_medium: air(),
             frequency_hz: 1000.0,
             max_path_length: DEFAULT_MAX_PATH_LENGTH,
@@ -823,7 +827,7 @@ mod tests {
 
         // Oldest points were evicted (FIFO): path should contain only the
         // most recent 5 (16..=20), not the original origin or early entries.
-        let last = ray.path.last().expect("path non-empty");
+        let last = ray.path.back().expect("path non-empty");
         assert!(
             (last.x - 20.0).abs() < 1e-6,
             "last entry should be the newest, got {last:?}"

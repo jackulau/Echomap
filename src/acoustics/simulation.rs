@@ -1,5 +1,6 @@
 use glam::Vec3;
 use rayon::prelude::*;
+use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -485,7 +486,7 @@ fn trace_all_rays_inner(
         }
         let rays = generate_sphere_rays(source.position, config.ray_count);
         for dir in rays {
-            paths.push(trace_ray_in(
+            paths.extend(trace_ray_in(
                 source.position,
                 dir,
                 source.power_db,
@@ -532,7 +533,7 @@ fn simulate_worker(
             if cancel.load(Ordering::Acquire) {
                 break 'outer;
             }
-            let path = trace_ray_cancellable(
+            let polylines = trace_ray_cancellable(
                 source.position,
                 dir,
                 source.power_db,
@@ -544,9 +545,12 @@ fn simulate_worker(
             );
             // Try to push to the UI stream; ignore disconnects (UI dropped).
             // Send is blocking when full, which is the deliberate
-            // backpressure mechanism for the bounded channel.
-            let _ = tx.send(path.clone());
-            all_paths.push(path);
+            // backpressure mechanism for the bounded channel. One send per
+            // polyline so the stream never carries cross-ray segments.
+            for polyline in &polylines {
+                let _ = tx.send(polyline.clone());
+            }
+            all_paths.extend(polylines);
             progress.fetch_add(1, Ordering::Release);
         }
     }
@@ -624,7 +628,7 @@ fn trace_ray(
     config: &SimulationConfig,
     scene: &Scene,
     background_medium: &MediumProperties,
-) -> Vec<Vec3> {
+) -> Vec<Vec<Vec3>> {
     // Thin façade over the cancellable variant. Synchronous tests don't
     // need cancellation, so they pass `None` and pay no atomic load cost.
     // No BVH passed → linear scan (kept as the brute-force baseline that
@@ -654,7 +658,7 @@ fn trace_ray_cancellable(
     background_medium: &MediumProperties,
     cancel: Option<&AtomicBool>,
     bvh: Option<&Bvh>,
-) -> Vec<Vec3> {
+) -> Vec<Vec<Vec3>> {
     trace_ray_in(
         origin,
         direction,
@@ -677,12 +681,16 @@ fn trace_ray_in(
     background_medium: &MediumProperties,
     cancel: Option<&AtomicBool>,
     bvh: Option<&Bvh>,
-) -> Vec<Vec3> {
+) -> Vec<Vec<Vec3>> {
     let initial_energy = db_to_linear(power_db);
     let mut ray = AcousticRay::new(origin, direction, initial_energy, background_medium.clone());
 
     let mut pending: Vec<AcousticRay> = Vec::new();
-    let mut all_paths: Vec<Vec3> = Vec::new();
+    // One polyline per ray in the refraction tree (parent + each transmitted
+    // branch). Kept separate so downstream consumers (energy grid windows(2),
+    // ray-path viz) never see a spurious segment joining the end of one ray's
+    // path to the start of another's.
+    let mut all_paths: Vec<Vec<Vec3>> = Vec::new();
     let mut last_cancel_check: u32 = 0;
 
     loop {
@@ -702,7 +710,7 @@ fn trace_ray_in(
                     if c.load(Ordering::Acquire) {
                         // Flush what we already have so the partial path
                         // up to the cancel point isn't lost.
-                        all_paths.extend(ray.path.iter().copied());
+                        all_paths.push(ray.path.iter().copied().collect());
                         return all_paths;
                     }
                 }
@@ -765,7 +773,7 @@ fn trace_ray_in(
                                     );
                                     transmitted_ray.bounces = ray.bounces + 1;
                                     // Carry over path context: start from hit point
-                                    transmitted_ray.path = vec![hit.point];
+                                    transmitted_ray.path = VecDeque::from([hit.point]);
                                     pending.push(transmitted_ray);
                                 }
                             }
@@ -777,7 +785,7 @@ fn trace_ray_in(
                                 ray.direction - 2.0 * ray.direction.dot(hit.normal) * hit.normal;
                             ray.direction = refl_dir.normalize();
                             ray.bounces += 1;
-                            ray.path.push(hit.point);
+                            ray.push_path_point(hit.point);
                         } else {
                             // Degenerate refraction — fall back to reflect
                             ray.reflect(&hit, &obj.material);
@@ -793,15 +801,11 @@ fn trace_ray_in(
             }
         }
 
-        // Collect this ray's path
-        all_paths.extend(ray.path.iter().copied());
+        // Collect this ray's path as its own polyline.
+        all_paths.push(std::mem::take(&mut ray.path).into_iter().collect());
 
         // Pick next pending ray, if any
         if let Some(next) = pending.pop() {
-            // Insert a NaN separator so path segments from different rays
-            // don't create spurious connections in the energy grid.
-            // Actually, we want to return a single Vec<Vec3> path for
-            // backward compat. Just extend with the pending ray's path.
             ray = next;
         } else {
             break;
@@ -1087,13 +1091,20 @@ mod tests {
                 &scene,
                 bg,
             );
-            // Each path should have at least 2 points (origin + first bounce)
-            assert!(
-                path.len() >= 2,
-                "Air-only path should have at least 2 points, got {}",
+            // Air-only scene: no medium boundaries, so the trace must yield
+            // exactly one polyline with at least 2 points (origin + bounce).
+            assert_eq!(
+                path.len(),
+                1,
+                "Air-only trace should not branch, got {} polylines",
                 path.len()
             );
-            total_bounces += path.len() - 1;
+            let points = path[0].len();
+            assert!(
+                points >= 2,
+                "Air-only path should have at least 2 points, got {points}"
+            );
+            total_bounces += points - 1;
             total_paths += 1;
         }
 
@@ -1128,9 +1139,11 @@ mod tests {
         for dir in &rays {
             let path = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
             // Paths that hit the water volume will have refracted rays contributing
-            // additional path points. We can't know exactly which rays hit water,
-            // but the total path length should generally be > 1 (at least the origin).
-            if path.len() > 1 {
+            // additional polylines/points. We can't know exactly which rays hit
+            // water, but the total point count should generally be > 1 (at least
+            // the origin).
+            let points: usize = path.iter().map(|p| p.len()).sum();
+            if points > 1 {
                 hit_water_paths += 1;
             }
         }
@@ -1140,6 +1153,49 @@ mod tests {
             hit_water_paths > 50,
             "Expected many rays to produce multi-point paths with water volume, got {}",
             hit_water_paths
+        );
+    }
+
+    /// Refraction branching must yield SEPARATE polylines — the parent
+    /// (reflected) ray's path and each transmitted branch's path. The old
+    /// flat `Vec<Vec3>` return concatenated them, creating a phantom segment
+    /// from the parent's last point to the branch's first point that smeared
+    /// energy along a line no ray ever travelled and drew a spurious line in
+    /// the ray-path debug viz.
+    #[test]
+    fn test_refraction_branch_paths_are_separate_polylines() {
+        let mut scene = air_box_scene();
+        scene.meshes.push(water_box(Vec3::new(1.5, 0.0, 1.5), 2.0));
+
+        let config = SimulationConfig {
+            ray_count: 200,
+            max_bounces: 10,
+            energy_threshold: 0.001,
+            grid_resolution: 0.5,
+        };
+        let bg = &scene.background_medium;
+        let src = &scene.sound_sources[0];
+        let rays = generate_sphere_rays(src.position, config.ray_count);
+
+        let mut branched_traces = 0;
+        for dir in &rays {
+            let polylines = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
+            for polyline in &polylines {
+                assert!(
+                    !polyline.is_empty(),
+                    "Every polyline must carry at least its starting point"
+                );
+            }
+            if polylines.len() >= 2 {
+                branched_traces += 1;
+            }
+        }
+
+        // The water box must cause at least some rays to branch into a
+        // transmitted ray — otherwise refraction tracing silently broke.
+        assert!(
+            branched_traces > 0,
+            "Expected at least one trace to branch at the water boundary"
         );
     }
 
@@ -1239,15 +1295,20 @@ mod tests {
 
         for dir in &rays {
             let path = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
-            // With max_bounces=20 and MAX_PENDING_RAYS=16, the total path points
-            // from all branches should be bounded. Each branch can produce at most
-            // max_bounces+1 points, and we have at most MAX_PENDING_RAYS+1 branches.
+            // With MAX_PENDING_RAYS=16 the branch count itself is bounded …
+            assert!(
+                path.len() <= MAX_PENDING_RAYS + 1,
+                "Polyline count {} exceeds branch bound {}",
+                path.len(),
+                MAX_PENDING_RAYS + 1
+            );
+            // … and with max_bounces=20 the total path points from all branches
+            // are bounded too: each branch produces at most max_bounces+1 points.
+            let points: usize = path.iter().map(|p| p.len()).sum();
             let upper_bound = (MAX_PENDING_RAYS + 1) * (config.max_bounces as usize + 1);
             assert!(
-                path.len() <= upper_bound,
-                "Path length {} exceeds upper bound {} (ray count not bounded)",
-                path.len(),
-                upper_bound
+                points <= upper_bound,
+                "Total path points {points} exceed upper bound {upper_bound} (ray count not bounded)"
             );
         }
     }
@@ -1308,11 +1369,12 @@ mod tests {
         let mut total_path_points = 0;
         for dir in &rays {
             let path = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
+            let points: usize = path.iter().map(|p| p.len()).sum();
             assert!(
-                path.len() >= 2,
+                points >= 2,
                 "Underwater ray should have at least 2 path points (origin + bounce)"
             );
-            total_path_points += path.len();
+            total_path_points += points;
         }
 
         // With water as background, all rays propagate in water medium.
@@ -1447,7 +1509,7 @@ mod tests {
         for dir in &rays_dirs {
             let path = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
             // Paths should exist (at least origin + first hit)
-            if path.len() >= 2 {
+            if path.iter().map(|p| p.len()).sum::<usize>() >= 2 {
                 total_paths += 1;
             }
         }
@@ -1590,7 +1652,7 @@ mod tests {
         let mut valid_paths = 0;
         for dir in &rays_dirs {
             let path = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
-            if path.len() >= 2 {
+            if path.iter().map(|p| p.len()).sum::<usize>() >= 2 {
                 valid_paths += 1;
             }
         }
@@ -1699,8 +1761,8 @@ mod tests {
                 &scene_air,
                 &scene_air.background_medium,
             );
-            helium_total_points += path_he.len();
-            air_total_points += path_air.len();
+            helium_total_points += path_he.iter().map(|p| p.len()).sum::<usize>();
+            air_total_points += path_air.iter().map(|p| p.len()).sum::<usize>();
         }
 
         // Both should produce valid paths
@@ -1887,9 +1949,9 @@ mod tests {
         let rays_dirs = generate_sphere_rays(src.position, config.ray_count);
 
         for dir in &rays_dirs {
-            let path = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
+            let paths = trace_ray(src.position, *dir, src.power_db, &config, &scene, bg);
             // All path points should be finite (no NaN/Inf from refraction math)
-            for pt in &path {
+            for pt in paths.iter().flatten() {
                 assert!(
                     pt.x.is_finite() && pt.y.is_finite() && pt.z.is_finite(),
                     "Path point should be finite: {:?}",
@@ -2129,16 +2191,25 @@ mod tests {
             assert_eq!(
                 brute.len(),
                 accel.len(),
-                "ray {i} path length differs: brute={} accel={}",
+                "ray {i} polyline count differs: brute={} accel={}",
                 brute.len(),
                 accel.len()
             );
-            for (j, (a, b)) in brute.iter().zip(accel.iter()).enumerate() {
-                let d = (*a - *b).length();
-                assert!(
-                    d < 1e-3,
-                    "ray {i} path[{j}] diverges by {d}: brute={a:?} accel={b:?}"
+            for (k, (bp, ap)) in brute.iter().zip(accel.iter()).enumerate() {
+                assert_eq!(
+                    bp.len(),
+                    ap.len(),
+                    "ray {i} polyline {k} length differs: brute={} accel={}",
+                    bp.len(),
+                    ap.len()
                 );
+                for (j, (a, b)) in bp.iter().zip(ap.iter()).enumerate() {
+                    let d = (*a - *b).length();
+                    assert!(
+                        d < 1e-3,
+                        "ray {i} polyline {k} point[{j}] diverges by {d}: brute={a:?} accel={b:?}"
+                    );
+                }
             }
             compared += 1;
         }

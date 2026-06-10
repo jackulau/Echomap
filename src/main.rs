@@ -77,7 +77,6 @@ mod app {
         test_frame_limit: Option<usize>,
         test_frames_done: std::sync::atomic::AtomicUsize,
         test_consecutive_overage: std::sync::atomic::AtomicU32,
-        #[allow(dead_code)] // wired into Settings UI in D8
         device_caps: echomap::io::DeviceCaps,
         perf_governor: echomap::renderer::PerfGovernor,
     }

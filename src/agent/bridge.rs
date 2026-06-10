@@ -447,10 +447,20 @@ impl SimBridgeClient {
 
                     // Planar base locomotion. Bridge clamps velocity and ring bounds
                     // so single-link humanoids (no leg joints) can still navigate.
+                    // Non-finite input is sanitized to 0 here as the last writer:
+                    // NaN.clamp() == NaN, so a NaN component would permanently
+                    // corrupt base_pose for any caller that skipped validation.
                     let max_speed = 2.0_f32;
                     let ring_half = 2.7_f32;
-                    let vx = action.base_velocity[0].clamp(-max_speed, max_speed);
-                    let vz = action.base_velocity[1].clamp(-max_speed, max_speed);
+                    let sanitize = |v: f32| {
+                        if v.is_finite() {
+                            v.clamp(-max_speed, max_speed)
+                        } else {
+                            0.0
+                        }
+                    };
+                    let vx = sanitize(action.base_velocity[0]);
+                    let vz = sanitize(action.base_velocity[1]);
                     let mut bp = robot.base_pose;
                     bp[12] = (bp[12] + vx * dt).clamp(-ring_half, ring_half);
                     bp[14] = (bp[14] + vz * dt).clamp(-ring_half, ring_half);

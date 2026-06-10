@@ -314,6 +314,21 @@ impl AgentSession {
             }
         }
 
+        // base_velocity is fixed-size, so it's checked regardless of whether
+        // an ActionSpace was cached. A non-finite component would otherwise
+        // reach the bridge and corrupt base_pose (NaN.clamp() == NaN).
+        for (i, v) in action.base_velocity.iter().enumerate() {
+            if !v.is_finite() {
+                let echo = serde_json::to_string(&action).ok();
+                return ServerMessage::Error {
+                    message: format!(
+                        "malformed action: base_velocity[{i}] is NaN or infinite ({v})"
+                    ),
+                    echo,
+                };
+            }
+        }
+
         match self
             .bridge
             .send_command(SimCommand::Step { robot_id, action })
@@ -1224,6 +1239,40 @@ mod tests {
                 assert!(echo.is_some());
             }
             other => panic!("expected Error, got {other:?}"),
+        }
+        handle.abort();
+    }
+
+    /// base_velocity containing NaN/inf must be rejected the same way —
+    /// it would otherwise reach the bridge where NaN.clamp() == NaN
+    /// permanently corrupts the robot's base_pose.
+    #[tokio::test]
+    async fn malformed_action_nan_base_velocity_returns_error() {
+        let (mut session, handle) = setup_test_env();
+        session
+            .handle_message(ClientMessage::Connect { robot_id: 0 })
+            .await;
+
+        for bad_component in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let bad = RobotAction {
+                motor_velocities: vec![1.0, 1.0],
+                gripper_commands: vec![],
+                base_velocity: [bad_component, 0.0],
+            };
+            let resp = session
+                .handle_message(ClientMessage::Step { action: bad })
+                .await;
+            match resp {
+                ServerMessage::Error { message, echo } => {
+                    assert!(
+                        message.contains("base_velocity"),
+                        "error must name base_velocity, got: {message}"
+                    );
+                    assert!(message.contains("NaN") || message.contains("infinite"));
+                    assert!(echo.is_some());
+                }
+                other => panic!("expected Error for {bad_component}, got {other:?}"),
+            }
         }
         handle.abort();
     }

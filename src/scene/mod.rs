@@ -2,6 +2,7 @@ pub mod history;
 pub mod material;
 mod mesh;
 pub mod primitives;
+pub mod voxel;
 
 pub use history::{History, SceneCommand};
 pub use material::{AcousticMaterial, MaterialLibrary, MediumLibrary, MediumProperties};

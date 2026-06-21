@@ -127,7 +127,7 @@ impl GasGrid {
     }
 
     /// Check whether the cell indices are within bounds.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn in_bounds(&self, i: i32, j: i32, k: i32) -> bool {
         i >= 0
             && j >= 0

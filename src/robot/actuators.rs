@@ -15,14 +15,12 @@ use crate::scene::Scene;
 /// Accelerates the joint toward `target_velocity`, clamped by `max_torque`.
 /// Each `apply` call integrates velocity and position for one timestep `dt`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct MotorActuator {
     pub joint_index: usize,
     pub target_velocity: f32,
     pub max_torque: f32,
 }
 
-#[allow(dead_code)]
 impl MotorActuator {
     /// Apply the motor to a joint for one timestep.
     ///
@@ -50,7 +48,6 @@ impl MotorActuator {
 /// When closed, the gripper checks for overlapping scene objects via AABB and
 /// attaches the nearest one. When opened, the attached object is released.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct GripperActuator {
     pub link_index: usize,
     pub is_open: bool,
@@ -58,7 +55,6 @@ pub struct GripperActuator {
     pub grip_strength: f32,
 }
 
-#[allow(dead_code)]
 impl GripperActuator {
     /// Close the gripper. If currently open, check for overlapping scene
     /// objects and attach the nearest one within range.

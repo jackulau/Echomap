@@ -1,3 +1,14 @@
+//! Surface-interaction physics: friction, scattering, wetting, permeability.
+//!
+//! Status: this subsystem is a **validated physics library**, not a live
+//! runtime feature. It is exercised by the benchmark suite (`benches/`), the
+//! scenario suite (`scenarios/surface_validation.rs`), and unit tests, but is
+//! intentionally **not yet wired into the application's runtime contact path**
+//! (`main`/UI do not consume it). The `#[allow(dead_code)]` annotations below
+//! mark that deliberate status rather than an oversight: the code is correct
+//! and tested, retained for the eventual robot-contact integration. Delete it
+//! only if that integration is ruled out.
+
 #[allow(dead_code)]
 pub mod friction;
 #[allow(dead_code)]

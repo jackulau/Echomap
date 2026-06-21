@@ -247,6 +247,12 @@ pub enum SimulationPhase {
     Complete {
         result: SimulationResult,
     },
+    /// Terminal error state. Entered when the worker thread panicked (e.g. a
+    /// NaN assertion fired mid-trace) so its result could not be recovered.
+    /// The UI degrades gracefully — it observes this via the public accessors
+    /// (`is_running()` → false, `progress()` → 0, `result()` → None) rather
+    /// than the whole process being torn down by a re-panic on `join()`.
+    Failed,
 }
 
 #[derive(Default)]
@@ -339,7 +345,17 @@ impl SimulationState {
         };
 
         if let Some(handle) = take_thread {
-            let result = handle.join().expect("simulation worker panicked");
+            let result = match handle.join() {
+                Ok(result) => result,
+                Err(_) => {
+                    // A worker panic (e.g. a NaN assertion) must not re-panic
+                    // and tear down the UI thread. Degrade to the terminal
+                    // `Failed` phase and abort the gather cleanly.
+                    log::error!("simulation worker panicked; entering Failed phase");
+                    self.phase = SimulationPhase::Failed;
+                    return true;
+                }
+            };
             // Drop any tail items still sitting on the channel — they're
             // duplicated in `result.ray_paths` so dropping is safe.
             if let SimulationPhase::Running { rx, .. } = &mut self.phase {
@@ -393,11 +409,21 @@ impl SimulationState {
         };
 
         if let Some(handle) = take_thread {
-            let result = handle.join().expect("simulation worker panicked");
-            if let SimulationPhase::Running { rx, .. } = &mut self.phase {
-                while rx.try_recv().is_ok() {}
+            match handle.join() {
+                Ok(result) => {
+                    if let SimulationPhase::Running { rx, .. } = &mut self.phase {
+                        while rx.try_recv().is_ok() {}
+                    }
+                    self.phase = SimulationPhase::Complete { result };
+                }
+                Err(_) => {
+                    // A worker panic must not re-panic on the UI thread. Move
+                    // to the terminal `Failed` phase so the UI can reflect the
+                    // failure instead of the process aborting.
+                    log::error!("simulation worker panicked; entering Failed phase");
+                    self.phase = SimulationPhase::Failed;
+                }
             }
-            self.phase = SimulationPhase::Complete { result };
             new_paths = true;
         }
 
@@ -414,6 +440,7 @@ impl SimulationState {
     pub fn progress(&self) -> f32 {
         match &self.phase {
             SimulationPhase::Idle => 0.0,
+            SimulationPhase::Failed => 0.0,
             SimulationPhase::Complete { .. } => 1.0,
             SimulationPhase::Running {
                 progress,
@@ -443,6 +470,7 @@ impl SimulationState {
             SimulationPhase::Running { partial_paths, .. } => partial_paths,
             SimulationPhase::Complete { result } => &result.ray_paths,
             SimulationPhase::Idle => &[],
+            SimulationPhase::Failed => &[],
         }
     }
 
@@ -948,7 +976,14 @@ fn compute_point_energy(point: Vec3, radius: f32, ray_paths: &[Vec<Vec3>]) -> En
 
 fn closest_point_on_segment(a: Vec3, b: Vec3, p: Vec3) -> Vec3 {
     let ab = b - a;
-    let t = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+    // A degenerate zero-length segment (a == b) would make this 0/0 = NaN and
+    // poison the energy accumulation downstream. The closest point on a
+    // single-point "segment" is just that point.
+    let len_sq = ab.length_squared();
+    if len_sq <= 0.0 {
+        return a;
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
     a + ab * t
 }
 

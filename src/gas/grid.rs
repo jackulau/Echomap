@@ -70,6 +70,12 @@ impl GasGrid {
             nx <= MAX_DIM && ny <= MAX_DIM && nz <= MAX_DIM,
             "Grid dimensions must be <= {MAX_DIM}"
         );
+        // dx <= 0 (or non-finite) floods every field with NaN, and the CFL stability clamp can't
+        // catch it because `NaN.min(x) == x`. Reject it at construction.
+        assert!(
+            dx.is_finite() && dx > 0.0,
+            "grid dx must be finite and > 0, got {dx}"
+        );
 
         let cell_count = nx * ny * nz;
         let num_species = species.len();
@@ -630,5 +636,20 @@ mod tests {
             (t - 50.0).abs() < 1e-2,
             "Temperature midpoint should interpolate to 50, got {t}"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "grid dx must be finite and > 0")]
+    fn test_gas_grid_zero_dx_rejected() {
+        // dx=0 would flood every field with NaN; construction must reject it up front.
+        let species = vec![make_species("Air")];
+        GasGrid::new(2, 2, 2, 0.0, Vec3::ZERO, species);
+    }
+
+    #[test]
+    #[should_panic(expected = "grid dx must be finite and > 0")]
+    fn test_gas_grid_negative_dx_rejected() {
+        let species = vec![make_species("Air")];
+        GasGrid::new(2, 2, 2, -1.0, Vec3::ZERO, species);
     }
 }

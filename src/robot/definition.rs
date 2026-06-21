@@ -113,6 +113,62 @@ pub struct RobotDefinition {
 }
 
 impl RobotDefinition {
+    /// Validate that every link/joint index reference is in range.
+    ///
+    /// `RobotDefinition` is routinely deserialized from untrusted JSON, then its raw `usize` index
+    /// fields (`joint.parent_link`, `joint.child_link`, `link.parent_joint`, `sensor.link_index`)
+    /// are used to index directly into `state.link_poses` / `links` / `joints` by the forward-
+    /// kinematics and dynamics passes that run every frame. An out-of-range index there is an
+    /// index-out-of-bounds panic. Call this at every load boundary so a malformed definition is
+    /// rejected gracefully instead of panicking later.
+    ///
+    /// Returns `Err` with a message naming the offending field/index if any reference is out of
+    /// range, or if `links` is empty (every robot needs at least a base link).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.links.is_empty() {
+            return Err("RobotDefinition has no links (need at least a base link)".to_string());
+        }
+        let num_links = self.links.len();
+        let num_joints = self.joints.len();
+
+        for (i, joint) in self.joints.iter().enumerate() {
+            if joint.parent_link >= num_links {
+                return Err(format!(
+                    "joint {} ('{}') parent_link {} out of range (links.len() = {})",
+                    i, joint.name, joint.parent_link, num_links
+                ));
+            }
+            if joint.child_link >= num_links {
+                return Err(format!(
+                    "joint {} ('{}') child_link {} out of range (links.len() = {})",
+                    i, joint.name, joint.child_link, num_links
+                ));
+            }
+        }
+
+        for (i, link) in self.links.iter().enumerate() {
+            if let Some(pj) = link.parent_joint {
+                if pj >= num_joints {
+                    return Err(format!(
+                        "link {} ('{}') parent_joint {} out of range (joints.len() = {})",
+                        i, link.name, pj, num_joints
+                    ));
+                }
+            }
+        }
+
+        for (i, mount) in self.sensors.iter().enumerate() {
+            if mount.link_index >= num_links {
+                return Err(format!(
+                    "sensor mount {} link_index {} out of range (links.len() = {})",
+                    i, mount.link_index, num_links
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Factory method for a basic serial manipulator arm.
     ///
     /// Creates `num_joints + 1` links connected by `num_joints` revolute joints
@@ -574,5 +630,51 @@ mod tests {
                 other
             ),
         }
+    }
+
+    #[test]
+    fn test_validate_accepts_factory_definitions() {
+        // Factory-built robots must pass validation.
+        assert!(RobotDefinition::simple_arm(3).validate().is_ok());
+        assert!(RobotDefinition::boxing_test_robot().validate().is_ok());
+        assert!(RobotDefinition::boxing_humanoid().validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_child_link() {
+        // A joint whose child_link indexes past the end of `links` would panic in FK/dynamics.
+        let mut def = RobotDefinition::simple_arm(1);
+        def.joints[0].child_link = 99; // out of range (only 2 links)
+        let result = def.validate();
+        assert!(
+            result.is_err(),
+            "validate() must reject out-of-range child_link"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("child_link") && msg.contains("99"),
+            "error should name the bad field and index, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_out_of_range_parent_link() {
+        let mut def = RobotDefinition::simple_arm(1);
+        def.joints[0].parent_link = 7;
+        assert!(def.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_links() {
+        let def = RobotDefinition {
+            name: "empty".to_string(),
+            links: vec![],
+            joints: vec![],
+            sensors: vec![],
+        };
+        assert!(
+            def.validate().is_err(),
+            "validate() must reject a definition with no links"
+        );
     }
 }

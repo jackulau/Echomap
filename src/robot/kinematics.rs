@@ -81,7 +81,17 @@ pub fn compute_forward_kinematics(robot: &Robot) -> Vec<LinkTransform> {
 /// - Fixed: identity transform.
 pub fn compute_joint_transform(joint: &JointDefinition, position: f32) -> Mat4 {
     match joint.joint_type {
-        DefJointType::Revolute => Mat4::from_axis_angle(joint.axis, position),
+        DefJointType::Revolute => {
+            // A zero-length axis is schema-allowed but `Mat4::from_axis_angle` would normalize it
+            // to NaN, poisoning every downstream pose. A zero axis means "no rotation" — use
+            // identity. Mirrors the `normalize_or_zero` guard in `dynamics::compute_gravity_torques`.
+            let axis = joint.axis.normalize_or_zero();
+            if axis == Vec3::ZERO {
+                Mat4::IDENTITY
+            } else {
+                Mat4::from_axis_angle(axis, position)
+            }
+        }
         DefJointType::Prismatic => Mat4::from_translation(joint.axis * position),
         DefJointType::Fixed => Mat4::IDENTITY,
     }
@@ -693,11 +703,22 @@ mod tests {
         state.joint_positions[0] = 1.0;
         forward_kinematics(&def, &mut state, Mat4::IDENTITY);
 
-        // Zero axis rotation should produce NaN-free result
-        let child_pose = Mat4::from_cols_array(&state.link_poses[1]);
-        let pos = mat4_translation(&child_pose);
-        // glam from_axis_angle with zero axis may produce NaN, but shouldn't crash
-        let _ = pos;
+        // A zero-length axis means "no rotation": every element of the child pose must be finite
+        // (no NaN poisoning) and, with zero offsets, the child pose equals the identity base pose.
+        let child_pose = state.link_poses[1];
+        for (j, &v) in child_pose.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "zero-axis joint must not produce NaN/Inf in child pose element {j}, got {v}"
+            );
+        }
+        let identity = Mat4::IDENTITY.to_cols_array();
+        for (a, b) in child_pose.iter().zip(identity.iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "zero-axis (no rotation) child pose should equal identity"
+            );
+        }
     }
 
     #[test]

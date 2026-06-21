@@ -67,6 +67,12 @@ impl FluidGrid {
             nx <= MAX_DIM && ny <= MAX_DIM && nz <= MAX_DIM,
             "Grid dimensions must be <= {MAX_DIM}"
         );
+        // dx <= 0 (or non-finite) floods every field with NaN, and the CFL stability clamp can't
+        // catch it because `NaN.min(x) == x`. Reject it at construction.
+        assert!(
+            dx.is_finite() && dx > 0.0,
+            "grid dx must be finite and > 0, got {dx}"
+        );
 
         let cell_count = nx * ny * nz;
 
@@ -706,16 +712,20 @@ mod tests {
         assert!(c.x.is_finite() && c.y.is_finite() && c.z.is_finite());
     }
 
-    // --- dx = 0.0 (division by zero in interpolation) ---
+    // --- dx = 0.0 (degenerate cell size) is rejected at construction ---
 
     #[test]
-    fn test_grid_zero_dx_velocity_at() {
-        // dx=0 is degenerate; velocity_at divides by dx.
-        // Verify it produces NaN/Inf but does not panic.
-        let g = FluidGrid::new(2, 2, 2, 0.0, Vec3::ZERO);
-        let vel = g.velocity_at(Vec3::new(0.5, 0.5, 0.5));
-        // With dx=0, division produces NaN. We just confirm no panic.
-        let _ = vel;
+    #[should_panic(expected = "grid dx must be finite and > 0")]
+    fn test_grid_zero_dx_rejected() {
+        // dx=0 would flood every field with NaN (and the CFL clamp can't catch it because
+        // NaN.min(x) == x), so construction must reject it up front.
+        FluidGrid::new(2, 2, 2, 0.0, Vec3::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "grid dx must be finite and > 0")]
+    fn test_grid_negative_dx_rejected() {
+        FluidGrid::new(2, 2, 2, -0.1, Vec3::ZERO);
     }
 
     // --- in_bounds extreme negative values ---

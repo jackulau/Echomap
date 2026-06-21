@@ -431,6 +431,14 @@ impl SimBridgeClient {
                 definition,
                 base_pose,
             } => {
+                // Reject a malformed definition (out-of-range link/joint indices, no links)
+                // up front: those indices are used unchecked by FK/dynamics every frame and
+                // would otherwise panic the simulation thread.
+                if let Err(message) = definition.validate() {
+                    return SimResponse::Error {
+                        message: format!("invalid robot definition: {message}"),
+                    };
+                }
                 let pose = Mat4::from_cols_array(&base_pose);
                 let robot_id = manager.add_robot(definition, pose);
                 // Ensure step_counts vector is large enough.

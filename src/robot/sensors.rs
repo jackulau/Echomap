@@ -20,14 +20,12 @@ use crate::scene::{Scene, SceneObject};
 /// into world frame) and returns the distance to the nearest scene-mesh hit,
 /// or `max_range` when nothing is in the path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct DistanceSensor {
     pub link_index: usize,
     pub local_direction: Vec3,
     pub max_range: f32,
 }
 
-#[allow(dead_code)]
 impl DistanceSensor {
     /// Read the sensor against the given scene.
     ///
@@ -54,12 +52,10 @@ impl DistanceSensor {
 
 /// Contact sensor that checks whether a link's AABB overlaps any scene object.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct ContactSensor {
     pub link_index: usize,
 }
 
-#[allow(dead_code)]
 impl ContactSensor {
     /// Returns `true` if the link's world-space AABB overlaps any scene mesh
     /// AABB.
@@ -97,7 +93,6 @@ fn aabb_from_mesh_vertices(mesh: &crate::scene::Mesh) -> Aabb {
 /// Inertial measurement unit that tracks linear acceleration and angular
 /// velocity of a link by differencing positions across calls.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct ImuSensor {
     pub link_index: usize,
     pub prev_velocity: Vec3,
@@ -112,13 +107,11 @@ pub struct ImuSensor {
 
 /// A single IMU reading.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct ImuReading {
     pub linear_acceleration: Vec3,
     pub angular_velocity: Vec3,
 }
 
-#[allow(dead_code)]
 impl ImuSensor {
     /// Create a new IMU sensor attached to `link_index`.
     pub fn new(link_index: usize) -> Self {
@@ -194,7 +187,6 @@ impl ImuSensor {
 /// least one mesh vertex within the cone (angle from look direction < fov/2
 /// and distance < max_range).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct CameraFrustum {
     pub link_index: usize,
     pub fov_radians: f32,
@@ -202,7 +194,6 @@ pub struct CameraFrustum {
     pub local_direction: Vec3,
 }
 
-#[allow(dead_code)]
 impl CameraFrustum {
     /// Return indices of scene objects that have at least one vertex inside the
     /// camera's frustum cone.
@@ -265,7 +256,6 @@ impl CameraFrustum {
 /// Uses `link_poses[mount.link_index]` (stored as `[f32; 16]`) to transform
 /// the sensor's `local_offset` into world position and the sensor's local
 /// direction into world direction.
-#[allow(dead_code)]
 pub fn sensor_world_pose(mount: &SensorMount, state: &RobotState) -> (Vec3, Vec3) {
     let link_mat = Mat4::from_cols_array(&state.link_poses[mount.link_index]);
 
@@ -304,7 +294,6 @@ pub fn sensor_world_pose(mount: &SensorMount, state: &RobotState) -> (Vec3, Vec3
 ///   collision shape radius of the link.
 /// - **IMU**: `linear_accel` = gravity `(0, -9.81, 0)`, `angular_vel` = sum
 ///   of ancestor joint velocities times their axes.
-#[allow(dead_code)]
 pub fn simulate_sensors(
     definition: &RobotDefinition,
     state: &mut RobotState,

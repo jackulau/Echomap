@@ -21,7 +21,6 @@ pub struct HitEvent {
 
 /// Result of a ray intersection test.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct RayHit {
     pub distance: f32,
     pub point: Vec3,
@@ -30,7 +29,6 @@ pub struct RayHit {
 
 /// Axis-aligned bounding box.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct Aabb {
     pub center: Vec3,
     pub half_extents: Vec3,
@@ -40,7 +38,6 @@ pub struct Aabb {
 ///
 /// Returns `None` for zero-length direction, degenerate triangles, parallel
 /// rays, and rays that miss the triangle. Hits both front and back faces.
-#[allow(dead_code)]
 pub fn ray_triangle_intersect(
     origin: Vec3,
     direction: Vec3,
@@ -99,7 +96,6 @@ pub fn ray_triangle_intersect(
 
 /// Cast a ray against all scene mesh triangles, returning the nearest hit
 /// within `max_distance`.
-#[allow(dead_code)]
 pub fn ray_scene_cast(
     origin: Vec3,
     direction: Vec3,
@@ -132,7 +128,6 @@ pub fn ray_scene_cast(
 ///
 /// Two AABBs overlap when their projections overlap on all three axes.
 /// Touching edges (distance == 0) counts as overlapping.
-#[allow(dead_code)]
 pub fn aabb_overlap(a: &Aabb, b: &Aabb) -> bool {
     let diff = (a.center - b.center).abs();
     let sum = a.half_extents + b.half_extents;
@@ -145,7 +140,6 @@ pub fn aabb_overlap(a: &Aabb, b: &Aabb) -> bool {
 ///
 /// The expanded half-extents are computed by taking the absolute values of each
 /// column of the 3x3 rotation matrix, scaled by the local half-extents.
-#[allow(dead_code)]
 pub fn aabb_from_link(link_world_pos: Vec3, link_world_rot: Quat, half_extents: Vec3) -> Aabb {
     let rot = Mat3::from_quat(link_world_rot);
 
@@ -173,7 +167,6 @@ pub fn aabb_from_link(link_world_pos: Vec3, link_world_rot: Quat, half_extents: 
 // ---------------------------------------------------------------------------
 
 /// Convert a CollisionShape to AABB half-extents.
-#[allow(dead_code)]
 pub fn collision_shape_to_half_extents(shape: &CollisionShape) -> Vec3 {
     match shape {
         CollisionShape::Sphere { radius } => Vec3::splat(*radius),
@@ -184,7 +177,6 @@ pub fn collision_shape_to_half_extents(shape: &CollisionShape) -> Vec3 {
 
 /// A collision contact between two links on different robots.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct LinkCollision {
     pub robot_a: usize,
     pub link_a: usize,
@@ -198,7 +190,6 @@ pub struct LinkCollision {
 /// Collect world-space AABBs for every link in a robot.
 ///
 /// Returns a Vec of `(link_index, Aabb)` pairs.
-#[allow(dead_code)]
 pub fn collect_link_aabbs(definition: &RobotDefinition, state: &RobotState) -> Vec<(usize, Aabb)> {
     definition
         .links
@@ -219,7 +210,6 @@ pub fn collect_link_aabbs(definition: &RobotDefinition, state: &RobotState) -> V
 ///
 /// For each pair of robots (i < j), checks every link-link pair for AABB
 /// overlap and produces a `LinkCollision` for each overlapping pair.
-#[allow(dead_code)]
 pub fn detect_robot_collisions(
     robots: &[(usize, &RobotDefinition, &RobotState)],
 ) -> Vec<LinkCollision> {
@@ -288,7 +278,6 @@ pub const PUNCH_STAMINA_COST: f32 = 10.0;
 /// For every collision where the attacker link's velocity exceeds
 /// [`PUNCH_VELOCITY_THRESHOLD`], a [`HitEvent`] is emitted provided the target
 /// link has a `body_zone` assigned (links without a zone produce no damage).
-#[allow(dead_code)]
 pub fn detect_punches(
     collisions: &[LinkCollision],
     robots: &[(usize, &RobotDefinition, &RobotState, &[Vec3])],

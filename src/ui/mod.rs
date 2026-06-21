@@ -695,14 +695,20 @@ pub fn menu_bar(
                     .on_hover_text("Add a new omnidirectional source at the origin")
                     .clicked()
                 {
-                    let _ = vp.history.push(
-                        SceneCommand::InsertSource {
-                            idx: scene.sound_sources.len(),
-                            src: SoundSource::default(),
-                        },
-                        scene,
-                    );
-                    vp.selection = Selection::Source(scene.sound_sources.len() - 1);
+                    let idx = scene.sound_sources.len();
+                    if vp
+                        .history
+                        .push(
+                            SceneCommand::InsertSource {
+                                idx,
+                                src: SoundSource::default(),
+                            },
+                            scene,
+                        )
+                        .is_ok()
+                    {
+                        vp.selection = Selection::Source(idx);
+                    }
                     ui.close_menu();
                 }
                 if ui
@@ -715,14 +721,14 @@ pub fn menu_bar(
                         name: format!("Listener {n}"),
                         ..Default::default()
                     };
-                    let _ = vp.history.push(
-                        SceneCommand::InsertListener {
-                            idx: scene.listeners.len(),
-                            listener,
-                        },
-                        scene,
-                    );
-                    vp.selection = Selection::Listener(scene.listeners.len() - 1);
+                    let idx = scene.listeners.len();
+                    if vp
+                        .history
+                        .push(SceneCommand::InsertListener { idx, listener }, scene)
+                        .is_ok()
+                    {
+                        vp.selection = Selection::Listener(idx);
+                    }
                     ui.close_menu();
                 }
             });
@@ -3085,14 +3091,14 @@ pub fn viewport_3d(
                                     position: Vec3::new(gp.x, 1.0, gp.z),
                                     ..Default::default()
                                 };
-                                let _ = vp.history.push(
-                                    SceneCommand::InsertSource {
-                                        idx: scene.sound_sources.len(),
-                                        src,
-                                    },
-                                    scene,
-                                );
-                                vp.selection = Selection::Source(scene.sound_sources.len() - 1);
+                                let idx = scene.sound_sources.len();
+                                if vp
+                                    .history
+                                    .push(SceneCommand::InsertSource { idx, src }, scene)
+                                    .is_ok()
+                                {
+                                    vp.selection = Selection::Source(idx);
+                                }
                             }
                         }
                         InteractionMode::PlaceListener => {
@@ -3103,14 +3109,14 @@ pub fn viewport_3d(
                                     name: format!("Listener {n}"),
                                     ..Listener::default()
                                 };
-                                let _ = vp.history.push(
-                                    SceneCommand::InsertListener {
-                                        idx: scene.listeners.len(),
-                                        listener,
-                                    },
-                                    scene,
-                                );
-                                vp.selection = Selection::Listener(scene.listeners.len() - 1);
+                                let idx = scene.listeners.len();
+                                if vp
+                                    .history
+                                    .push(SceneCommand::InsertListener { idx, listener }, scene)
+                                    .is_ok()
+                                {
+                                    vp.selection = Selection::Listener(idx);
+                                }
                             }
                         }
                     }
@@ -3237,14 +3243,21 @@ pub fn viewport_3d(
                 } else {
                     base_color
                 };
+                // Batch the whole mesh into one closed-path outline per
+                // triangle and submit with a single `extend`. This emits one
+                // shape per triangle instead of three separate line segments
+                // (3N → N clipped shapes), and a closed path tessellates as a
+                // single stroke with shared corner joins rather than three
+                // independent feathered segments.
+                let stroke = egui::Stroke::new(stroke_width, color);
+                let mut shapes: Vec<egui::Shape> = Vec::with_capacity(obj.mesh.triangles.len());
                 for tri in &obj.mesh.triangles {
                     let p0 = project_3d(tri.vertices[0].position, cam, center, scale);
                     let p1 = project_3d(tri.vertices[1].position, cam, center, scale);
                     let p2 = project_3d(tri.vertices[2].position, cam, center, scale);
-                    painter.line_segment([p0, p1], egui::Stroke::new(stroke_width, color));
-                    painter.line_segment([p1, p2], egui::Stroke::new(stroke_width, color));
-                    painter.line_segment([p2, p0], egui::Stroke::new(stroke_width, color));
+                    shapes.push(egui::Shape::closed_line(vec![p0, p1, p2], stroke));
                 }
+                painter.extend(shapes);
             }
         }
 
@@ -4308,14 +4321,20 @@ fn dispatch_palette_action(action: PaletteAction, scene: &mut Scene, vp: &mut Vi
         SetMode(m) => vp.mode = m,
 
         AddSource => {
-            let _ = vp.history.push(
-                SceneCommand::InsertSource {
-                    idx: scene.sound_sources.len(),
-                    src: SoundSource::default(),
-                },
-                scene,
-            );
-            vp.selection = Selection::Source(scene.sound_sources.len() - 1);
+            let idx = scene.sound_sources.len();
+            if vp
+                .history
+                .push(
+                    SceneCommand::InsertSource {
+                        idx,
+                        src: SoundSource::default(),
+                    },
+                    scene,
+                )
+                .is_ok()
+            {
+                vp.selection = Selection::Source(idx);
+            }
         }
         AddListener => {
             let n = scene.listeners.len() + 1;
@@ -4323,14 +4342,14 @@ fn dispatch_palette_action(action: PaletteAction, scene: &mut Scene, vp: &mut Vi
                 name: format!("Listener {n}"),
                 ..Default::default()
             };
-            let _ = vp.history.push(
-                SceneCommand::InsertListener {
-                    idx: scene.listeners.len(),
-                    listener,
-                },
-                scene,
-            );
-            vp.selection = Selection::Listener(scene.listeners.len() - 1);
+            let idx = scene.listeners.len();
+            if vp
+                .history
+                .push(SceneCommand::InsertListener { idx, listener }, scene)
+                .is_ok()
+            {
+                vp.selection = Selection::Listener(idx);
+            }
         }
         AddPartitionWall => {
             let obj =
@@ -5508,8 +5527,18 @@ fn render_contact_arrows(
     let detect_radius = contact_radius * 1.5;
     let arrow_color = egui::Color32::from_rgb(255, 80, 60);
 
+    let detect_radius_sq = detect_radius * detect_radius;
     for obj in &scene.meshes {
         if !obj.visible {
+            continue;
+        }
+        // Whole-mesh reject: if the link's detection sphere does not reach the
+        // mesh AABB, no triangle can produce a contact arrow — skip the entire
+        // triangle scan. Turns the per-frame cost from O(triangles) into
+        // O(meshes) for the common case where links are far from most geometry.
+        let (mn, mx) = obj.mesh.bounds();
+        let closest = link_pos.clamp(mn, mx);
+        if (link_pos - closest).length_squared() > detect_radius_sq {
             continue;
         }
         for tri in &obj.mesh.triangles {
@@ -5691,7 +5720,9 @@ fn render_gas_displacement(
     // Sample 3x3x3 neighborhood and compute average concentration.
     let mut sum = 0.0_f32;
     let mut count = 0_u32;
-    let mut cells: Vec<(usize, usize, usize)> = Vec::new();
+    // 3x3x3 neighborhood — exactly 27 cells upper-bound, so pre-size to avoid
+    // reallocations as the sampled cells are collected each frame.
+    let mut cells: Vec<(usize, usize, usize)> = Vec::with_capacity(27);
 
     for di in -1..=1 {
         for dj in -1..=1 {

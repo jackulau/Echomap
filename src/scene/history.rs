@@ -302,7 +302,14 @@ impl History {
     /// If `apply` fails (stale index), the command is dropped and no state
     /// changes. Returns the error so the caller can surface it.
     pub fn push(&mut self, cmd: SceneCommand, scene: &mut Scene) -> Result<(), HistoryError> {
-        cmd.apply(scene)?;
+        if let Err(e) = cmd.apply(scene) {
+            // The command targets an index that no longer exists (the scene was
+            // mutated behind the history's back). The scene is unchanged; log so
+            // the dropped edit is never silently swallowed, and surface the
+            // error to the caller.
+            log::warn!("scene edit dropped — stale target index: {e:?}");
+            return Err(e);
+        }
         self.past.push(cmd);
         if self.past.len() > self.capacity {
             self.past.remove(0);

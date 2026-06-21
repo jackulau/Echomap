@@ -1,52 +1,21 @@
-use glam::Vec3;
-
 use super::grid::{CellType, FluidGrid};
+use crate::scene::voxel::voxelize_meshes;
 use crate::scene::SceneObject;
 
 /// Mark grid cells overlapping solid scene meshes as `CellType::Solid` using
 /// AABB intersection between each mesh's bounding box and each grid cell.
+///
+/// Thin wrapper over the shared `scene::voxel::voxelize_meshes` geometry core.
 pub fn voxelize_scene(grid: &mut FluidGrid, meshes: &[SceneObject]) {
-    for obj in meshes {
-        if obj.mesh.triangles.is_empty() {
-            continue;
-        }
-        let (mesh_min, mesh_max) = obj.mesh.bounds();
-
-        // Determine the range of grid cells that could overlap the mesh AABB.
-        let rel_min = mesh_min - grid.origin;
-        let rel_max = mesh_max - grid.origin;
-
-        let i_start = ((rel_min.x / grid.dx).floor() as i32).max(0) as usize;
-        let j_start = ((rel_min.y / grid.dx).floor() as i32).max(0) as usize;
-        let k_start = ((rel_min.z / grid.dx).floor() as i32).max(0) as usize;
-
-        let i_end = ((rel_max.x / grid.dx).ceil() as usize).min(grid.nx);
-        let j_end = ((rel_max.y / grid.dx).ceil() as usize).min(grid.ny);
-        let k_end = ((rel_max.z / grid.dx).ceil() as usize).min(grid.nz);
-
-        for k in k_start..k_end {
-            for j in j_start..j_end {
-                for i in i_start..i_end {
-                    // Cell AABB
-                    let cell_min = grid.origin
-                        + Vec3::new(i as f32 * grid.dx, j as f32 * grid.dx, k as f32 * grid.dx);
-                    let cell_max = cell_min + Vec3::splat(grid.dx);
-
-                    // AABB-AABB overlap test
-                    if cell_min.x < mesh_max.x
-                        && cell_max.x > mesh_min.x
-                        && cell_min.y < mesh_max.y
-                        && cell_max.y > mesh_min.y
-                        && cell_min.z < mesh_max.z
-                        && cell_max.z > mesh_min.z
-                    {
-                        let idx = grid.idx(i, j, k);
-                        grid.cell_types[idx] = CellType::Solid;
-                    }
-                }
-            }
-        }
-    }
+    voxelize_meshes(
+        grid.origin,
+        grid.dx,
+        grid.nx,
+        grid.ny,
+        grid.nz,
+        meshes,
+        |idx| grid.cell_types[idx] = CellType::Solid,
+    );
 }
 
 /// Enforce no-slip boundary conditions at solid boundaries.
@@ -363,6 +332,7 @@ mod tests {
     use crate::scene::material::AcousticMaterial;
     use crate::scene::SceneObject;
     use crate::scene::{Mesh, Triangle, Vertex};
+    use glam::Vec3;
 
     /// Create a box mesh from (min) to (max) as 12 triangles.
     fn box_mesh(min: Vec3, max: Vec3) -> Mesh {

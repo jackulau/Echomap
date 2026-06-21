@@ -127,6 +127,64 @@ pub fn advect_temperature(grid: &mut GasGrid, dt: f32) {
 // Fickian diffusion (explicit forward-Euler)
 // ---------------------------------------------------------------------------
 
+/// Explicit forward-Euler diffusion of a single scalar field over the Gas
+/// cells of the grid.
+///
+/// Reads old values from `src`, writes new values into `dst` (which must be
+/// the same length as `src`). Non-`Gas` cells copy their old value through
+/// unchanged. The 7-point Laplacian uses zero-flux (Neumann) boundaries —
+/// out-of-range neighbours fall back to the cell's own value. Cell updates are
+/// independent — parallelized with rayon across the flat cell index.
+///
+/// `dims` is `(nx, ny, nz)`; `factor` is the pre-clamped stability coefficient
+/// `D * dt / dx²`. Shared by `diffuse_concentrations` and `diffuse_temperature`
+/// so both use a bit-identical stencil.
+fn diffuse_scalar_field(
+    src: &[f32],
+    dst: &mut [f32],
+    dims: (usize, usize, usize),
+    cell_types: &[GasCellType],
+    factor: f32,
+) {
+    let (nx, ny, nz) = dims;
+    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
+
+    dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
+        if cell_types[idx] != GasCellType::Gas {
+            *out = src[idx];
+            return;
+        }
+
+        let k = idx / (nx * ny);
+        let rem = idx - k * nx * ny;
+        let j = rem / nx;
+        let i = rem - j * nx;
+
+        let c = src[idx];
+        let xm = if i > 0 { src[idx_of(i - 1, j, k)] } else { c };
+        let xp = if i < nx - 1 {
+            src[idx_of(i + 1, j, k)]
+        } else {
+            c
+        };
+        let ym = if j > 0 { src[idx_of(i, j - 1, k)] } else { c };
+        let yp = if j < ny - 1 {
+            src[idx_of(i, j + 1, k)]
+        } else {
+            c
+        };
+        let zm = if k > 0 { src[idx_of(i, j, k - 1)] } else { c };
+        let zp = if k < nz - 1 {
+            src[idx_of(i, j, k + 1)]
+        } else {
+            c
+        };
+
+        let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
+        *out = c + factor * laplacian;
+    });
+}
+
 /// Explicit Fickian diffusion for all species concentration fields.
 ///
 /// Each species uses its own `diffusion_coefficient`. The stability factor
@@ -140,8 +198,6 @@ pub fn diffuse_concentrations(grid: &mut GasGrid, dt: f32) {
     let dx = grid.dx;
     let cell_count = nx * ny * nz;
     let num_species = grid.species.len();
-
-    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
 
     // Ensure scratch buffer is right-sized (lazy migration for grids built
     // before scratch_scalar existed).
@@ -165,40 +221,7 @@ pub fn diffuse_concentrations(grid: &mut GasGrid, dt: f32) {
         let cell_types_ref = &grid.cell_types;
         let dst: &mut [f32] = &mut grid.concentrations[s];
 
-        dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
-            if cell_types_ref[idx] != GasCellType::Gas {
-                *out = old[idx];
-                return;
-            }
-
-            let k = idx / (nx * ny);
-            let rem = idx - k * nx * ny;
-            let j = rem / nx;
-            let i = rem - j * nx;
-
-            let c = old[idx];
-            let xm = if i > 0 { old[idx_of(i - 1, j, k)] } else { c };
-            let xp = if i < nx - 1 {
-                old[idx_of(i + 1, j, k)]
-            } else {
-                c
-            };
-            let ym = if j > 0 { old[idx_of(i, j - 1, k)] } else { c };
-            let yp = if j < ny - 1 {
-                old[idx_of(i, j + 1, k)]
-            } else {
-                c
-            };
-            let zm = if k > 0 { old[idx_of(i, j, k - 1)] } else { c };
-            let zp = if k < nz - 1 {
-                old[idx_of(i, j, k + 1)]
-            } else {
-                c
-            };
-
-            let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-            *out = c + factor * laplacian;
-        });
+        diffuse_scalar_field(old, dst, (nx, ny, nz), cell_types_ref, factor);
     }
 }
 
@@ -214,7 +237,6 @@ pub fn diffuse_temperature(grid: &mut GasGrid, thermal_diffusivity: f32, dt: f32
     let dx = grid.dx;
     let cell_count = nx * ny * nz;
     let factor = (thermal_diffusivity * dt / (dx * dx)).min(1.0 / 6.0);
-    let idx_of = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
 
     if grid.scratch_scalar.len() != cell_count {
         grid.scratch_scalar.resize(cell_count, 0.0);
@@ -225,39 +247,7 @@ pub fn diffuse_temperature(grid: &mut GasGrid, thermal_diffusivity: f32, dt: f32
     let cell_types_ref = &grid.cell_types;
     let dst: &mut [f32] = &mut grid.temperature;
 
-    dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
-        if cell_types_ref[idx] != GasCellType::Gas {
-            *out = old[idx];
-            return;
-        }
-        let k = idx / (nx * ny);
-        let rem = idx - k * nx * ny;
-        let j = rem / nx;
-        let i = rem - j * nx;
-
-        let c = old[idx];
-        let xm = if i > 0 { old[idx_of(i - 1, j, k)] } else { c };
-        let xp = if i < nx - 1 {
-            old[idx_of(i + 1, j, k)]
-        } else {
-            c
-        };
-        let ym = if j > 0 { old[idx_of(i, j - 1, k)] } else { c };
-        let yp = if j < ny - 1 {
-            old[idx_of(i, j + 1, k)]
-        } else {
-            c
-        };
-        let zm = if k > 0 { old[idx_of(i, j, k - 1)] } else { c };
-        let zp = if k < nz - 1 {
-            old[idx_of(i, j, k + 1)]
-        } else {
-            c
-        };
-
-        let laplacian = xm + xp + ym + yp + zm + zp - 6.0 * c;
-        *out = c + factor * laplacian;
-    });
+    diffuse_scalar_field(old, dst, (nx, ny, nz), cell_types_ref, factor);
 }
 
 // ---------------------------------------------------------------------------

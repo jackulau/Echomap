@@ -78,20 +78,26 @@ pub fn advect_concentrations(grid: &mut GasGrid, dt: f32) {
     let nz = grid.nz;
     let cell_count = nx * ny * nz;
 
-    let old_concentrations: Vec<Vec<f32>> = grid.concentrations.clone();
-
-    for (s, old_conc) in old_concentrations.iter().enumerate() {
+    // Advect each species independently. A cell reads only the pre-advect field
+    // of its OWN species, and species[s] is overwritten only after its own
+    // parallel map completes, so reading straight from `grid.concentrations[s]`
+    // is bit-identical to advecting from a full snapshot - without the old
+    // `grid.concentrations.clone()` that allocated and copied every species'
+    // entire grid on every step.
+    let species_count = grid.concentrations.len();
+    for s in 0..species_count {
+        let src = &grid.concentrations[s];
         let new_conc: Vec<f32> = (0..cell_count)
             .into_par_iter()
             .map(|idx| {
                 if grid.cell_types[idx] != GasCellType::Gas {
-                    return old_conc[idx];
+                    return src[idx];
                 }
                 let (i, j, k) = grid.idx_to_ijk(idx);
                 let pos = grid.cell_center(i, j, k);
                 let vel = grid.velocity_at(pos);
                 let back_pos = pos - vel * dt;
-                grid.interpolate_cell_centered(old_conc, back_pos)
+                grid.interpolate_cell_centered(src, back_pos)
             })
             .collect();
         grid.concentrations[s] = new_conc;
@@ -105,19 +111,22 @@ pub fn advect_temperature(grid: &mut GasGrid, dt: f32) {
     let nz = grid.nz;
     let cell_count = nx * ny * nz;
 
-    let old_temperature: Vec<f32> = grid.temperature.clone();
-
+    // Read the pre-advect field straight from `grid.temperature` in the parallel
+    // map and assign the result afterwards. The result is collected into a fresh
+    // Vec before the write-back, so the previous `grid.temperature.clone()`
+    // snapshot was a redundant full-field copy on every step.
+    let src = &grid.temperature;
     let new_temperature: Vec<f32> = (0..cell_count)
         .into_par_iter()
         .map(|idx| {
             if grid.cell_types[idx] != GasCellType::Gas {
-                return old_temperature[idx];
+                return src[idx];
             }
             let (i, j, k) = grid.idx_to_ijk(idx);
             let pos = grid.cell_center(i, j, k);
             let vel = grid.velocity_at(pos);
             let back_pos = pos - vel * dt;
-            grid.interpolate_cell_centered(&old_temperature, back_pos)
+            grid.interpolate_cell_centered(src, back_pos)
         })
         .collect();
     grid.temperature = new_temperature;

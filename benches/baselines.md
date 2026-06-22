@@ -72,3 +72,30 @@ A full integrated physics step at 60 Hz has a 16.67 ms budget. The fluid
 and gas full-step benches together dominate this budget on a 16³ grid; the
 integrated test in `tests/integrated_perf.rs` exercises the actual scenario
 grids and is the source of truth for end-to-end perf health.
+
+## Render hot path (non-gated reference)
+
+Captured with `cargo bench --bench render` on the same workstation (Apple
+Silicon, release + LTO thin). These are REFERENCE medians for the
+painter-free render per-element operations the 2D-viewport batching work
+optimised — `project_3d` (world→screen projection, called once per vertex in
+the wireframe / slice / ray-overlay / energy-grid draw loops) and
+`energy_to_color` (the acoustic-energy heatmap colour map).
+
+They are deliberately NOT enforced by `check_perf_regression.sh` (which runs
+only `--bench physics`): render correctness/throughput is already guarded by
+the `renderer_screenshots` / `renderer_smoke` visual-identity tests, and
+gating a pure microbench would only widen the perf gate's false-positive
+surface. The bench-name cells below intentionally omit `/` so the gate's
+table parser ignores them — the real Criterion id is in the notes column.
+This bench exists to *measure* per-vertex/per-cell cost and catch gross drift
+when someone touches the projection or colour-map paths.
+
+| op                              | metric | reference | notes                                                              |
+|---------------------------------|--------|-----------|--------------------------------------------------------------------|
+| render project_3d 32cubed verts | time   | 264 µs    | 32 768 projections; id `render/project_3d_32cubed` (~8 ns/vertex, ~124 Melem/s) |
+| render energy_to_color 32cubed  | time   | 49.7 µs   | 32 768 colour maps; id `render/energy_to_color_32cubed` (~1.5 ns/cell, ~659 Melem/s) |
+
+CV on capture: project_3d ~1.7%, energy_to_color ~0.15% (idle machine) — both
+well under the 5% the gated physics benches target, confirming these are
+low-variance regression *measurements*.

@@ -3271,13 +3271,20 @@ pub fn viewport_3d(
             // Governor-scaled overlay budget: a slow device (perf_work_scale
             // < 1) draws fewer ray polylines instead of dragging the frame.
             let max_draw = ray_overlay_budget(vp.perf_work_scale).min(live_paths.len());
+            // Hoist the shared stroke out of the inner loop and batch every ray
+            // segment into a single `extend` instead of one `painter.add` (and a
+            // fresh Stroke) per segment. Same Shape::line_segment per segment, so
+            // the rendered pixels are unchanged.
+            let ray_stroke = egui::Stroke::new(0.5, ray_color);
+            let mut ray_shapes: Vec<egui::Shape> = Vec::new();
             for path in &live_paths[..max_draw] {
                 for segment in path.windows(2) {
                     let p1 = project_3d(segment[0], cam, center, scale);
                     let p2 = project_3d(segment[1], cam, center, scale);
-                    painter.line_segment([p1, p2], egui::Stroke::new(0.5, ray_color));
+                    ray_shapes.push(egui::Shape::line_segment([p1, p2], ray_stroke));
                 }
             }
+            painter.extend(ray_shapes);
 
             if let Some(result) = sim.result() {
                 // Visualise the band-summed total. SimulationResult now

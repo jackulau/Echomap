@@ -7,6 +7,8 @@
 //! Only mutations driven by user UI actions should funnel through `History` —
 //! simulation ticks, agent-server pushes, and tele-op are not undoable.
 
+use std::collections::VecDeque;
+
 use glam::Vec3;
 
 use crate::scene::{AcousticMaterial, Listener, Scene, SceneObject, SoundSource};
@@ -280,9 +282,14 @@ impl SceneCommand {
 /// `past` holds commands already applied to the scene (top = most recent).
 /// `future` holds commands undone — ready to redo. Any new push clears
 /// `future`, matching standard editor semantics.
+///
+/// Both queues use `VecDeque` so the O(n) `Vec::remove(0)` eviction (which
+/// shifted every entry on every push-when-at-capacity) is replaced by an O(1)
+/// `pop_front`. With DEFAULT_CAPACITY=100 the old code did ~100 pointer moves
+/// per edit at capacity; now it is a single pointer-bump.
 pub struct History {
-    past: Vec<SceneCommand>,
-    future: Vec<SceneCommand>,
+    past: VecDeque<SceneCommand>,
+    future: VecDeque<SceneCommand>,
     capacity: usize,
 }
 
@@ -290,10 +297,11 @@ impl History {
     pub const DEFAULT_CAPACITY: usize = 100;
 
     pub fn new(capacity: usize) -> Self {
+        let cap = capacity.max(1);
         Self {
-            past: Vec::new(),
-            future: Vec::new(),
-            capacity: capacity.max(1),
+            past: VecDeque::with_capacity(cap + 1),
+            future: VecDeque::new(),
+            capacity: cap,
         }
     }
 
@@ -310,9 +318,9 @@ impl History {
             log::warn!("scene edit dropped — stale target index: {e:?}");
             return Err(e);
         }
-        self.past.push(cmd);
+        self.past.push_back(cmd);
         if self.past.len() > self.capacity {
-            self.past.remove(0);
+            self.past.pop_front(); // O(1) on VecDeque; was O(n) Vec::remove(0)
         }
         self.future.clear();
         Ok(())
@@ -321,24 +329,24 @@ impl History {
     /// Undo the most recent command. Returns the command's name (for UI hint)
     /// or `None` if there's nothing to undo / the inverse failed.
     pub fn undo(&mut self, scene: &mut Scene) -> Option<&'static str> {
-        let cmd = self.past.pop()?;
+        let cmd = self.past.pop_back()?;
         if cmd.invert().apply(scene).is_err() {
             // Stale state — drop the command rather than corrupt history.
             return None;
         }
         let name = cmd.name();
-        self.future.push(cmd);
+        self.future.push_back(cmd);
         Some(name)
     }
 
     /// Redo the most recently undone command.
     pub fn redo(&mut self, scene: &mut Scene) -> Option<&'static str> {
-        let cmd = self.future.pop()?;
+        let cmd = self.future.pop_back()?;
         if cmd.apply(scene).is_err() {
             return None;
         }
         let name = cmd.name();
-        self.past.push(cmd);
+        self.past.push_back(cmd);
         Some(name)
     }
 
@@ -352,10 +360,10 @@ impl History {
     /// Peek at the most recent applied command's name — for the status bar
     /// "Undo: <name>" affordance.
     pub fn last_action_name(&self) -> Option<&'static str> {
-        self.past.last().map(|c| c.name())
+        self.past.back().map(|c| c.name())
     }
     pub fn next_redo_name(&self) -> Option<&'static str> {
-        self.future.last().map(|c| c.name())
+        self.future.back().map(|c| c.name())
     }
 
     pub fn clear(&mut self) {

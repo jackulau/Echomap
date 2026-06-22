@@ -2126,6 +2126,50 @@ mod tests {
         assert!(sim.result().is_some());
     }
 
+    /// A worker thread that panics (e.g. trips a debug assertion on a NaN
+    /// medium property) must NOT re-panic on the thread that joins it.
+    /// `join()` has to catch the `Err` from `handle.join()` and degrade to
+    /// the terminal `Failed` phase. Without that `match` arm this test would
+    /// abort the whole process instead of failing cleanly. Drives the D6
+    /// safety path directly by injecting a panicking worker into a `Running`
+    /// phase — the only construction that reaches the join error branch.
+    #[test]
+    fn test_worker_panic_degrades_to_failed() {
+        // Keep `tx` alive so `join()` exercises its `is_finished()`-based
+        // drain/break path rather than an immediate channel disconnect.
+        let (_tx, rx) = mpsc::sync_channel::<Vec<Vec3>>(RAY_STREAM_CAPACITY);
+        let thread = thread::spawn(move || -> SimulationResult {
+            panic!("injected worker panic");
+        });
+
+        let mut sim = SimulationState {
+            phase: SimulationPhase::Running {
+                progress: Arc::new(AtomicU32::new(0)),
+                total_rays: 1,
+                cancel: Arc::new(AtomicBool::new(false)),
+                rx,
+                thread: Some(thread),
+                partial_paths: Vec::new(),
+            },
+            ..Default::default()
+        };
+
+        let finished = sim.join();
+        assert!(finished, "join() returns true once it consumes the worker");
+        assert!(
+            matches!(sim.phase, SimulationPhase::Failed),
+            "a panicked worker must leave the sim in the Failed phase, not re-panic"
+        );
+        // Failed is terminal and exposes no result and no paths.
+        assert!(sim.result().is_none(), "Failed phase exposes no result");
+        assert!(
+            sim.partial_paths().is_empty(),
+            "Failed phase exposes no paths"
+        );
+        assert_eq!(sim.progress(), 0.0, "Failed phase reports zero progress");
+        assert!(!sim.is_running(), "Failed phase is not running");
+    }
+
     /// A single ray with very high `max_bounces` and zero energy threshold
     /// would otherwise loop until it ran out of bounces. With cancel set
     /// at entry, `trace_ray_cancellable` must return within

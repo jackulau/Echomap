@@ -122,10 +122,16 @@ fn parse_all_entities(content: &str, warnings: &mut Vec<String>) -> HashMap<u32,
 fn truncate_for_message(s: &str) -> String {
     const MAX: usize = 80;
     if s.len() <= MAX {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..MAX])
+        return s.to_string();
     }
+    // Snap the cut back to a UTF-8 char boundary at or below MAX. A malformed
+    // entity record can carry a multibyte character straddling byte MAX, and
+    // slicing mid-codepoint panics ("byte index N is not a char boundary").
+    let mut end = MAX;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 fn parse_entity_line(line: &str) -> Option<(u32, StepEntity)> {

@@ -166,46 +166,68 @@ impl GasGrid {
     /// Cell centers are at (i+0.5)*dx relative to origin, so we shift by -0.5
     /// to get fractional cell coordinates before interpolating.
     pub fn interpolate_cell_centered(&self, field: &[f32], pos: Vec3) -> f32 {
-        let rel = pos - self.origin;
-        let fi = rel.x / self.dx - 0.5;
-        let fj = rel.y / self.dx - 0.5;
-        let fk = rel.z / self.dx - 0.5;
-
-        // Clamp to valid range
-        let fi = fi.clamp(0.0, (self.nx - 1) as f32);
-        let fj = fj.clamp(0.0, (self.ny - 1) as f32);
-        let fk = fk.clamp(0.0, (self.nz - 1) as f32);
-
-        let i0 = (fi.floor() as usize).min(self.nx.saturating_sub(2));
-        let j0 = (fj.floor() as usize).min(self.ny.saturating_sub(2));
-        let k0 = (fk.floor() as usize).min(self.nz.saturating_sub(2));
-        let i1 = (i0 + 1).min(self.nx - 1);
-        let j1 = (j0 + 1).min(self.ny - 1);
-        let k1 = (k0 + 1).min(self.nz - 1);
-
-        let s = fi - i0 as f32;
-        let t = fj - j0 as f32;
-        let r = fk - k0 as f32;
-
-        let c000 = field[self.idx(i0, j0, k0)];
-        let c100 = field[self.idx(i1, j0, k0)];
-        let c010 = field[self.idx(i0, j1, k0)];
-        let c110 = field[self.idx(i1, j1, k0)];
-        let c001 = field[self.idx(i0, j0, k1)];
-        let c101 = field[self.idx(i1, j0, k1)];
-        let c011 = field[self.idx(i0, j1, k1)];
-        let c111 = field[self.idx(i1, j1, k1)];
-
-        let c00 = c000 * (1.0 - s) + c100 * s;
-        let c10 = c010 * (1.0 - s) + c110 * s;
-        let c01 = c001 * (1.0 - s) + c101 * s;
-        let c11 = c011 * (1.0 - s) + c111 * s;
-
-        let c0 = c00 * (1.0 - t) + c10 * t;
-        let c1 = c01 * (1.0 - t) + c11 * t;
-
-        c0 * (1.0 - r) + c1 * r
+        interp_cc(field, self.nx, self.ny, self.nz, self.dx, self.origin, pos)
     }
+}
+
+/// Trilinear interpolation of a cell-centered scalar field, as a free function
+/// over explicit grid dimensions. Exposed (crate-internal) so the semi-Lagrangian
+/// advection loop can sample fields while holding a mutable borrow of a *different*
+/// grid field (writing `concentrations[s]` in place while reading the velocity
+/// arrays). `GasGrid::interpolate_cell_centered` delegates here, so the method and
+/// the in-place advection share one bit-identical stencil.
+///
+/// Cell centers are at (i+0.5)*dx relative to origin, so we shift by -0.5 to get
+/// fractional cell coordinates before interpolating.
+pub(crate) fn interp_cc(
+    field: &[f32],
+    nx: usize,
+    ny: usize,
+    nz: usize,
+    dx: f32,
+    origin: Vec3,
+    pos: Vec3,
+) -> f32 {
+    let rel = pos - origin;
+    let fi = rel.x / dx - 0.5;
+    let fj = rel.y / dx - 0.5;
+    let fk = rel.z / dx - 0.5;
+
+    // Clamp to valid range
+    let fi = fi.clamp(0.0, (nx - 1) as f32);
+    let fj = fj.clamp(0.0, (ny - 1) as f32);
+    let fk = fk.clamp(0.0, (nz - 1) as f32);
+
+    let i0 = (fi.floor() as usize).min(nx.saturating_sub(2));
+    let j0 = (fj.floor() as usize).min(ny.saturating_sub(2));
+    let k0 = (fk.floor() as usize).min(nz.saturating_sub(2));
+    let i1 = (i0 + 1).min(nx - 1);
+    let j1 = (j0 + 1).min(ny - 1);
+    let k1 = (k0 + 1).min(nz - 1);
+
+    let s = fi - i0 as f32;
+    let t = fj - j0 as f32;
+    let r = fk - k0 as f32;
+
+    let idx = |i: usize, j: usize, k: usize| i + nx * (j + ny * k);
+    let c000 = field[idx(i0, j0, k0)];
+    let c100 = field[idx(i1, j0, k0)];
+    let c010 = field[idx(i0, j1, k0)];
+    let c110 = field[idx(i1, j1, k0)];
+    let c001 = field[idx(i0, j0, k1)];
+    let c101 = field[idx(i1, j0, k1)];
+    let c011 = field[idx(i0, j1, k1)];
+    let c111 = field[idx(i1, j1, k1)];
+
+    let c00 = c000 * (1.0 - s) + c100 * s;
+    let c10 = c010 * (1.0 - s) + c110 * s;
+    let c01 = c001 * (1.0 - s) + c101 * s;
+    let c11 = c011 * (1.0 - s) + c111 * s;
+
+    let c0 = c00 * (1.0 - t) + c10 * t;
+    let c1 = c01 * (1.0 - t) + c11 * t;
+
+    c0 * (1.0 - r) + c1 * r
 }
 
 // ---------------------------------------------------------------------------

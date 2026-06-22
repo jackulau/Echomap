@@ -1,7 +1,7 @@
 use glam::Vec3;
 use rayon::prelude::*;
 
-use super::grid::{GasCellType, GasGrid};
+use super::grid::{interp_cc, GasCellType, GasGrid};
 
 #[cfg(test)]
 use super::grid::GasSpecies;
@@ -76,32 +76,90 @@ pub fn advect_concentrations(grid: &mut GasGrid, dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
+    let dx = grid.dx;
+    let origin = grid.origin;
     let cell_count = nx * ny * nz;
 
-    // Advect each species independently. A cell reads only the pre-advect field
-    // of its OWN species, and species[s] is overwritten only after its own
-    // parallel map completes, so reading straight from `grid.concentrations[s]`
-    // is bit-identical to advecting from a full snapshot - without the old
-    // `grid.concentrations.clone()` that allocated and copied every species'
-    // entire grid on every step.
+    if grid.scratch_scalar.len() != cell_count {
+        grid.scratch_scalar.resize(cell_count, 0.0);
+    }
+
+    // Advect each species in place. Swap its field into the grid-owned scratch
+    // buffer (which then holds the OLD values to read from) and write advected
+    // values straight back into `concentrations[s]`. Velocity and cell-type
+    // arrays are disjoint fields, so the parallel write needs no per-step heap
+    // allocation - mirroring `diffuse_concentrations`. Species are independent,
+    // so processing them sequentially through the shared scratch buffer is
+    // bit-identical to advecting from a full snapshot.
     let species_count = grid.concentrations.len();
     for s in 0..species_count {
-        let src = &grid.concentrations[s];
-        let new_conc: Vec<f32> = (0..cell_count)
-            .into_par_iter()
-            .map(|idx| {
-                if grid.cell_types[idx] != GasCellType::Gas {
-                    return src[idx];
-                }
-                let (i, j, k) = grid.idx_to_ijk(idx);
-                let pos = grid.cell_center(i, j, k);
-                let vel = grid.velocity_at(pos);
-                let back_pos = pos - vel * dt;
-                grid.interpolate_cell_centered(src, back_pos)
-            })
-            .collect();
-        grid.concentrations[s] = new_conc;
+        std::mem::swap(&mut grid.scratch_scalar, &mut grid.concentrations[s]);
+        advect_scalar_field(
+            &grid.scratch_scalar,
+            &mut grid.concentrations[s],
+            &grid.vel_x,
+            &grid.vel_y,
+            &grid.vel_z,
+            &grid.cell_types,
+            (nx, ny, nz),
+            dx,
+            origin,
+            dt,
+        );
     }
+}
+
+/// In-place semi-Lagrangian advection of one cell-centered scalar field.
+///
+/// Reads pre-advect values from `old`, writes advected values into `dst` (same
+/// length). Non-`Gas` cells copy their old value through. At each cell center
+/// the velocity is sampled by trilinear interpolation of `vel_x/y/z`, the
+/// position is back-traced one step, and `old` is sampled there. A free function
+/// over explicit dims so it can run in a rayon parallel loop while `dst` and the
+/// velocity arrays are disjoint borrows of the same grid - no per-step alloc.
+///
+/// Equivalent to the previous `grid.idx_to_ijk` / `cell_center` / `velocity_at`
+/// / `interpolate_cell_centered` method chain, so results are bit-identical.
+#[allow(clippy::too_many_arguments)]
+fn advect_scalar_field(
+    old: &[f32],
+    dst: &mut [f32],
+    vel_x: &[f32],
+    vel_y: &[f32],
+    vel_z: &[f32],
+    cell_types: &[GasCellType],
+    dims: (usize, usize, usize),
+    dx: f32,
+    origin: Vec3,
+    dt: f32,
+) {
+    let (nx, ny, nz) = dims;
+    dst.par_iter_mut().enumerate().for_each(|(idx, out)| {
+        if cell_types[idx] != GasCellType::Gas {
+            *out = old[idx];
+            return;
+        }
+        // (i, j, k) from flat index - matches GasGrid::idx_to_ijk.
+        let i = idx % nx;
+        let jk = idx / nx;
+        let j = jk % ny;
+        let k = jk / ny;
+        // Cell-center world position - matches GasGrid::cell_center.
+        let pos = origin
+            + Vec3::new(
+                (i as f32 + 0.5) * dx,
+                (j as f32 + 0.5) * dx,
+                (k as f32 + 0.5) * dx,
+            );
+        // Velocity at the cell center - matches GasGrid::velocity_at.
+        let vel = Vec3::new(
+            interp_cc(vel_x, nx, ny, nz, dx, origin, pos),
+            interp_cc(vel_y, nx, ny, nz, dx, origin, pos),
+            interp_cc(vel_z, nx, ny, nz, dx, origin, pos),
+        );
+        let back_pos = pos - vel * dt;
+        *out = interp_cc(old, nx, ny, nz, dx, origin, back_pos);
+    });
 }
 
 /// Semi-Lagrangian advection for the temperature field. Parallelized with rayon.
@@ -109,27 +167,30 @@ pub fn advect_temperature(grid: &mut GasGrid, dt: f32) {
     let nx = grid.nx;
     let ny = grid.ny;
     let nz = grid.nz;
+    let dx = grid.dx;
+    let origin = grid.origin;
     let cell_count = nx * ny * nz;
 
-    // Read the pre-advect field straight from `grid.temperature` in the parallel
-    // map and assign the result afterwards. The result is collected into a fresh
-    // Vec before the write-back, so the previous `grid.temperature.clone()`
-    // snapshot was a redundant full-field copy on every step.
-    let src = &grid.temperature;
-    let new_temperature: Vec<f32> = (0..cell_count)
-        .into_par_iter()
-        .map(|idx| {
-            if grid.cell_types[idx] != GasCellType::Gas {
-                return src[idx];
-            }
-            let (i, j, k) = grid.idx_to_ijk(idx);
-            let pos = grid.cell_center(i, j, k);
-            let vel = grid.velocity_at(pos);
-            let back_pos = pos - vel * dt;
-            grid.interpolate_cell_centered(src, back_pos)
-        })
-        .collect();
-    grid.temperature = new_temperature;
+    if grid.scratch_scalar.len() != cell_count {
+        grid.scratch_scalar.resize(cell_count, 0.0);
+    }
+
+    // Swap temperature into scratch (now the OLD values) and advect back into
+    // `temperature` in place - no per-step allocation, same pattern as
+    // advect_concentrations.
+    std::mem::swap(&mut grid.scratch_scalar, &mut grid.temperature);
+    advect_scalar_field(
+        &grid.scratch_scalar,
+        &mut grid.temperature,
+        &grid.vel_x,
+        &grid.vel_y,
+        &grid.vel_z,
+        &grid.cell_types,
+        (nx, ny, nz),
+        dx,
+        origin,
+        dt,
+    );
 }
 
 // ---------------------------------------------------------------------------

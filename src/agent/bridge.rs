@@ -1490,6 +1490,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bridge_rejects_invalid_robot_definition() {
+        // The AddRobot boundary must reject a malformed definition (here, a
+        // joint whose child_link indexes past the end of `links`) with an
+        // error instead of admitting it: those indices are used unchecked by
+        // FK/dynamics every frame and would otherwise panic the sim thread on
+        // untrusted agent input. `validate()` is unit-tested in isolation;
+        // this test guards the WIRING at the command boundary so a regression
+        // that drops the bridge-side check can't pass silently.
+        let (server, mut client) = create_bridge();
+        let mut manager = RobotManager::new();
+
+        // simple_arm(1) has 2 links; point a joint past the end.
+        let mut bad_def = RobotDefinition::simple_arm(1);
+        bad_def.joints[0].child_link = 99;
+
+        let handle = tokio::spawn({
+            let tx = server.tx.clone();
+            async move {
+                let srv = SimBridgeServer { tx };
+                srv.send_command(SimCommand::AddRobot {
+                    definition: bad_def,
+                    base_pose: Mat4::IDENTITY.to_cols_array(),
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        client.process_pending(&mut manager, &[]);
+        let resp = handle.await.unwrap().unwrap();
+
+        match resp {
+            SimResponse::Error { message } => assert!(
+                message.contains("invalid robot definition"),
+                "expected invalid-definition rejection, got: {message}"
+            ),
+            other => panic!("Expected Error for malformed definition, got {:?}", other),
+        }
+        // A rejected definition must never reach the manager.
+        assert!(
+            manager.robots.is_empty(),
+            "a rejected definition must not be added to the manager"
+        );
+    }
+
+    #[tokio::test]
     async fn test_bridge_step_count_increments_correctly() {
         let (server, mut client) = create_bridge();
         let mut manager = manager_with_arm();

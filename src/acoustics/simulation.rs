@@ -1015,6 +1015,40 @@ mod tests {
         }
     }
 
+    /// A degenerate zero-length segment (a == b) must return that single point
+    /// rather than computing 0/0 = NaN, which would poison the energy
+    /// accumulation that calls this. Guards the D6 fix: a regression dropping
+    /// the `len_sq <= 0.0` early return would still pass every other test
+    /// because nothing else feeds a degenerate segment.
+    #[test]
+    fn test_closest_point_on_segment_degenerate_and_clamping() {
+        let a = Vec3::new(1.0, 2.0, 3.0);
+        let got = closest_point_on_segment(a, a, Vec3::new(9.0, 9.0, 9.0));
+        assert_eq!(got, a, "degenerate segment returns its single point");
+        assert!(
+            got.is_finite(),
+            "degenerate segment must not produce NaN/Inf"
+        );
+
+        // Interior projection: a point above the centre projects to the centre.
+        let seg_a = Vec3::ZERO;
+        let seg_b = Vec3::new(2.0, 0.0, 0.0);
+        let mid = closest_point_on_segment(seg_a, seg_b, Vec3::new(1.0, 5.0, 0.0));
+        assert!((mid - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-6);
+
+        // Projection beyond an endpoint clamps to that endpoint.
+        let past = closest_point_on_segment(seg_a, seg_b, Vec3::new(10.0, 1.0, 0.0));
+        assert!(
+            (past - seg_b).length() < 1e-6,
+            "projection past b clamps to b"
+        );
+        let before = closest_point_on_segment(seg_a, seg_b, Vec3::new(-10.0, 1.0, 0.0));
+        assert!(
+            (before - seg_a).length() < 1e-6,
+            "projection before a clamps to a"
+        );
+    }
+
     /// Helper: create a small box SceneObject that acts as a water volume.
     fn water_box(pos: Vec3, size: f32) -> SceneObject {
         primitives::platform(pos, size, size, size).with_interior_medium(water())

@@ -567,8 +567,11 @@ pub fn render_fluid_slice(
         max_val = 1.0;
     }
 
-    // Draw each cell as a projected quad.
+    // Draw each cell as a projected quad. Accumulate every visible cell into a
+    // single mesh so the slice emits one draw shape and two grown buffers,
+    // instead of three small Vec allocations plus a Shape per visible cell.
     let dx = grid.dx;
+    let mut mesh = egui::Mesh::default();
     for k in 0..grid.nz {
         for i in 0..grid.nx {
             let val = sample_field(grid, i, j, k, mode);
@@ -584,38 +587,42 @@ pub fn render_fluid_slice(
             // Semi-transparent so underlying geometry is visible.
             let color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 140);
 
-            // World-space corners of this cell in the y=j plane.
+            // World-space corners of this cell in the y=j plane, projected to
+            // screen on the stack (no per-cell Vec).
             let base = grid.origin + Vec3::new(i as f32 * dx, (j as f32 + 0.5) * dx, k as f32 * dx);
-
-            let corners = [
-                base,
-                base + Vec3::new(dx, 0.0, 0.0),
-                base + Vec3::new(dx, 0.0, dx),
-                base + Vec3::new(0.0, 0.0, dx),
+            let screen = [
+                project_3d(base, camera, screen_center, scale),
+                project_3d(base + Vec3::new(dx, 0.0, 0.0), camera, screen_center, scale),
+                project_3d(base + Vec3::new(dx, 0.0, dx), camera, screen_center, scale),
+                project_3d(base + Vec3::new(0.0, 0.0, dx), camera, screen_center, scale),
             ];
 
-            let screen: Vec<egui::Pos2> = corners
-                .iter()
-                .map(|&c| project_3d(c, camera, screen_center, scale))
-                .collect();
-
             // Only draw if at least one vertex is inside the clip rect.
-            if screen.iter().any(|p| clip_rect.contains(*p)) {
-                let mesh = egui::Mesh {
-                    indices: vec![0, 1, 2, 0, 2, 3],
-                    vertices: screen
-                        .iter()
-                        .map(|&p| egui::epaint::Vertex {
-                            pos: p,
-                            uv: egui::Pos2::ZERO,
-                            color,
-                        })
-                        .collect(),
-                    texture_id: egui::TextureId::Managed(0),
-                };
-                painter.add(egui::Shape::mesh(mesh));
+            if !screen.iter().any(|p| clip_rect.contains(*p)) {
+                continue;
             }
+
+            let base_idx = mesh.vertices.len() as u32;
+            for &p in &screen {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p,
+                    uv: egui::Pos2::ZERO,
+                    color,
+                });
+            }
+            mesh.indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 1,
+                base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 3,
+            ]);
         }
+    }
+
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 
@@ -676,8 +683,11 @@ pub fn render_gas_slice(
         max_val = 1.0;
     }
 
-    // Draw each cell as a projected quad.
+    // Draw each cell as a projected quad. Accumulate every visible cell into a
+    // single mesh so the slice emits one draw shape and two grown buffers,
+    // instead of three small Vec allocations plus a Shape per visible cell.
     let dx = grid.dx;
+    let mut mesh = egui::Mesh::default();
     for k in 0..grid.nz {
         for i in 0..grid.nx {
             let val = sample_gas_field(grid, i, j, k, species_idx, mode);
@@ -693,38 +703,42 @@ pub fn render_gas_slice(
             // Semi-transparent so underlying geometry is visible.
             let color = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 140);
 
-            // World-space corners of this cell in the y=j plane.
+            // World-space corners of this cell in the y=j plane, projected to
+            // screen on the stack (no per-cell Vec).
             let base = grid.origin + Vec3::new(i as f32 * dx, (j as f32 + 0.5) * dx, k as f32 * dx);
-
-            let corners = [
-                base,
-                base + Vec3::new(dx, 0.0, 0.0),
-                base + Vec3::new(dx, 0.0, dx),
-                base + Vec3::new(0.0, 0.0, dx),
+            let screen = [
+                project_3d(base, camera, screen_center, scale),
+                project_3d(base + Vec3::new(dx, 0.0, 0.0), camera, screen_center, scale),
+                project_3d(base + Vec3::new(dx, 0.0, dx), camera, screen_center, scale),
+                project_3d(base + Vec3::new(0.0, 0.0, dx), camera, screen_center, scale),
             ];
 
-            let screen: Vec<egui::Pos2> = corners
-                .iter()
-                .map(|&c| project_3d(c, camera, screen_center, scale))
-                .collect();
-
             // Only draw if at least one vertex is inside the clip rect.
-            if screen.iter().any(|p| clip_rect.contains(*p)) {
-                let mesh = egui::Mesh {
-                    indices: vec![0, 1, 2, 0, 2, 3],
-                    vertices: screen
-                        .iter()
-                        .map(|&p| egui::epaint::Vertex {
-                            pos: p,
-                            uv: egui::Pos2::ZERO,
-                            color,
-                        })
-                        .collect(),
-                    texture_id: egui::TextureId::Managed(0),
-                };
-                painter.add(egui::Shape::mesh(mesh));
+            if !screen.iter().any(|p| clip_rect.contains(*p)) {
+                continue;
             }
+
+            let base_idx = mesh.vertices.len() as u32;
+            for &p in &screen {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p,
+                    uv: egui::Pos2::ZERO,
+                    color,
+                });
+            }
+            mesh.indices.extend_from_slice(&[
+                base_idx,
+                base_idx + 1,
+                base_idx + 2,
+                base_idx,
+                base_idx + 2,
+                base_idx + 3,
+            ]);
         }
+    }
+
+    if !mesh.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 
@@ -1083,5 +1097,119 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- slice-renderer batching --------------------------------------------
+
+    /// Run `draw` with a real offscreen egui painter and return the number of
+    /// shapes it emitted. Each `painter.add` is one `ClippedShape`, so a
+    /// correctly batched slice renderer yields exactly one shape (or zero when
+    /// nothing is visible) instead of one per cell.
+    fn count_emitted_shapes(mut draw: impl FnMut(&egui::Painter)) -> usize {
+        let ctx = egui::Context::default();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            draw(&painter);
+        });
+        output.shapes.len()
+    }
+
+    fn one_co2() -> Vec<crate::gas::grid::GasSpecies> {
+        vec![crate::gas::grid::GasSpecies {
+            name: "CO2".to_string(),
+            diffusion_coefficient: 0.1,
+            molecular_weight: 28.0,
+            density_at_stp: 1.225,
+            color: [1.0, 0.0, 0.0],
+        }]
+    }
+
+    #[test]
+    fn gas_slice_batches_visible_cells_into_one_mesh() {
+        let mut grid = GasGrid::new(4, 1, 4, 0.5, Vec3::ZERO, one_co2());
+        let idx = grid.idx(1, 0, 1);
+        grid.concentrations[0][idx] = 1.0;
+
+        let cam = Camera::default();
+        let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let center = egui::pos2(400.0, 300.0);
+
+        let n = count_emitted_shapes(|p| {
+            render_gas_slice(
+                &grid,
+                0,
+                0,
+                GasVisualizationMode::Concentration,
+                p,
+                &cam,
+                center,
+                100.0,
+                clip,
+            );
+        });
+        assert_eq!(
+            n, 1,
+            "populated gas slice must emit exactly one batched mesh"
+        );
+
+        // An all-zero slice culls every cell and must emit nothing.
+        let empty = GasGrid::new(4, 1, 4, 0.5, Vec3::ZERO, one_co2());
+        let n0 = count_emitted_shapes(|p| {
+            render_gas_slice(
+                &empty,
+                0,
+                0,
+                GasVisualizationMode::Concentration,
+                p,
+                &cam,
+                center,
+                100.0,
+                clip,
+            );
+        });
+        assert_eq!(n0, 0, "empty gas slice must emit no shapes");
+    }
+
+    #[test]
+    fn fluid_slice_batches_visible_cells_into_one_mesh() {
+        let mut grid = FluidGrid::new(4, 1, 4, 0.5, Vec3::ZERO);
+        let idx = grid.idx(1, 0, 1);
+        grid.density[idx] = 1.0;
+
+        let cam = Camera::default();
+        let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let center = egui::pos2(400.0, 300.0);
+
+        let n = count_emitted_shapes(|p| {
+            render_fluid_slice(
+                &grid,
+                0,
+                FluidVisualizationMode::Density,
+                p,
+                &cam,
+                center,
+                100.0,
+                clip,
+            );
+        });
+        assert_eq!(
+            n, 1,
+            "populated fluid slice must emit exactly one batched mesh"
+        );
+
+        let empty = FluidGrid::new(4, 1, 4, 0.5, Vec3::ZERO);
+        let n0 = count_emitted_shapes(|p| {
+            render_fluid_slice(
+                &empty,
+                0,
+                FluidVisualizationMode::Density,
+                p,
+                &cam,
+                center,
+                100.0,
+                clip,
+            );
+        });
+        assert_eq!(n0, 0, "empty fluid slice must emit no shapes");
     }
 }
